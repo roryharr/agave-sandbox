@@ -183,13 +183,28 @@ fn calculate_stake_rewards(
         return None;
     }
 
-    let rewards = points
-        .checked_mul(u128::from(point_value.rewards))
-        .unwrap()
-        .checked_div(point_value.points)
-        .unwrap();
+    let rewards = points.checked_mul(u128::from(point_value.rewards));
 
-    let rewards = u64::try_from(rewards).unwrap();
+    let rewards = match rewards {
+        // Unwrap on this division is safe, point_value.points being non zero is guaranteed above
+        Some(value) => u64::try_from(value.checked_div(point_value.points).unwrap()),
+        None => {
+            panic!(
+                "Overflowing u128 when multiplying points by rewards {} and {}",
+                points, point_value.rewards
+            )
+        }
+    };
+
+    let rewards = match rewards {
+        Ok(value) => value,
+        Err(e) => {
+            panic!(
+                "Error {}, inputs were points {}, point_value.rewards {} and point_value.points {}",
+                e, points, point_value.rewards, point_value.points
+            );
+        }
+    };
 
     // don't bother trying to split if fractional lamports got truncated
     if rewards == 0 {
@@ -607,6 +622,62 @@ mod tests {
                 null_tracer(),
                 None,
             )
+        );
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_overflow_on_umul_calculate_rewards() {
+        let mut vote_state = VoteState::default();
+
+        // assume stake.stake() is right
+        // bootstrap means fully-vested stake at epoch 0
+
+        // Set arbitrarily large values to force overflows on later calculations
+        let stake = new_stake(
+            4_000_000_000_000_000_000,
+            &Pubkey::default(),
+            &vote_state,
+            u64::MAX,
+        );
+
+        vote_state.increment_credits(0, 10_000_000_000_000_000_000);
+
+        calculate_stake_rewards(
+            0,
+            &stake,
+            &PointValue {
+                rewards: 1_000,
+                points: 1,
+            },
+            &vote_state,
+            &StakeHistory::default(),
+            null_tracer(),
+            None,
+        );
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_overflow_on_conversion_calculate_rewards() {
+        let mut vote_state = VoteState::default();
+
+        // assume stake.stake() is right
+        let stake = new_stake(1, &Pubkey::default(), &vote_state, u64::MAX);
+
+        vote_state.increment_credits(0, 10_000_000_000_000_000_000);
+
+        calculate_stake_rewards(
+            0,
+            &stake,
+            &PointValue {
+                rewards: 1_000_000_000,
+                points: 1,
+            },
+            &vote_state,
+            &StakeHistory::default(),
+            null_tracer(),
+            None,
         );
     }
 
