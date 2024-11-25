@@ -212,6 +212,31 @@ pub struct InvokeContext<'a> {
     traces: Vec<Vec<[u64; 12]>>,
 }
 
+pub fn convert(error: &EbpfError) -> InstructionError {
+    match error {
+        EbpfError::FunctionAlreadyRegistered(_) => InstructionError::ProgramFailedToComplete,
+        EbpfError::ElfError(_) => InstructionError::ProgramFailedToComplete,
+        EbpfError::AccessViolation(_,_,_,_) => InstructionError::ProgramFailedToComplete,
+        EbpfError::CallDepthExceeded => InstructionError::ProgramFailedToComplete,
+        EbpfError::ExitRootCallFrame => InstructionError::ProgramFailedToComplete,
+        EbpfError::DivideByZero => InstructionError::ProgramFailedToComplete,
+        EbpfError::DivideOverflow => InstructionError::ProgramFailedToComplete,
+        EbpfError::ExecutionOverrun => InstructionError::ProgramFailedToComplete,
+        EbpfError::CallOutsideTextSegment => InstructionError::ProgramFailedToComplete,
+        EbpfError::ExceededMaxInstructions => InstructionError::ProgramFailedToComplete,
+        EbpfError::JitNotCompiled => InstructionError::ProgramFailedToComplete,
+        EbpfError::InvalidVirtualAddress(_) => InstructionError::ProgramFailedToComplete,
+        EbpfError::InvalidMemoryRegion(_) => InstructionError::ProgramFailedToComplete,
+        EbpfError::StackAccessViolation(_access_type, _, _, _) => InstructionError::ProgramFailedToComplete,
+        EbpfError::InvalidInstruction => InstructionError::ProgramFailedToComplete,
+        EbpfError::UnsupportedInstruction => InstructionError::ProgramFailedToComplete,
+        EbpfError::ExhaustedTextSegment(_) => InstructionError::ProgramFailedToComplete,
+        EbpfError::LibcInvocationFailed(_, _vec, _) => InstructionError::ProgramFailedToComplete,
+        EbpfError::VerifierError(_verifier_error) => InstructionError::ProgramFailedToComplete,
+        EbpfError::SyscallError(_error) => InstructionError::ProgramFailedToComplete,
+    }
+}
+
 impl<'a> InvokeContext<'a> {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -580,19 +605,7 @@ impl<'a> InvokeContext<'a> {
                 Ok(())
             }
             ProgramResult::Err(ref err) => {
-                if let EbpfError::SyscallError(syscall_error) = err {
-                    if let Some(instruction_err) = syscall_error.downcast_ref::<InstructionError>()
-                    {
-                        stable_log::program_failure(&logger, &program_id, instruction_err);
-                        Err(instruction_err.clone())
-                    } else {
-                        stable_log::program_failure(&logger, &program_id, syscall_error);
-                        Err(InstructionError::ProgramFailedToComplete)
-                    }
-                } else {
-                    stable_log::program_failure(&logger, &program_id, err);
-                    Err(InstructionError::ProgramFailedToComplete)
-                }
+                Err(convert(err))
             }
         };
         let post_remaining_units = self.get_remaining();

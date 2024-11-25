@@ -1,0 +1,196 @@
+   Compiling solana-program-runtime v2.2.0 (/home/rory-ubuntu/agave/program-runtime)
+warning: unused variable: `compute_units_to_consume`
+    --> program-runtime/src/invoke_context.rs:1213:17
+     |
+1213 |             let compute_units_to_consume = match case.0 {            
+     |                 ^^^^^^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_compute_units_to_consume`
+     |
+     = note: `#[warn(unused_variables)]` on by default
+
+warning: `solana-program-runtime` (lib test) generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.15s
+     Running unittests src/lib.rs (/home/rory-ubuntu/agave/target/debug/deps/solana_program_runtime-c42c17e5054df971)
+
+running 54 tests
+thread 'loaded_programs::tests::test_assign_program_failure::new_loaded_entry_get_mock_env_programcacheentrytype_builtin_builtinprogram_new_mock_expects' panicked at program-runtime/src/loaded_programs.rs:901:33:
+Unexpected replacement of an entry
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+thread 'loaded_programs::tests::test_assign_program_failure::new_loaded_entry_get_mock_env_new_loaded_entry_get_mock_env_expects' panicked at program-runtime/src/loaded_programs.rs:901:33:
+Unexpected replacement of an entry
+thread 'loaded_programs::tests::test_assign_program_failure::new_loaded_entry_get_mock_env_programcacheentrytype_closed_expects' panicked at program-runtime/src/loaded_programs.rs:901:33:
+Unexpected replacement of an entry
+thread 'loaded_programs::tests::test_assign_program_failure::new_loaded_entry_get_mock_env_programcacheentrytype_failedverification_get_mock_env_expects' panicked at program-runtime/src/loaded_programs.rs:901:33:
+Unexpected replacement of an entry
+thread 'loaded_programs::tests::test_assign_program_failure::programcacheentrytype_builtin_builtinprogram_new_mock_new_loaded_entry_get_mock_env_expects' panicked at program-runtime/src/loaded_programs.rs:901:33:
+Unexpected replacement of an entry
+thread 'loaded_programs::tests::test_assign_program_failure::programcacheentrytype_builtin_builtinprogram_new_mock_programcacheentrytype_closed_expects' panicked at program-runtime/src/loaded_programs.rs:901:33:
+Unexpected replacement of an entry
+thread 'loaded_programs::tests::test_assign_program_failure::programcacheentrytype_builtin_builtinprogram_new_mock_programcacheentrytype_failedverification_get_mock_env_expects' panicked at program-runtime/src/loaded_programs.rs:901:33:
+Unexpected replacement of an entry
+thread 'loaded_programs::tests::test_assign_program_failure::new_loaded_entry_get_mock_env_programcacheentrytype_unloaded_get_mock_env_expects' panicked at program-runtime/src/loaded_programs.rs:901:33:
+Unexpected replacement of an entry
+thread 'loaded_programs::tests::test_assign_program_failure::programcacheentrytype_builtin_builtinprogram_new_mock_programcacheentrytype_unloaded_get_mock_env_expects' panicked at program-runtime/src/loaded_programs.rs:901:33:
+Unexpected replacement of an entry
+Attempting to invoke context with units to consume 32
+thread 'Attempting to invoke context with units to consume 32
+loaded_programs::tests::test_assign_program_failure::programcacheentrytype_closed_programcacheentrytype_builtin_builtinprogram_new_mock_expects' panicked at program-runtime/src/loaded_programs.rs:901:33:
+Unexpected replacement of an entry
+thread 'loaded_programs::tests::test_assign_program_failure::programcacheentrytype_closed_new_loaded_entry_get_mock_env_expects' panicked at program-runtime/src/loaded_programs.rs:901:33:
+Unexpected replacement of an entry
+thread 'loaded_programs::tests::test_assign_program_failure::programcacheentrytype_closed_programcacheentrytype_closed_expects' panicked at program-runtime/src/loaded_programs.rs:901:33:
+Unexpected replacement of an entry
+thread 'loaded_programs::tests::test_assign_program_failure::programcacheentrytype_closed_programcacheentrytype_failedverification_get_mock_env_expects' panicked at program-runtime/src/loaded_programs.rs:901:33:
+Unexpected replacement of an entry
+test invoke_context::tests::test_max_instruction_trace_length ... ok
+test invoke_context::tests::test_invoke_context_compute_budget ... thread 'okinvoke_context::tests::test_process_instruction
+' panicked at program-runtime/src/invoke_context.rs:1221:13:
+assertion `left == right` failed
+  left: Ok(())
+ right: Err(ProgramFailedToComplete)
+thread 'test invoke_context::tests::test_instruction_stack_height ... loaded_programs::tests::test_assign_program_failure::programcacheentrytype_closed_programcacheentrytype_unloaded_get_mock_env_expectsok' panicked at 
+program-runtime/src/loaded_programs.rs:901:33:
+Unexpected replacement of an entry
+thread 'loaded_programs::tests::test_assign_program_failure::programcacheentrytype_failedverification_get_mock_env_programcacheentrytype_builtin_builtinprogram_new_mock_expects' panicked at test loaded_programs::tests::test_assign_program_failure::new_loaded_entry_get_mock_env_programcacheentrytype_builtin_builtinprogram_new_mock_expects - should panic ... program-runtime/src/loaded_programs.rsok:
+901:33:
+Unexpected replacement of an entry
+thread 'loaded_programs::tests::test_assign_program_failure::programcacheentrytype_failedverification_get_mock_env_programcacheentrytype_failedverification_get_mock_env_expects' panicked at program-runtime/src/loaded_programs.rs:901:33:
+Unexpected replacement of an entry
+test loaded_programs::tests::test_assign_program_failure::new_loaded_entry_get_mock_env_new_loaded_entry_get_mock_env_expects - should panic ... okthread '
+loaded_programs::tests::test_assign_program_failure::programcacheentrytype_failedverification_get_mock_env_new_loaded_entry_get_mock_env_expects' panicked at program-runtime/src/loaded_programs.rs:901:33:
+Unexpected replacement of an entry
+test loaded_programs::tests::test_assign_program_failure::new_loaded_entry_get_mock_env_programcacheentrytype_closed_expects - should panic ... thread 'okloaded_programs::tests::test_assign_program_failure::programcacheentrytype_failedverification_get_mock_env_programcacheentrytype_closed_expects
+' panicked at program-runtime/src/loaded_programs.rs:901:33:
+Unexpected replacement of an entry
+thread 'test invoke_context::tests::test_process_instruction_accounts_resize_delta ... loaded_programs::tests::test_assign_program_failure::programcacheentrytype_unloaded_get_mock_env_programcacheentrytype_builtin_builtinprogram_new_mock_expectsok' panicked at 
+program-runtime/src/loaded_programs.rs:901:33:
+Unexpected replacement of an entry
+thread 'test loaded_programs::tests::test_assign_program_failure::new_loaded_entry_get_mock_env_programcacheentrytype_failedverification_get_mock_env_expects - should panic ... loaded_programs::tests::test_assign_program_failure::programcacheentrytype_failedverification_get_mock_env_programcacheentrytype_unloaded_get_mock_env_expectsok' panicked at 
+program-runtime/src/loaded_programs.rs:901:33:
+Unexpected replacement of an entry
+thread 'test loaded_programs::tests::test_assign_program_failure::programcacheentrytype_builtin_builtinprogram_new_mock_new_loaded_entry_get_mock_env_expects - should panic ... loaded_programs::tests::test_assign_program_failure::programcacheentrytype_unloaded_get_mock_env_programcacheentrytype_closed_expectsok' panicked at 
+program-runtime/src/loaded_programs.rs:901:33:
+Unexpected replacement of an entry
+thread 'loaded_programs::tests::test_assign_program_failure::programcacheentrytype_unloaded_get_mock_env_programcacheentrytype_unloaded_get_mock_env_expects' panicked at program-runtime/src/loaded_programs.rs:901:33:
+Unexpected replacement of an entry
+test loaded_programs::tests::test_assign_program_failure::programcacheentrytype_builtin_builtinprogram_new_mock_programcacheentrytype_closed_expects - should panic ... thread 'loaded_programs::tests::test_assign_program_failure::programcacheentrytype_unloaded_get_mock_env_programcacheentrytype_failedverification_get_mock_env_expects' panicked at program-runtime/src/loaded_programs.rsok:
+901:33:
+Unexpected replacement of an entry
+test loaded_programs::tests::test_assign_program_failure::programcacheentrytype_builtin_builtinprogram_new_mock_programcacheentrytype_failedverification_get_mock_env_expects - should panic ... ok
+test loaded_programs::tests::test_assign_program_failure::new_loaded_entry_get_mock_env_programcacheentrytype_unloaded_get_mock_env_expects - should panic ... ok
+test loaded_programs::tests::test_assign_program_failure::programcacheentrytype_builtin_builtinprogram_new_mock_programcacheentrytype_unloaded_get_mock_env_expects - should panic ... ok
+test loaded_programs::tests::test_assign_program_failure::programcacheentrytype_closed_programcacheentrytype_builtin_builtinprogram_new_mock_expects - should panic ... ok
+test loaded_programs::tests::test_assign_program_failure::programcacheentrytype_closed_new_loaded_entry_get_mock_env_expects - should panic ... ok
+test loaded_programs::tests::test_assign_program_failure::programcacheentrytype_closed_programcacheentrytype_closed_expects - should panic ... ok
+test loaded_programs::tests::test_assign_program_failure::programcacheentrytype_closed_programcacheentrytype_failedverification_get_mock_env_expects - should panic ... ok
+test invoke_context::tests::test_process_instruction ... FAILED
+test loaded_programs::tests::test_assign_program_failure::programcacheentrytype_closed_programcacheentrytype_unloaded_get_mock_env_expects - should panic ... ok
+test loaded_programs::tests::test_assign_program_failure::programcacheentrytype_failedverification_get_mock_env_programcacheentrytype_builtin_builtinprogram_new_mock_expects - should panic ... ok
+test loaded_programs::tests::test_assign_program_failure::programcacheentrytype_failedverification_get_mock_env_programcacheentrytype_failedverification_get_mock_env_expects - should panic ... ok
+test loaded_programs::tests::test_assign_program_failure::programcacheentrytype_failedverification_get_mock_env_new_loaded_entry_get_mock_env_expects - should panic ... ok
+test loaded_programs::tests::test_assign_program_failure::programcacheentrytype_failedverification_get_mock_env_programcacheentrytype_closed_expects - should panic ... ok
+test loaded_programs::tests::test_assign_program_failure::programcacheentrytype_unloaded_get_mock_env_programcacheentrytype_builtin_builtinprogram_new_mock_expects - should panic ... ok
+test loaded_programs::tests::test_assign_program_failure::programcacheentrytype_failedverification_get_mock_env_programcacheentrytype_unloaded_get_mock_env_expects - should panic ... ok
+test loaded_programs::tests::test_assign_program_failure::programcacheentrytype_unloaded_get_mock_env_programcacheentrytype_unloaded_get_mock_env_expects - should panic ... ok
+test loaded_programs::tests::test_assign_program_failure::programcacheentrytype_unloaded_get_mock_env_programcacheentrytype_closed_expects - should panic ... ok
+test loaded_programs::tests::test_assign_program_failure::programcacheentrytype_unloaded_get_mock_env_programcacheentrytype_failedverification_get_mock_env_expects - should panic ... ok
+test loaded_programs::tests::test_extract_nonexistent ... ok
+test loaded_programs::tests::test_assign_program_success::programcacheentrytype_builtin_builtinprogram_new_mock_programcacheentrytype_builtin_builtinprogram_new_mock_expects ... ok
+test loaded_programs::tests::test_assign_program_success::programcacheentrytype_unloaded_arc_new_builtinprogram_new_mock_new_loaded_entry_get_mock_env_expects ... ok
+test loaded_programs::tests::test_fork_prune_find_first_ancestor ... ok
+test loaded_programs::tests::test_prune_empty ... ok
+test loaded_programs::tests::test_extract_using_deployment_slot ... ok
+test loaded_programs::tests::test_prune_different_env ... ok
+test loaded_programs::tests::test_tombstone ... ok
+test loaded_programs::tests::test_prune_by_deployment_slot ... ok
+test loaded_programs::tests::test_extract_unloaded ... ok
+test mem_pool::test::test_pool ... ok
+test sysvar_cache::tests::test_sysvar_cache_preserves_bytes::epoch_schedule ... ok
+test sysvar_cache::tests::test_sysvar_cache_preserves_bytes::rent ... ok
+test sysvar_cache::tests::test_sysvar_cache_preserves_bytes::clock ... ok
+test sysvar_cache::tests::test_sysvar_cache_preserves_bytes::last_restart_slot ... ok
+test loaded_programs::tests::test_usable_entries_for_slot ... ok
+test sysvar_cache::tests::test_sysvar_cache_preserves_bytes::slot_hashes ... ok
+test loaded_programs::tests::test_fork_extract_and_prune ... ok
+test sysvar_cache::tests::test_sysvar_cache_preserves_bytes::epoch_rewards ... ok
+test loaded_programs::tests::test_usage_counter_decay ... ok
+test loaded_programs::tests::test_usage_count_of_unloaded_program ... ok
+test sysvar_cache::tests::test_sysvar_cache_preserves_bytes::stake_history ... ok
+test loaded_programs::tests::test_unloaded ... ok
+test loaded_programs::tests::test_eviction ... ok
+test loaded_programs::tests::test_random_eviction ... ok
+test loaded_programs::tests::test_fuzz_assign_program_order ... ok
+
+failures:
+
+failures:
+    invoke_context::tests::test_process_instruction
+
+test result: FAILED. 53 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.26s
+
+error: test failed, to rerun pass `--lib`
+
+running 54 tests
+Attempting to invoke context with units to consume 32
+Attempting to invoke context with units to consume 32
+test invoke_context::tests::test_max_instruction_trace_length ... ok
+test loaded_programs::tests::test_assign_program_failure::new_loaded_entry_get_mock_env_programcacheentrytype_builtin_builtinprogram_new_mock_expects - should panic ... ok
+test loaded_programs::tests::test_assign_program_failure::new_loaded_entry_get_mock_env_new_loaded_entry_get_mock_env_expects - should panic ... ok
+test invoke_context::tests::test_invoke_context_compute_budget ... ok
+test invoke_context::tests::test_instruction_stack_height ... ok
+test loaded_programs::tests::test_assign_program_failure::new_loaded_entry_get_mock_env_programcacheentrytype_failedverification_get_mock_env_expects - should panic ... ok
+test loaded_programs::tests::test_assign_program_failure::new_loaded_entry_get_mock_env_programcacheentrytype_closed_expects - should panic ... ok
+test loaded_programs::tests::test_assign_program_failure::new_loaded_entry_get_mock_env_programcacheentrytype_unloaded_get_mock_env_expects - should panic ... ok
+test loaded_programs::tests::test_assign_program_failure::programcacheentrytype_builtin_builtinprogram_new_mock_programcacheentrytype_closed_expects - should panic ... ok
+test invoke_context::tests::test_process_instruction ... FAILED
+test invoke_context::tests::test_process_instruction_accounts_resize_delta ... ok
+test loaded_programs::tests::test_assign_program_failure::programcacheentrytype_builtin_builtinprogram_new_mock_new_loaded_entry_get_mock_env_expects - should panic ... ok
+test loaded_programs::tests::test_assign_program_failure::programcacheentrytype_builtin_builtinprogram_new_mock_programcacheentrytype_failedverification_get_mock_env_expects - should panic ... ok
+test loaded_programs::tests::test_assign_program_failure::programcacheentrytype_builtin_builtinprogram_new_mock_programcacheentrytype_unloaded_get_mock_env_expects - should panic ... ok
+test loaded_programs::tests::test_assign_program_failure::programcacheentrytype_closed_new_loaded_entry_get_mock_env_expects - should panic ... ok
+test loaded_programs::tests::test_assign_program_failure::programcacheentrytype_closed_programcacheentrytype_builtin_builtinprogram_new_mock_expects - should panic ... ok
+test loaded_programs::tests::test_assign_program_failure::programcacheentrytype_closed_programcacheentrytype_closed_expects - should panic ... ok
+test loaded_programs::tests::test_assign_program_failure::programcacheentrytype_closed_programcacheentrytype_failedverification_get_mock_env_expects - should panic ... ok
+test loaded_programs::tests::test_assign_program_failure::programcacheentrytype_closed_programcacheentrytype_unloaded_get_mock_env_expects - should panic ... ok
+test loaded_programs::tests::test_assign_program_failure::programcacheentrytype_failedverification_get_mock_env_programcacheentrytype_builtin_builtinprogram_new_mock_expects - should panic ... ok
+test loaded_programs::tests::test_assign_program_failure::programcacheentrytype_failedverification_get_mock_env_programcacheentrytype_closed_expects - should panic ... ok
+test loaded_programs::tests::test_assign_program_failure::programcacheentrytype_failedverification_get_mock_env_programcacheentrytype_unloaded_get_mock_env_expects - should panic ... ok
+test loaded_programs::tests::test_assign_program_failure::programcacheentrytype_failedverification_get_mock_env_programcacheentrytype_failedverification_get_mock_env_expects - should panic ... ok
+test loaded_programs::tests::test_assign_program_failure::programcacheentrytype_failedverification_get_mock_env_new_loaded_entry_get_mock_env_expects - should panic ... ok
+test loaded_programs::tests::test_assign_program_failure::programcacheentrytype_unloaded_get_mock_env_programcacheentrytype_closed_expects - should panic ... ok
+test loaded_programs::tests::test_assign_program_failure::programcacheentrytype_unloaded_get_mock_env_programcacheentrytype_builtin_builtinprogram_new_mock_expects - should panic ... ok
+test loaded_programs::tests::test_assign_program_failure::programcacheentrytype_unloaded_get_mock_env_programcacheentrytype_unloaded_get_mock_env_expects - should panic ... ok
+test loaded_programs::tests::test_prune_empty ... ok
+test loaded_programs::tests::test_assign_program_success::programcacheentrytype_builtin_builtinprogram_new_mock_programcacheentrytype_builtin_builtinprogram_new_mock_expects ... ok
+test loaded_programs::tests::test_assign_program_failure::programcacheentrytype_unloaded_get_mock_env_programcacheentrytype_failedverification_get_mock_env_expects - should panic ... ok
+test loaded_programs::tests::test_prune_different_env ... ok
+test loaded_programs::tests::test_extract_using_deployment_slot ... ok
+test loaded_programs::tests::test_extract_nonexistent ... ok
+test loaded_programs::tests::test_prune_by_deployment_slot ... ok
+test mem_pool::test::test_pool ... ok
+test loaded_programs::tests::test_unloaded ... ok
+test loaded_programs::tests::test_usable_entries_for_slot ... ok
+test loaded_programs::tests::test_usage_counter_decay ... ok
+test sysvar_cache::tests::test_sysvar_cache_preserves_bytes::clock ... ok
+test sysvar_cache::tests::test_sysvar_cache_preserves_bytes::epoch_rewards ... ok
+test loaded_programs::tests::test_fork_extract_and_prune ... ok
+test loaded_programs::tests::test_extract_unloaded ... ok
+test loaded_programs::tests::test_usage_count_of_unloaded_program ... ok
+test loaded_programs::tests::test_tombstone ... ok
+test sysvar_cache::tests::test_sysvar_cache_preserves_bytes::epoch_schedule ... ok
+test sysvar_cache::tests::test_sysvar_cache_preserves_bytes::last_restart_slot ... ok
+test loaded_programs::tests::test_assign_program_success::programcacheentrytype_unloaded_arc_new_builtinprogram_new_mock_new_loaded_entry_get_mock_env_expects ... ok
+test loaded_programs::tests::test_fork_prune_find_first_ancestor ... ok
+test sysvar_cache::tests::test_sysvar_cache_preserves_bytes::rent ... ok
+test sysvar_cache::tests::test_sysvar_cache_preserves_bytes::slot_hashes ... ok
+test sysvar_cache::tests::test_sysvar_cache_preserves_bytes::stake_history ... ok
+test loaded_programs::tests::test_random_eviction ... ok
+test loaded_programs::tests::test_eviction ... ok
+test loaded_programs::tests::test_fuzz_assign_program_order ... ok
+
+failures:
+
+failures:
+    invoke_context::tests::test_process_instruction
+
+test result: FAILED. 53 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.23s
+
