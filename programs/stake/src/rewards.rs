@@ -183,28 +183,19 @@ fn calculate_stake_rewards(
         return None;
     }
 
-    let rewards = points.checked_mul(u128::from(point_value.rewards));
+    let rewards = points
+        .checked_mul(u128::from(point_value.rewards))
+        .expect(&format!(
+            "Rewards should fit within u128, inputs were {} and {}",
+            points, point_value.rewards
+        ));
 
-    let rewards = match rewards {
-        // Unwrap on this division is safe, point_value.points being non zero is guaranteed above
-        Some(value) => u64::try_from(value.checked_div(point_value.points).unwrap()),
-        None => {
-            panic!(
-                "Overflowing u128 when multiplying points by rewards {} and {}",
-                points, point_value.rewards
-            )
-        }
-    };
-
-    let rewards = match rewards {
-        Ok(value) => value,
-        Err(e) => {
-            panic!(
-                "Error {}, inputs were points {}, point_value.rewards {} and point_value.points {}",
-                e, points, point_value.rewards, point_value.points
-            );
-        }
-    };
+    // The unwrap is safe, as points_value.points is guaranteed to be non zero above.
+    // Expect is verifying that the result fits in u64
+    let rewards = u64::try_from(rewards.checked_div(point_value.points).unwrap()).expect(&format!(
+        "Rewards should fit within u64, inputs were {}, {} and {}",
+        points, point_value.rewards, point_value.points
+    ));
 
     // don't bother trying to split if fractional lamports got truncated
     if rewards == 0 {
@@ -246,6 +237,8 @@ mod tests {
         super::*,
         crate::{points::null_tracer, stake_state::new_stake},
         solana_sdk::{native_token, pubkey::Pubkey},
+        std::u64,
+        test_case::test_case,
     };
 
     #[test]
@@ -625,53 +618,20 @@ mod tests {
         );
     }
 
-    #[test]
-    #[should_panic]
-    fn test_overflow_on_umul_calculate_rewards() {
+    #[test_case(u64::MAX, 1_000, u64::MAX => panics "Rewards should fit within u128")]
+    #[test_case(1, u64::MAX, u64::MAX => panics "Rewards should fit within u64")]
+    fn calculate_rewards_tests(stake: u64, rewards: u64, credits: u64) {
         let mut vote_state = VoteState::default();
 
-        // assume stake.stake() is right
-        // bootstrap means fully-vested stake at epoch 0
+        let stake = new_stake(stake, &Pubkey::default(), &vote_state, u64::MAX);
 
-        // Set arbitrarily large values to force overflows on later calculations
-        let stake = new_stake(
-            4_000_000_000_000_000_000,
-            &Pubkey::default(),
-            &vote_state,
-            u64::MAX,
-        );
-
-        vote_state.increment_credits(0, 10_000_000_000_000_000_000);
+        vote_state.increment_credits(0, credits);
 
         calculate_stake_rewards(
             0,
             &stake,
             &PointValue {
-                rewards: 1_000,
-                points: 1,
-            },
-            &vote_state,
-            &StakeHistory::default(),
-            null_tracer(),
-            None,
-        );
-    }
-
-    #[test]
-    #[should_panic]
-    fn test_overflow_on_conversion_calculate_rewards() {
-        let mut vote_state = VoteState::default();
-
-        // assume stake.stake() is right
-        let stake = new_stake(1, &Pubkey::default(), &vote_state, u64::MAX);
-
-        vote_state.increment_credits(0, 10_000_000_000_000_000_000);
-
-        calculate_stake_rewards(
-            0,
-            &stake,
-            &PointValue {
-                rewards: 1_000_000_000,
+                rewards: rewards,
                 points: 1,
             },
             &vote_state,
