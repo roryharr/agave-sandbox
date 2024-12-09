@@ -2,7 +2,7 @@ use {
     solana_poh::poh_recorder::RecordTransactionsTimings,
     solana_sdk::{clock::Slot, saturating_add_assign},
     solana_timings::ExecuteTimings,
-    std::time::Instant,
+    std::{num::Saturating, time::Instant},
 };
 
 #[derive(Default, Debug)]
@@ -229,18 +229,18 @@ impl ConsumeBufferedPacketsTimings {
 #[derive(Debug, Default)]
 pub(crate) struct ProcessPacketsTimings {
     // Time spent converting packets to transactions
-    pub transactions_from_packets_us: u64,
+    pub transactions_from_packets_us: Saturating<u64>,
 
     // Time spent processing transactions
-    pub process_transactions_us: u64,
+    pub process_transactions_us: Saturating<u64>,
 
     // Time spent filtering retryable packets that were returned after transaction
     // processing
-    pub filter_retryable_packets_us: u64,
+    pub filter_retryable_packets_us: Saturating<u64>,
 
     // Time spent running the cost model in processing transactions before executing
     // transactions
-    pub cost_model_us: u64,
+    pub cost_model_us: Saturating<u64>,
 }
 
 impl ProcessPacketsTimings {
@@ -251,16 +251,16 @@ impl ProcessPacketsTimings {
             ("slot", slot as i64, i64),
             (
                 "transactions_from_packets_us",
-                self.transactions_from_packets_us,
+                self.transactions_from_packets_us.0,
                 i64
             ),
-            ("process_transactions_us", self.process_transactions_us, i64),
+            ("process_transactions_us", self.process_transactions_us.0, i64),
             (
                 "filter_retryable_packets_us",
-                self.filter_retryable_packets_us,
+                self.filter_retryable_packets_us.0,
                 i64
             ),
-            ("cost_model_us", self.cost_model_us, i64),
+            ("cost_model_us", self.cost_model_us.0, i64),
         );
     }
 }

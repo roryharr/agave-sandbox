@@ -10,7 +10,7 @@ use {
     solana_poh::poh_recorder::BankStart,
     solana_sdk::{clock::Slot, saturating_add_assign},
     solana_svm::transaction_error_metrics::*,
-    std::time::Instant,
+    std::{num::Saturating, time::Instant},
 };
 
 /// A summary of what happened to transactions passed to the processing pipeline.
@@ -762,13 +762,10 @@ impl LeaderSlotMetricsTracker {
                 *cost_model_throttled_transactions_count
             );
 
-            saturating_add_assign!(
-                leader_slot_metrics
-                    .timing_metrics
-                    .process_packets_timings
-                    .cost_model_us,
-                *cost_model_us
-            );
+            leader_slot_metrics
+                .timing_metrics
+                .process_packets_timings
+                .cost_model_us += cost_model_us;
 
             leader_slot_metrics
                 .packet_count_metrics
@@ -1056,37 +1053,28 @@ impl LeaderSlotMetricsTracker {
     // Processing packets timing metrics
     pub(crate) fn increment_transactions_from_packets_us(&mut self, us: u64) {
         if let Some(leader_slot_metrics) = &mut self.leader_slot_metrics {
-            saturating_add_assign!(
-                leader_slot_metrics
-                    .timing_metrics
-                    .process_packets_timings
-                    .transactions_from_packets_us,
-                us
-            );
+            leader_slot_metrics
+                .timing_metrics
+                .process_packets_timings
+                .transactions_from_packets_us += Saturating(us);
         }
     }
 
     pub(crate) fn increment_process_transactions_us(&mut self, us: u64) {
         if let Some(leader_slot_metrics) = &mut self.leader_slot_metrics {
-            saturating_add_assign!(
-                leader_slot_metrics
-                    .timing_metrics
-                    .process_packets_timings
-                    .process_transactions_us,
-                us
-            );
+            leader_slot_metrics
+                .timing_metrics
+                .process_packets_timings
+                .process_transactions_us += Saturating(us);
         }
     }
 
     pub(crate) fn increment_filter_retryable_packets_us(&mut self, us: u64) {
         if let Some(leader_slot_metrics) = &mut self.leader_slot_metrics {
-            saturating_add_assign!(
-                leader_slot_metrics
-                    .timing_metrics
-                    .process_packets_timings
-                    .filter_retryable_packets_us,
-                us
-            );
+            leader_slot_metrics
+                .timing_metrics
+                .process_packets_timings
+                .filter_retryable_packets_us += Saturating(us);
         }
     }
 
