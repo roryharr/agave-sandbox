@@ -17,7 +17,10 @@ use {
         saturating_add_assign,
         transaction::{self, TransactionError},
     },
-    std::sync::atomic::{AtomicU64, Ordering},
+    std::{
+        num::Saturating,
+        sync::atomic::{AtomicU64, Ordering},
+    },
 };
 
 // QosService is local to each banking thread, each instance of QosService provides services to
@@ -311,18 +314,18 @@ impl QosService {
             );
     }
 
-    pub fn accumulate_actual_execute_cu(&self, units: u64) {
+    pub fn accumulate_actual_execute_cu(&self, units: Saturating<u64>) {
         self.metrics
             .stats
             .actual_programs_execute_cu
-            .fetch_add(units, Ordering::Relaxed);
+            .fetch_add(units.0, Ordering::Relaxed);
     }
 
-    pub fn accumulate_actual_execute_time(&self, micro_sec: u64) {
+    pub fn accumulate_actual_execute_time(&self, micro_sec: Saturating<u64>) {
         self.metrics
             .stats
             .actual_execute_time_us
-            .fetch_add(micro_sec, Ordering::Relaxed);
+            .fetch_add(micro_sec.0, Ordering::Relaxed);
     }
 
     // rollup transaction cost details, eg signature_cost, write_lock_cost, data_bytes_cost and

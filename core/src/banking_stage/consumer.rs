@@ -44,6 +44,7 @@ use {
     solana_svm_transaction::svm_message::SVMMessage,
     solana_timings::ExecuteTimings,
     std::{
+        num::Saturating,
         sync::{atomic::Ordering, Arc},
         time::Instant,
     },
@@ -531,8 +532,10 @@ impl Consumer {
 
         let (cu, us) =
             Self::accumulate_execute_units_and_time(&execute_and_commit_timings.execute_timings);
-        self.qos_service.accumulate_actual_execute_cu(cu);
-        self.qos_service.accumulate_actual_execute_time(us);
+        self.qos_service
+            .accumulate_actual_execute_cu(Saturating(cu));
+        self.qos_service
+            .accumulate_actual_execute_time(Saturating(us));
 
         // reports qos service stats for this batch
         self.qos_service.report_metrics(bank.slot());
