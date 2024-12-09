@@ -1741,12 +1741,12 @@ mod tests {
         assert_eq!(
             transaction_counts,
             CommittedTransactionsCounts {
-                attempted_processing_count: transactions_len as u64,
+                attempted_processing_count: Saturating(transactions_len as u64),
                 // Both transactions should have been committed, even though one was an error,
                 // because InstructionErrors are committed
-                committed_transactions_count: 2,
-                committed_transactions_with_successful_result_count: 1,
-                processed_but_failed_commit: 0,
+                committed_transactions_count: Saturating(2),
+                committed_transactions_with_successful_result_count: Saturating(1),
+                processed_but_failed_commit: Saturating(0),
             }
         );
         assert_eq!(
@@ -1802,10 +1802,10 @@ mod tests {
         assert_eq!(
             transaction_counts,
             CommittedTransactionsCounts {
-                attempted_processing_count: transactions_len as u64,
-                committed_transactions_count: 2,
-                committed_transactions_with_successful_result_count: 2,
-                processed_but_failed_commit: 0,
+                attempted_processing_count: Saturating(transactions_len as u64),
+                committed_transactions_count: Saturating(2),
+                committed_transactions_with_successful_result_count: Saturating(2),
+                processed_but_failed_commit: Saturating(0),
             }
         );
 
@@ -1878,11 +1878,11 @@ mod tests {
             assert_eq!(
                 transaction_counts,
                 CommittedTransactionsCounts {
-                    attempted_processing_count: 1,
+                    attempted_processing_count: Saturating(1),
                     // MaxHeightReached error does not commit, should be zero here
-                    committed_transactions_count: 0,
-                    committed_transactions_with_successful_result_count: 0,
-                    processed_but_failed_commit: 1,
+                    committed_transactions_count: Saturating(0),
+                    committed_transactions_with_successful_result_count: Saturating(0),
+                    processed_but_failed_commit: Saturating(1),
                 }
             );
 

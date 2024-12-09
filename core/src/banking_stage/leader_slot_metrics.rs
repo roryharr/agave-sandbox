@@ -55,15 +55,15 @@ pub(crate) struct ProcessTransactionsSummary {
 #[derive(Debug, Default, PartialEq)]
 pub struct CommittedTransactionsCounts {
     /// Total number of transactions that were passed as candidates for processing
-    pub attempted_processing_count: u64,
+    pub attempted_processing_count: Saturating<u64>,
     /// Total number of transactions that made it into the block
-    pub committed_transactions_count: u64,
+    pub committed_transactions_count: Saturating<u64>,
     /// Total number of transactions that made it into the block where the transactions
     /// output from processing was success/no error.
-    pub committed_transactions_with_successful_result_count: u64,
+    pub committed_transactions_with_successful_result_count: Saturating<u64>,
     /// All transactions that were processed but then failed record because the
     /// slot ended
-    pub processed_but_failed_commit: u64,
+    pub processed_but_failed_commit: Saturating<u64>,
 }
 
 impl CommittedTransactionsCounts {
@@ -72,24 +72,13 @@ impl CommittedTransactionsCounts {
         transaction_counts: &LeaderProcessedTransactionCounts,
         committed: bool,
     ) {
-        saturating_add_assign!(
-            self.attempted_processing_count,
-            transaction_counts.attempted_processing_count
-        );
+        self.attempted_processing_count += transaction_counts.attempted_processing_count;
         if committed {
-            saturating_add_assign!(
-                self.committed_transactions_count,
-                transaction_counts.processed_count
-            );
-            saturating_add_assign!(
-                self.committed_transactions_with_successful_result_count,
-                transaction_counts.processed_with_successful_result_count
-            );
+            self.committed_transactions_count += transaction_counts.processed_count;
+            self.committed_transactions_with_successful_result_count +=
+                transaction_counts.processed_with_successful_result_count;
         } else {
-            saturating_add_assign!(
-                self.processed_but_failed_commit,
-                transaction_counts.processed_count
-            );
+            self.processed_but_failed_commit += transaction_counts.processed_count;
         }
     }
 }
@@ -176,19 +165,19 @@ struct LeaderSlotPacketCountMetrics {
     // total number of transactions that attempted processing in this slot. Should equal the sum
     // of `committed_transactions_count`, `retryable_errored_transaction_count`, and
     // `nonretryable_errored_transactions_count`.
-    transactions_attempted_processing_count: u64,
+    transactions_attempted_processing_count: Saturating<u64>,
 
     // total number of transactions that were executed and committed into the block
     // on this thread
-    committed_transactions_count: u64,
+    committed_transactions_count: Saturating<u64>,
 
     // total number of transactions that were executed, got a successful execution output/no error,
     // and were then committed into the block
-    committed_transactions_with_successful_result_count: u64,
+    committed_transactions_with_successful_result_count: Saturating<u64>,
 
     // total number of transactions that were not executed or failed commit, BUT were added back to the buffered
     // queue because they were retryable errors
-    retryable_errored_transaction_count: u64,
+    retryable_errored_transaction_count: Saturating<u64>,
 
     // The size of the unprocessed buffer at the end of the slot
     end_of_slot_unprocessed_buffer_len: u64,
@@ -199,7 +188,7 @@ struct LeaderSlotPacketCountMetrics {
 
     // total number of transactions that attempted execution due to some fatal error (too old, duplicate signature, etc.)
     // AND were dropped from the buffered queue
-    nonretryable_errored_transactions_count: u64,
+    nonretryable_errored_transactions_count: Saturating<u64>,
 
     // total number of transactions that were executed, but failed to be committed into the Poh stream because
     // the block ended. Some of these may be already counted in `nonretryable_errored_transactions_count` if they
@@ -306,22 +295,22 @@ impl LeaderSlotPacketCountMetrics {
             ),
             (
                 "transactions_attempted_processing_count",
-                self.transactions_attempted_processing_count,
+                self.transactions_attempted_processing_count.0,
                 i64
             ),
             (
                 "committed_transactions_count",
-                self.committed_transactions_count,
+                self.committed_transactions_count.0,
                 i64
             ),
             (
                 "committed_transactions_with_successful_result_count",
-                self.committed_transactions_with_successful_result_count,
+                self.committed_transactions_with_successful_result_count.0,
                 i64
             ),
             (
                 "retryable_errored_transaction_count",
-                self.retryable_errored_transaction_count,
+                self.retryable_errored_transaction_count.0,
                 i64
             ),
             (
@@ -331,7 +320,7 @@ impl LeaderSlotPacketCountMetrics {
             ),
             (
                 "nonretryable_errored_transactions_count",
-                self.nonretryable_errored_transactions_count,
+                self.nonretryable_errored_transactions_count.0,
                 i64
             ),
             (
@@ -696,50 +685,36 @@ impl LeaderSlotMetricsTracker {
                 ..
             } = process_transactions_summary;
 
-            saturating_add_assign!(
-                leader_slot_metrics
-                    .packet_count_metrics
-                    .transactions_attempted_processing_count,
-                transaction_counts.attempted_processing_count
-            );
+            leader_slot_metrics
+                .packet_count_metrics
+                .transactions_attempted_processing_count +=
+                transaction_counts.attempted_processing_count;
 
-            saturating_add_assign!(
-                leader_slot_metrics
-                    .packet_count_metrics
-                    .committed_transactions_count,
-                transaction_counts.committed_transactions_count
-            );
+            leader_slot_metrics
+                .packet_count_metrics
+                .committed_transactions_count += transaction_counts.committed_transactions_count;
 
-            saturating_add_assign!(
-                leader_slot_metrics
-                    .packet_count_metrics
-                    .committed_transactions_with_successful_result_count,
-                transaction_counts.committed_transactions_with_successful_result_count
-            );
+            leader_slot_metrics
+                .packet_count_metrics
+                .committed_transactions_with_successful_result_count +=
+                transaction_counts.committed_transactions_with_successful_result_count;
 
-            saturating_add_assign!(
-                leader_slot_metrics
-                    .packet_count_metrics
-                    .executed_transactions_failed_commit_count,
-                transaction_counts.processed_but_failed_commit
-            );
+            leader_slot_metrics
+                .packet_count_metrics
+                .executed_transactions_failed_commit_count +=
+                transaction_counts.processed_but_failed_commit.0;
 
-            saturating_add_assign!(
-                leader_slot_metrics
-                    .packet_count_metrics
-                    .retryable_errored_transaction_count,
-                retryable_transaction_indexes.len() as u64
-            );
+            leader_slot_metrics
+                .packet_count_metrics
+                .retryable_errored_transaction_count +=
+                Saturating(retryable_transaction_indexes.len() as u64);
 
-            saturating_add_assign!(
-                leader_slot_metrics
-                    .packet_count_metrics
-                    .nonretryable_errored_transactions_count,
-                transaction_counts
-                    .attempted_processing_count
-                    .saturating_sub(transaction_counts.committed_transactions_count)
-                    .saturating_sub(retryable_transaction_indexes.len() as u64)
-            );
+            leader_slot_metrics
+                .packet_count_metrics
+                .nonretryable_errored_transactions_count += transaction_counts
+                .attempted_processing_count
+                - transaction_counts.committed_transactions_count
+                - Saturating(retryable_transaction_indexes.len() as u64);
 
             saturating_add_assign!(
                 leader_slot_metrics
