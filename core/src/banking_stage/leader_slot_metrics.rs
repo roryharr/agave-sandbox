@@ -198,17 +198,17 @@ struct LeaderSlotPacketCountMetrics {
     // total number of transactions that were excluded from the block because there were concurrent write locks active.
     // These transactions are added back to the buffered queue and are already counted in
     // `self.retrayble_errored_transaction_count`.
-    account_lock_throttled_transactions_count: u64,
+    account_lock_throttled_transactions_count: Saturating<u64>,
 
     // total number of transactions that were excluded from the block because their write
     // account locks exceed the limit.
     // These transactions are not retried.
-    account_locks_limit_throttled_transactions_count: u64,
+    account_locks_limit_throttled_transactions_count: Saturating<u64>,
 
     // total number of transactions that were excluded from the block because they were too expensive
     // according to the cost model. These transactions are added back to the buffered queue and are
     // already counted in `self.retrayble_errored_transaction_count`.
-    cost_model_throttled_transactions_count: u64,
+    cost_model_throttled_transactions_count: Saturating<u64>,
 
     // total number of forwardsable packets that failed forwarding
     failed_forwarded_packets_count: u64,
@@ -330,17 +330,17 @@ impl LeaderSlotPacketCountMetrics {
             ),
             (
                 "account_lock_throttled_transactions_count",
-                self.account_lock_throttled_transactions_count,
+                self.account_lock_throttled_transactions_count.0,
                 i64
             ),
             (
                 "account_locks_limit_throttled_transactions_count",
-                self.account_locks_limit_throttled_transactions_count,
+                self.account_locks_limit_throttled_transactions_count.0,
                 i64
             ),
             (
                 "cost_model_throttled_transactions_count",
-                self.cost_model_throttled_transactions_count,
+                self.cost_model_throttled_transactions_count.0,
                 i64
             ),
             (
@@ -715,27 +715,20 @@ impl LeaderSlotMetricsTracker {
                 .attempted_processing_count
                 - transaction_counts.committed_transactions_count
                 - Saturating(retryable_transaction_indexes.len() as u64);
-
-            saturating_add_assign!(
+            
                 leader_slot_metrics
                     .packet_count_metrics
-                    .account_lock_throttled_transactions_count,
-                error_counters.account_in_use.0 as u64
-            );
+                    .account_lock_throttled_transactions_count +=
+                Saturating(error_counters.account_in_use.0 as u64);
 
-            saturating_add_assign!(
                 leader_slot_metrics
                     .packet_count_metrics
-                    .account_locks_limit_throttled_transactions_count,
-                error_counters.too_many_account_locks.0 as u64
-            );
+                    .account_locks_limit_throttled_transactions_count +=
+                    Saturating(error_counters.too_many_account_locks.0 as u64);            
 
-            saturating_add_assign!(
-                leader_slot_metrics
-                    .packet_count_metrics
-                    .cost_model_throttled_transactions_count,
-                *cost_model_throttled_transactions_count
-            );
+            leader_slot_metrics
+                .packet_count_metrics
+                .cost_model_throttled_transactions_count += cost_model_throttled_transactions_count;
 
             leader_slot_metrics
                 .timing_metrics
