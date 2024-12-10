@@ -182,10 +182,10 @@ impl OuterLoopTimings {
 
 #[derive(Debug, Default)]
 pub(crate) struct ProcessBufferedPacketsTimings {
-    pub make_decision_us: u64,
-    pub consume_buffered_packets_us: u64,
-    pub forward_us: u64,
-    pub forward_and_hold_us: u64,
+    pub make_decision_us: Saturating<u64>   ,
+    pub consume_buffered_packets_us: Saturating<u64>,
+    pub forward_us: Saturating<u64>,
+    pub forward_and_hold_us: Saturating<u64>,
 }
 impl ProcessBufferedPacketsTimings {
     fn report(&self, id: &str, slot: Slot) {
@@ -193,14 +193,14 @@ impl ProcessBufferedPacketsTimings {
             "banking_stage-leader_slot_process_buffered_packets_timings",
             "id" => id,
             ("slot", slot as i64, i64),
-            ("make_decision_us", self.make_decision_us as i64, i64),
+            ("make_decision_us", self.make_decision_us.0 as i64, i64),
             (
                 "consume_buffered_packets_us",
-                self.consume_buffered_packets_us as i64,
+                self.consume_buffered_packets_us.0 as i64,
                 i64
             ),
-            ("forward_us", self.forward_us as i64, i64),
-            ("forward_and_hold_us", self.forward_and_hold_us as i64, i64),
+            ("forward_us", self.forward_us.0 as i64, i64),
+            ("forward_and_hold_us", self.forward_and_hold_us.0 as i64, i64),
         );
     }
 }
@@ -208,7 +208,7 @@ impl ProcessBufferedPacketsTimings {
 #[derive(Debug, Default)]
 pub(crate) struct ConsumeBufferedPacketsTimings {
     // Time spent processing transactions
-    pub process_packets_transactions_us: u64,
+    pub process_packets_transactions_us: Saturating<u64>,
 }
 
 impl ConsumeBufferedPacketsTimings {
@@ -219,7 +219,7 @@ impl ConsumeBufferedPacketsTimings {
             ("slot", slot as i64, i64),
             (
                 "process_packets_transactions_us",
-                self.process_packets_transactions_us as i64,
+                self.process_packets_transactions_us.0 as i64,
                 i64
             ),
         );

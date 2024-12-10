@@ -959,62 +959,48 @@ impl LeaderSlotMetricsTracker {
 
     // Processing buffer timing metrics
     pub(crate) fn increment_make_decision_us(&mut self, us: u64) {
-        if let Some(leader_slot_metrics) = &mut self.leader_slot_metrics {
-            saturating_add_assign!(
+        if let Some(leader_slot_metrics) = &mut self.leader_slot_metrics {            
                 leader_slot_metrics
                     .timing_metrics
                     .process_buffered_packets_timings
-                    .make_decision_us,
-                us
-            );
+                    .make_decision_us += us;
         }
     }
 
     pub(crate) fn increment_consume_buffered_packets_us(&mut self, us: u64) {
-        if let Some(leader_slot_metrics) = &mut self.leader_slot_metrics {
-            saturating_add_assign!(
+        if let Some(leader_slot_metrics) = &mut self.leader_slot_metrics {            
                 leader_slot_metrics
                     .timing_metrics
                     .process_buffered_packets_timings
-                    .consume_buffered_packets_us,
-                us
-            );
+                    .consume_buffered_packets_us += us;
         }
     }
 
     pub(crate) fn increment_forward_us(&mut self, us: u64) {
-        if let Some(leader_slot_metrics) = &mut self.leader_slot_metrics {
-            saturating_add_assign!(
+        if let Some(leader_slot_metrics) = &mut self.leader_slot_metrics {            
                 leader_slot_metrics
                     .timing_metrics
                     .process_buffered_packets_timings
-                    .forward_us,
-                us
-            );
+                    .forward_us += us;
         }
     }
 
     pub(crate) fn increment_forward_and_hold_us(&mut self, us: u64) {
-        if let Some(leader_slot_metrics) = &mut self.leader_slot_metrics {
-            saturating_add_assign!(
+        if let Some(leader_slot_metrics) = &mut self.leader_slot_metrics {            
                 leader_slot_metrics
                     .timing_metrics
                     .process_buffered_packets_timings
-                    .forward_and_hold_us,
-                us
-            );
+                    .forward_and_hold_us += us;            
         }
     }
 
     pub(crate) fn increment_process_packets_transactions_us(&mut self, us: u64) {
-        if let Some(leader_slot_metrics) = &mut self.leader_slot_metrics {
-            saturating_add_assign!(
-                leader_slot_metrics
+        if let Some(leader_slot_metrics) = &mut self.leader_slot_metrics {            
+            leader_slot_metrics
                     .timing_metrics
                     .consume_buffered_packets_timings
-                    .process_packets_transactions_us,
-                us
-            );
+                    .process_packets_transactions_us += us
+                
         }
     }
 
