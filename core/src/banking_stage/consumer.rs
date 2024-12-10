@@ -569,7 +569,7 @@ impl Consumer {
                     collect_token_balances(bank, batch, &mut pre_balance_info.mint_decimals)
             }
         });
-        execute_and_commit_timings.collect_balances_us = collect_balances_us;
+        execute_and_commit_timings.collect_balances_us = Saturating(collect_balances_us);
 
         let min_max = batch
             .sanitized_transactions()
@@ -640,7 +640,7 @@ impl Consumer {
                     transaction_account_lock_limit: Some(bank.get_transaction_account_lock_limit()),
                 }
             ));
-        execute_and_commit_timings.load_execute_us = load_execute_us;
+        execute_and_commit_timings.load_execute_us = Saturating(load_execute_us);
 
         let LoadAndExecuteTransactionsOutput {
             processing_results,
@@ -668,12 +668,12 @@ impl Consumer {
                 .collect_vec());
 
         let (freeze_lock, freeze_lock_us) = measure_us!(bank.freeze_lock());
-        execute_and_commit_timings.freeze_lock_us = freeze_lock_us;
+        execute_and_commit_timings.freeze_lock_us = Saturating(freeze_lock_us);
 
         let (record_transactions_summary, record_us) = measure_us!(self
             .transaction_recorder
             .record_transactions(bank.slot(), processed_transactions));
-        execute_and_commit_timings.record_us = record_us;
+        execute_and_commit_timings.record_us = Saturating(record_us);
 
         let RecordTransactionsSummary {
             result: record_transactions_result,
