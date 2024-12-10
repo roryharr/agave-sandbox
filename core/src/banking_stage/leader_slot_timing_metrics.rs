@@ -182,7 +182,7 @@ impl OuterLoopTimings {
 
 #[derive(Debug, Default)]
 pub(crate) struct ProcessBufferedPacketsTimings {
-    pub make_decision_us: Saturating<u64>   ,
+    pub make_decision_us: Saturating<u64>,
     pub consume_buffered_packets_us: Saturating<u64>,
     pub forward_us: Saturating<u64>,
     pub forward_and_hold_us: Saturating<u64>,

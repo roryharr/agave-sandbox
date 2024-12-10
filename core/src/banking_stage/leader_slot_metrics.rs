@@ -553,10 +553,10 @@ impl LeaderSlotMetrics {
 #[derive(Debug, Default)]
 pub(crate) struct VotePacketCountMetrics {
     // How many votes ingested from gossip were dropped
-    dropped_gossip_votes: u64,
+    dropped_gossip_votes: Saturating<u64>,
 
     // How many votes ingested from tpu were dropped
-    dropped_tpu_votes: u64,
+    dropped_tpu_votes: Saturating<u64>,
 }
 
 impl VotePacketCountMetrics {
@@ -569,8 +569,8 @@ impl VotePacketCountMetrics {
             "banking_stage-vote_packet_counts",
             "id" => id,
             ("slot", slot, i64),
-            ("dropped_gossip_votes", self.dropped_gossip_votes, i64),
-            ("dropped_tpu_votes", self.dropped_tpu_votes, i64)
+            ("dropped_gossip_votes", self.dropped_gossip_votes.0, i64),
+            ("dropped_tpu_votes", self.dropped_tpu_votes.0, i64)
         );
     }
 }
@@ -715,16 +715,16 @@ impl LeaderSlotMetricsTracker {
                 .attempted_processing_count
                 - transaction_counts.committed_transactions_count
                 - Saturating(retryable_transaction_indexes.len() as u64);
-            
-                leader_slot_metrics
-                    .packet_count_metrics
-                    .account_lock_throttled_transactions_count +=
+
+            leader_slot_metrics
+                .packet_count_metrics
+                .account_lock_throttled_transactions_count +=
                 Saturating(error_counters.account_in_use.0 as u64);
 
-                leader_slot_metrics
-                    .packet_count_metrics
-                    .account_locks_limit_throttled_transactions_count +=
-                    Saturating(error_counters.too_many_account_locks.0 as u64);            
+            leader_slot_metrics
+                .packet_count_metrics
+                .account_locks_limit_throttled_transactions_count +=
+                Saturating(error_counters.too_many_account_locks.0 as u64);
 
             leader_slot_metrics
                 .packet_count_metrics
@@ -959,48 +959,47 @@ impl LeaderSlotMetricsTracker {
 
     // Processing buffer timing metrics
     pub(crate) fn increment_make_decision_us(&mut self, us: u64) {
-        if let Some(leader_slot_metrics) = &mut self.leader_slot_metrics {            
-                leader_slot_metrics
-                    .timing_metrics
-                    .process_buffered_packets_timings
-                    .make_decision_us += us;
+        if let Some(leader_slot_metrics) = &mut self.leader_slot_metrics {
+            leader_slot_metrics
+                .timing_metrics
+                .process_buffered_packets_timings
+                .make_decision_us += us;
         }
     }
 
     pub(crate) fn increment_consume_buffered_packets_us(&mut self, us: u64) {
-        if let Some(leader_slot_metrics) = &mut self.leader_slot_metrics {            
-                leader_slot_metrics
-                    .timing_metrics
-                    .process_buffered_packets_timings
-                    .consume_buffered_packets_us += us;
+        if let Some(leader_slot_metrics) = &mut self.leader_slot_metrics {
+            leader_slot_metrics
+                .timing_metrics
+                .process_buffered_packets_timings
+                .consume_buffered_packets_us += us;
         }
     }
 
     pub(crate) fn increment_forward_us(&mut self, us: u64) {
-        if let Some(leader_slot_metrics) = &mut self.leader_slot_metrics {            
-                leader_slot_metrics
-                    .timing_metrics
-                    .process_buffered_packets_timings
-                    .forward_us += us;
+        if let Some(leader_slot_metrics) = &mut self.leader_slot_metrics {
+            leader_slot_metrics
+                .timing_metrics
+                .process_buffered_packets_timings
+                .forward_us += us;
         }
     }
 
     pub(crate) fn increment_forward_and_hold_us(&mut self, us: u64) {
-        if let Some(leader_slot_metrics) = &mut self.leader_slot_metrics {            
-                leader_slot_metrics
-                    .timing_metrics
-                    .process_buffered_packets_timings
-                    .forward_and_hold_us += us;            
+        if let Some(leader_slot_metrics) = &mut self.leader_slot_metrics {
+            leader_slot_metrics
+                .timing_metrics
+                .process_buffered_packets_timings
+                .forward_and_hold_us += us;
         }
     }
 
     pub(crate) fn increment_process_packets_transactions_us(&mut self, us: u64) {
-        if let Some(leader_slot_metrics) = &mut self.leader_slot_metrics {            
+        if let Some(leader_slot_metrics) = &mut self.leader_slot_metrics {
             leader_slot_metrics
-                    .timing_metrics
-                    .consume_buffered_packets_timings
-                    .process_packets_transactions_us += us
-                
+                .timing_metrics
+                .consume_buffered_packets_timings
+                .process_packets_transactions_us += us
         }
     }
 
@@ -1034,23 +1033,17 @@ impl LeaderSlotMetricsTracker {
 
     pub(crate) fn increment_dropped_gossip_vote_count(&mut self, count: u64) {
         if let Some(leader_slot_metrics) = &mut self.leader_slot_metrics {
-            saturating_add_assign!(
-                leader_slot_metrics
-                    .vote_packet_count_metrics
-                    .dropped_gossip_votes,
-                count
-            );
+            leader_slot_metrics
+                .vote_packet_count_metrics
+                .dropped_gossip_votes += Saturating(count);
         }
     }
 
     pub(crate) fn increment_dropped_tpu_vote_count(&mut self, count: u64) {
         if let Some(leader_slot_metrics) = &mut self.leader_slot_metrics {
-            saturating_add_assign!(
-                leader_slot_metrics
-                    .vote_packet_count_metrics
-                    .dropped_tpu_votes,
-                count
-            );
+            leader_slot_metrics
+                .vote_packet_count_metrics
+                .dropped_tpu_votes += Saturating(count);
         }
     }
 }
