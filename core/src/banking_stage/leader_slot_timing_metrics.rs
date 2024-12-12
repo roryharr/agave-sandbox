@@ -1,18 +1,16 @@
 use {
-    solana_poh::poh_recorder::RecordTransactionsTimings,
-    solana_sdk::clock::Slot,
-    solana_timings::ExecuteTimings,
-    std::{num::Saturating, time::Instant},
+    solana_poh::poh_recorder::RecordTransactionsTimings, solana_sdk::clock::Slot,
+    solana_timings::ExecuteTimings, std::time::Instant,
 };
 
 #[derive(Default, Debug)]
 pub struct LeaderExecuteAndCommitTimings {
-    pub collect_balances_us: Saturating<u64>,
-    pub load_execute_us: Saturating<u64>,
-    pub freeze_lock_us: Saturating<u64>,
-    pub record_us: Saturating<u64>,
-    pub commit_us: Saturating<u64>,
-    pub find_and_send_votes_us: Saturating<u64>,
+    pub collect_balances_us: u64,
+    pub load_execute_us: u64,
+    pub freeze_lock_us: u64,
+    pub record_us: u64,
+    pub commit_us: u64,
+    pub find_and_send_votes_us: u64,
     pub record_transactions_timings: RecordTransactionsTimings,
     pub execute_timings: ExecuteTimings,
 }
@@ -35,14 +33,14 @@ impl LeaderExecuteAndCommitTimings {
             "banking_stage-leader_slot_execute_and_commit_timings",
             "id" => id,
             ("slot", slot as i64, i64),
-            ("collect_balances_us", self.collect_balances_us.0 as i64, i64),
-            ("load_execute_us", self.load_execute_us.0 as i64, i64),
-            ("freeze_lock_us", self.freeze_lock_us.0 as i64, i64),
-            ("record_us", self.record_us.0 as i64, i64),
-            ("commit_us", self.commit_us.0 as i64, i64),
+            ("collect_balances_us", self.collect_balances_us as i64, i64),
+            ("load_execute_us", self.load_execute_us as i64, i64),
+            ("freeze_lock_us", self.freeze_lock_us as i64, i64),
+            ("record_us", self.record_us as i64, i64),
+            ("commit_us", self.commit_us as i64, i64),
             (
                 "find_and_send_votes_us",
-                self.find_and_send_votes_us.0 as i64,
+                self.find_and_send_votes_us as i64,
                 i64
             ),
         );
@@ -182,10 +180,10 @@ impl OuterLoopTimings {
 
 #[derive(Debug, Default)]
 pub(crate) struct ProcessBufferedPacketsTimings {
-    pub make_decision_us: Saturating<u64>,
-    pub consume_buffered_packets_us: Saturating<u64>,
-    pub forward_us: Saturating<u64>,
-    pub forward_and_hold_us: Saturating<u64>,
+    pub make_decision_us: u64,
+    pub consume_buffered_packets_us: u64,
+    pub forward_us: u64,
+    pub forward_and_hold_us: u64,
 }
 impl ProcessBufferedPacketsTimings {
     fn report(&self, id: &str, slot: Slot) {
@@ -193,14 +191,14 @@ impl ProcessBufferedPacketsTimings {
             "banking_stage-leader_slot_process_buffered_packets_timings",
             "id" => id,
             ("slot", slot as i64, i64),
-            ("make_decision_us", self.make_decision_us.0 as i64, i64),
+            ("make_decision_us", self.make_decision_us as i64, i64),
             (
                 "consume_buffered_packets_us",
-                self.consume_buffered_packets_us.0 as i64,
+                self.consume_buffered_packets_us as i64,
                 i64
             ),
-            ("forward_us", self.forward_us.0 as i64, i64),
-            ("forward_and_hold_us", self.forward_and_hold_us.0 as i64, i64),
+            ("forward_us", self.forward_us as i64, i64),
+            ("forward_and_hold_us", self.forward_and_hold_us as i64, i64),
         );
     }
 }
@@ -208,7 +206,7 @@ impl ProcessBufferedPacketsTimings {
 #[derive(Debug, Default)]
 pub(crate) struct ConsumeBufferedPacketsTimings {
     // Time spent processing transactions
-    pub process_packets_transactions_us: Saturating<u64>,
+    pub process_packets_transactions_us: u64,
 }
 
 impl ConsumeBufferedPacketsTimings {
@@ -219,7 +217,7 @@ impl ConsumeBufferedPacketsTimings {
             ("slot", slot as i64, i64),
             (
                 "process_packets_transactions_us",
-                self.process_packets_transactions_us.0 as i64,
+                self.process_packets_transactions_us as i64,
                 i64
             ),
         );
@@ -229,18 +227,18 @@ impl ConsumeBufferedPacketsTimings {
 #[derive(Debug, Default)]
 pub(crate) struct ProcessPacketsTimings {
     // Time spent converting packets to transactions
-    pub transactions_from_packets_us: Saturating<u64>,
+    pub transactions_from_packets_us: u64,
 
     // Time spent processing transactions
-    pub process_transactions_us: Saturating<u64>,
+    pub process_transactions_us: u64,
 
     // Time spent filtering retryable packets that were returned after transaction
     // processing
-    pub filter_retryable_packets_us: Saturating<u64>,
+    pub filter_retryable_packets_us: u64,
 
     // Time spent running the cost model in processing transactions before executing
     // transactions
-    pub cost_model_us: Saturating<u64>,
+    pub cost_model_us: u64,
 }
 
 impl ProcessPacketsTimings {
@@ -251,16 +249,16 @@ impl ProcessPacketsTimings {
             ("slot", slot as i64, i64),
             (
                 "transactions_from_packets_us",
-                self.transactions_from_packets_us.0,
+                self.transactions_from_packets_us,
                 i64
             ),
-            ("process_transactions_us", self.process_transactions_us.0, i64),
+            ("process_transactions_us", self.process_transactions_us, i64),
             (
                 "filter_retryable_packets_us",
-                self.filter_retryable_packets_us.0,
+                self.filter_retryable_packets_us,
                 i64
             ),
-            ("cost_model_us", self.cost_model_us.0, i64),
+            ("cost_model_us", self.cost_model_us, i64),
         );
     }
 }

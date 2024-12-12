@@ -299,28 +299,28 @@ impl ConsumeWorkerMetrics {
     ) {
         self.timing_metrics
             .collect_balances_us
-            .fetch_add(collect_balances_us.0, Ordering::Relaxed);
+            .fetch_add(*collect_balances_us, Ordering::Relaxed);
         self.timing_metrics
             .load_execute_us_min
-            .fetch_min(load_execute_us.0, Ordering::Relaxed);
+            .fetch_min(*load_execute_us, Ordering::Relaxed);
         self.timing_metrics
             .load_execute_us_max
-            .fetch_max(load_execute_us.0, Ordering::Relaxed);
+            .fetch_max(*load_execute_us, Ordering::Relaxed);
         self.timing_metrics
             .load_execute_us
-            .fetch_add(load_execute_us.0, Ordering::Relaxed);
+            .fetch_add(*load_execute_us, Ordering::Relaxed);
         self.timing_metrics
             .freeze_lock_us
-            .fetch_add(freeze_lock_us.0, Ordering::Relaxed);
+            .fetch_add(*freeze_lock_us, Ordering::Relaxed);
         self.timing_metrics
             .record_us
-            .fetch_add(record_us.0, Ordering::Relaxed);
+            .fetch_add(*record_us, Ordering::Relaxed);
         self.timing_metrics
             .commit_us
-            .fetch_add(commit_us.0, Ordering::Relaxed);
+            .fetch_add(*commit_us, Ordering::Relaxed);
         self.timing_metrics
             .find_and_send_votes_us
-            .fetch_add(find_and_send_votes_us.0, Ordering::Relaxed);
+            .fetch_add(*find_and_send_votes_us, Ordering::Relaxed);
         self.timing_metrics
             .num_batches_processed
             .fetch_add(1, Ordering::Relaxed);

@@ -23,7 +23,7 @@ use {
     solana_transaction_status::{
         token_balances::TransactionTokenBalancesSet, TransactionTokenBalance,
     },
-    std::{collections::HashMap, num::Saturating, sync::Arc},
+    std::{collections::HashMap, sync::Arc},
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -88,7 +88,7 @@ impl Committer {
             processed_counts,
             &mut execute_and_commit_timings.execute_timings,
         ));
-        execute_and_commit_timings.commit_us = Saturating(commit_time_us);
+        execute_and_commit_timings.commit_us = commit_time_us;
 
         let commit_transaction_statuses = commit_results
             .iter()
@@ -122,7 +122,7 @@ impl Committer {
             self.prioritization_fee_cache
                 .update(bank, processed_transactions.into_iter());
         });
-        execute_and_commit_timings.find_and_send_votes_us = Saturating(find_and_send_votes_us);
+        execute_and_commit_timings.find_and_send_votes_us = find_and_send_votes_us;
         (commit_time_us, commit_transaction_statuses)
     }
 
