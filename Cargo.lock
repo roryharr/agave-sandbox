@@ -197,7 +197,7 @@ dependencies = [
  "clap 2.33.3",
  "crossbeam-channel",
  "csv",
- "dashmap",
+ "dashmap 5.5.3",
  "futures 0.3.31",
  "histogram",
  "itertools 0.12.1",
@@ -1968,6 +1968,18 @@ dependencies = [
 [[package]]
 name = "dashmap"
 version = "5.5.3"
+dependencies = [
+ "cfg-if 1.0.0",
+ "hashbrown 0.14.3",
+ "lock_api",
+ "once_cell",
+ "parking_lot_core 0.9.8",
+ "rayon",
+]
+
+[[package]]
+name = "dashmap"
+version = "5.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "978747c1d849a7d2ee5e8adc0159961c48fb7e5db2f06af6723b80123bb53856"
 dependencies = [
@@ -1976,7 +1988,6 @@ dependencies = [
  "lock_api",
  "once_cell",
  "parking_lot_core 0.9.8",
- "rayon",
 ]
 
 [[package]]
@@ -2777,7 +2788,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "68a7f542ee6b35af73b06abc0dad1c1bae89964e4e253bc4b587b91c9637867b"
 dependencies = [
  "cfg-if 1.0.0",
- "dashmap",
+ "dashmap 5.5.3 (registry+https://github.com/rust-lang/crates.io-index)",
  "futures 0.3.31",
  "futures-timer",
  "no-std-compat",
@@ -5761,7 +5772,7 @@ version = "2.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0e56dd856803e253c8f298af3f4d7eb0ae5e23a737252cd90bb4f3b435033b2d"
 dependencies = [
- "dashmap",
+ "dashmap 5.5.3 (registry+https://github.com/rust-lang/crates.io-index)",
  "futures 0.3.31",
  "lazy_static",
  "log",
@@ -6149,7 +6160,7 @@ dependencies = [
  "bzip2",
  "criterion",
  "crossbeam-channel",
- "dashmap",
+ "dashmap 5.5.3",
  "index_list",
  "indexmap 2.7.1",
  "itertools 0.12.1",
@@ -6869,7 +6880,7 @@ dependencies = [
  "async-trait",
  "bincode",
  "crossbeam-channel",
- "dashmap",
+ "dashmap 5.5.3",
  "futures 0.3.31",
  "futures-util",
  "indexmap 2.7.1",
@@ -7126,7 +7137,7 @@ dependencies = [
  "bytes",
  "chrono",
  "crossbeam-channel",
- "dashmap",
+ "dashmap 5.5.3",
  "etcd-client",
  "fs_extra",
  "futures 0.3.31",
@@ -7942,7 +7953,7 @@ dependencies = [
  "chrono-humanize",
  "criterion",
  "crossbeam-channel",
- "dashmap",
+ "dashmap 5.5.3",
  "eager",
  "fs_extra",
  "futures 0.3.31",
@@ -8868,7 +8879,7 @@ dependencies = [
  "bincode",
  "bs58",
  "crossbeam-channel",
- "dashmap",
+ "dashmap 5.5.3",
  "itertools 0.12.1",
  "jsonrpc-core",
  "jsonrpc-core-client",
@@ -9086,7 +9097,7 @@ dependencies = [
  "bytemuck",
  "bzip2",
  "crossbeam-channel",
- "dashmap",
+ "dashmap 5.5.3",
  "dir-diff",
  "ed25519-dalek",
  "flate2",
@@ -9653,7 +9664,7 @@ dependencies = [
  "async-channel",
  "bytes",
  "crossbeam-channel",
- "dashmap",
+ "dashmap 5.5.3",
  "futures 0.3.31",
  "futures-util",
  "governor",
@@ -10373,7 +10384,7 @@ dependencies = [
  "aquamarine",
  "assert_matches",
  "crossbeam-channel",
- "dashmap",
+ "dashmap 5.5.3",
  "derive-where",
  "lazy_static",
  "log",
@@ -10434,7 +10445,7 @@ dependencies = [
  "bytes",
  "clap 2.33.3",
  "crossbeam-channel",
- "dashmap",
+ "dashmap 5.5.3",
  "futures 0.3.31",
  "futures-util",
  "governor",

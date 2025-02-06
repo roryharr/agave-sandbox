@@ -32,6 +32,10 @@ pub struct SlotCacheInner {
     unique_account_writes_size: AtomicU64,
     size: AtomicU64,
     total_size: Arc<AtomicU64>,
+    shard_write_collision: AtomicU64,
+    shard_write_total: AtomicU64,
+    shard_read_collision: AtomicU64,
+    shard_read_total: AtomicU64,
     is_frozen: AtomicBool,
 }
 
@@ -58,6 +62,26 @@ impl SlotCacheInner {
                 i64
             ),
             (
+                "shard_write_collision",
+                self.shard_write_collision.load(Ordering::Relaxed),
+                i64
+            ),
+            (
+                "shard_write_total",
+                self.shard_write_total.load(Ordering::Relaxed),
+                i64
+            ),
+            (
+                "shard_read_collision",
+                self.shard_read_collision.load(Ordering::Relaxed),
+                i64
+            ),
+            (
+                "shard_read_total",
+                self.shard_read_total.load(Ordering::Relaxed),
+                i64
+            ),
+            (
                 "unique_account_writes_size",
                 self.unique_account_writes_size.load(Ordering::Relaxed),
                 i64
@@ -73,7 +97,11 @@ impl SlotCacheInner {
             hash: SeqLock::new(None),
             pubkey: *pubkey,
         });
-        if let Some(old) = self.cache.insert(*pubkey, item.clone()) {
+
+        let (input, collision) = self.cache.insert_report_shard_collision(*pubkey, item.clone());
+        if let Some(old) = input {
+            self.shard_write_total.fetch_add(1, Ordering::Relaxed);
+            self.shard_write_collision.fetch_add(collision.try_into().unwrap(), Ordering::Relaxed);
             self.same_account_writes.fetch_add(1, Ordering::Relaxed);
             self.same_account_writes_size
                 .fetch_add(data_len, Ordering::Relaxed);
@@ -91,6 +119,8 @@ impl SlotCacheInner {
                 }
             }
         } else {
+            self.shard_write_total.fetch_add(1, Ordering::Relaxed);
+            self.shard_write_collision.fetch_add(collision.try_into().unwrap(), Ordering::Relaxed);
             self.size.fetch_add(data_len, Ordering::Relaxed);
             self.total_size.fetch_add(data_len, Ordering::Relaxed);
             self.unique_account_writes_size
@@ -100,12 +130,10 @@ impl SlotCacheInner {
     }
 
     pub fn get_cloned(&self, pubkey: &Pubkey) -> Option<CachedAccount> {
-        self.cache
-            .get(pubkey)
-            // 1) Maybe can eventually use a Cow to avoid a clone on every read
-            // 2) Popping is only safe if it's guaranteed that only
-            //    replay/banking threads are reading from the AccountsDb
-            .map(|account_ref| account_ref.value().clone())
+        let (s, a) = self.cache.get_report_shard_collision(pubkey);
+        self.shard_read_total.fetch_add(1, Ordering::Relaxed);
+        self.shard_read_collision.fetch_add(a.try_into().unwrap(), Ordering::Relaxed);
+        s.map(|account_ref| account_ref.value().clone())
     }
 
     pub fn mark_slot_frozen(&self) {
@@ -175,6 +203,10 @@ impl AccountsCache {
             size: AtomicU64::default(),
             total_size: Arc::clone(&self.total_size),
             is_frozen: AtomicBool::default(),
+            shard_write_collision: AtomicU64::default(),
+            shard_write_total: AtomicU64::default(),
+            shard_read_collision: AtomicU64::default(),
+            shard_read_total: AtomicU64::default(),
         })
     }
     fn unique_account_writes_size(&self) -> u64 {
