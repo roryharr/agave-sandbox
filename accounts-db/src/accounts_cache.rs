@@ -3,7 +3,6 @@ use {
     ahash::RandomState as AHashRandomState,
     dashmap::DashMap,
     seqlock::SeqLock,
-    solana_nohash_hasher::BuildNoHashHasher,
     solana_pubkey::Pubkey,
     solana_sdk::{
         account::{AccountSharedData, ReadableAccount},
@@ -24,6 +23,7 @@ pub type SlotCache = Arc<SlotCacheInner>;
 // Set to 8192 to reduce shard collision rate
 // Must be power of 2.
 const ACCOUNTS_CACHE_INNER_NUM_SHARDS: usize = 8192;
+const NUM_WRITE_CACHE_SLOTS: u64 = 256;
 
 #[derive(Debug)]
 pub struct SlotCacheInner {
@@ -32,16 +32,8 @@ pub struct SlotCacheInner {
     same_account_writes_size: AtomicU64,
     unique_account_writes_size: AtomicU64,
     size: AtomicU64,
-    total_size: Arc<AtomicU64>,
     is_frozen: AtomicBool,
-}
-
-impl Drop for SlotCacheInner {
-    fn drop(&mut self) {
-        // broader cache no longer holds our size in memory
-        self.total_size
-            .fetch_sub(self.size.load(Ordering::Relaxed), Ordering::Relaxed);
-    }
+    slot: AtomicU64,
 }
 
 impl SlotCacheInner {
@@ -67,14 +59,14 @@ impl SlotCacheInner {
         );
     }
 
-    pub fn insert(&self, pubkey: &Pubkey, account: AccountSharedData) -> CachedAccount {
+    pub fn insert(&self, pubkey: &Pubkey, account: AccountSharedData) -> (CachedAccount, i64) {
         let data_len = account.data().len() as u64;
         let item = Arc::new(CachedAccountInner {
             account,
             hash: SeqLock::new(None),
             pubkey: *pubkey,
         });
-        if let Some(old) = self.cache.insert(*pubkey, item.clone()) {
+        let size_change: i64 = if let Some(old) = self.cache.insert(*pubkey, item.clone()) {
             self.same_account_writes.fetch_add(1, Ordering::Relaxed);
             self.same_account_writes_size
                 .fetch_add(data_len, Ordering::Relaxed);
@@ -83,21 +75,21 @@ impl SlotCacheInner {
             let grow = data_len.saturating_sub(old_len);
             if grow > 0 {
                 self.size.fetch_add(grow, Ordering::Relaxed);
-                self.total_size.fetch_add(grow, Ordering::Relaxed);
+                grow as i64
             } else {
                 let shrink = old_len.saturating_sub(data_len);
                 if shrink > 0 {
                     self.size.fetch_sub(shrink, Ordering::Relaxed);
-                    self.total_size.fetch_sub(shrink, Ordering::Relaxed);
                 }
+                -(shrink as i64)
             }
         } else {
             self.size.fetch_add(data_len, Ordering::Relaxed);
-            self.total_size.fetch_add(data_len, Ordering::Relaxed);
             self.unique_account_writes_size
                 .fetch_add(data_len, Ordering::Relaxed);
-        }
-        item
+            data_len as i64
+        };
+        (item, size_change)
     }
 
     pub fn get_cloned(&self, pubkey: &Pubkey) -> Option<CachedAccount> {
@@ -156,40 +148,47 @@ impl CachedAccountInner {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct AccountsCache {
-    cache: DashMap<Slot, SlotCache, BuildNoHashHasher<Slot>>,
+    cache: [SlotCache; NUM_WRITE_CACHE_SLOTS as usize],
     // Queue of potentially unflushed roots. Random eviction + cache too large
     // could have triggered a flush of this slot already
     maybe_unflushed_roots: RwLock<BTreeSet<Slot>>,
     max_flushed_root: AtomicU64,
-    total_size: Arc<AtomicU64>,
+    total_size: AtomicU64,
+    num_slots: AtomicU64,
+}
+
+impl Default for AccountsCache {
+    fn default() -> AccountsCache {
+        AccountsCache {
+            maybe_unflushed_roots: RwLock::default(),
+            max_flushed_root: AtomicU64::default(),
+            num_slots: AtomicU64::default(),
+            total_size: AtomicU64::default(),
+            cache: std::array::from_fn(|_| {
+                Arc::new(SlotCacheInner {
+                    cache: DashMap::with_hasher_and_shard_amount(
+                        AHashRandomState::default(),
+                        ACCOUNTS_CACHE_INNER_NUM_SHARDS,
+                    ),
+                    same_account_writes: AtomicU64::default(),
+                    same_account_writes_size: AtomicU64::default(),
+                    unique_account_writes_size: AtomicU64::default(),
+                    size: AtomicU64::default(),
+                    is_frozen: AtomicBool::default(),
+                    slot: AtomicU64::new(u64::MAX),
+                })
+            }),
+        }
+    }
 }
 
 impl AccountsCache {
-    pub fn new_inner(&self) -> SlotCache {
-        Arc::new(SlotCacheInner {
-            cache: DashMap::with_hasher_and_shard_amount(
-                AHashRandomState::default(),
-                ACCOUNTS_CACHE_INNER_NUM_SHARDS,
-            ),
-            same_account_writes: AtomicU64::default(),
-            same_account_writes_size: AtomicU64::default(),
-            unique_account_writes_size: AtomicU64::default(),
-            size: AtomicU64::default(),
-            total_size: Arc::clone(&self.total_size),
-            is_frozen: AtomicBool::default(),
-        })
-    }
     fn unique_account_writes_size(&self) -> u64 {
         self.cache
             .iter()
-            .map(|item| {
-                let slot_cache = item.value();
-                slot_cache
-                    .unique_account_writes_size
-                    .load(Ordering::Relaxed)
-            })
+            .map(|item| item.unique_account_writes_size.load(Ordering::Relaxed))
             .sum()
     }
     pub fn size(&self) -> u64 {
@@ -203,7 +202,7 @@ impl AccountsCache {
                 self.maybe_unflushed_roots.read().unwrap().len(),
                 i64
             ),
-            ("num_slots", self.cache.len(), i64),
+            ("num_slots", self.num_slots.load(Ordering::Relaxed), i64),
             (
                 "total_unique_writes_size",
                 self.unique_account_writes_size(),
@@ -214,18 +213,14 @@ impl AccountsCache {
     }
 
     pub fn store(&self, slot: Slot, pubkey: &Pubkey, account: AccountSharedData) -> CachedAccount {
-        let slot_cache = self.slot_cache(slot).unwrap_or_else(||
-            // DashMap entry.or_insert() returns a RefMut, essentially a write lock,
-            // which is dropped after this block ends, minimizing time held by the lock.
-            // However, we still want to persist the reference to the `SlotStores` behind
-            // the lock, hence we clone it out, (`SlotStores` is an Arc so is cheap to clone).
-            self
-                .cache
-                .entry(slot)
-                .or_insert_with(|| self.new_inner())
-                .clone());
-
-        slot_cache.insert(pubkey, account)
+        let slot_cache = self.slot_cache_create(slot);
+        let (ret, size) = slot_cache.unwrap().insert(pubkey, account);
+        if size >= 0 {
+            self.total_size.fetch_add(size as u64, Ordering::Relaxed);
+        } else {
+            self.total_size.fetch_sub((-size) as u64, Ordering::Relaxed);
+        }
+        ret
     }
 
     pub fn load(&self, slot: Slot, pubkey: &Pubkey) -> Option<CachedAccount> {
@@ -233,12 +228,38 @@ impl AccountsCache {
             .and_then(|slot_cache| slot_cache.get_cloned(pubkey))
     }
 
-    pub fn remove_slot(&self, slot: Slot) -> Option<SlotCache> {
-        self.cache.remove(&slot).map(|(_, slot_cache)| slot_cache)
+    pub fn remove_slot(&self, slot: Slot) {
+        if let Some(cache_slot) = self.slot_cache(slot)
+        {            
+            self.total_size.fetch_sub(
+                cache_slot.size.load(Ordering::Relaxed),
+                Ordering::Relaxed,
+            );
+            cache_slot.cache.clear();
+            cache_slot.slot.store(u64::MAX, Ordering::Relaxed);
+            self.num_slots.fetch_sub(1, Ordering::Relaxed);            
+        }
+    }
+
+    pub fn slot_cache_create(&self, slot: Slot) -> Option<SlotCache> {
+        
+        let cache_slot = self.cache[(slot % NUM_WRITE_CACHE_SLOTS) as usize].clone();
+        if cache_slot.slot.load(Ordering::Relaxed) != slot
+        {
+            cache_slot.slot.store(slot, Ordering::Relaxed);
+            self.num_slots.fetch_add(1, Ordering::Relaxed);
+        }
+        Some(cache_slot)
     }
 
     pub fn slot_cache(&self, slot: Slot) -> Option<SlotCache> {
-        self.cache.get(&slot).map(|result| result.value().clone())
+        if self.cache[(slot % NUM_WRITE_CACHE_SLOTS) as usize]
+            .slot.load(Ordering::Relaxed) == slot            
+        {
+            Some(self.cache[(slot % NUM_WRITE_CACHE_SLOTS) as usize].clone())
+        } else {
+            None
+        }
     }
 
     pub fn add_root(&self, root: Slot) {
@@ -261,25 +282,25 @@ impl AccountsCache {
     }
 
     pub fn contains_any_slots(&self, max_slot_inclusive: Slot) -> bool {
-        self.cache.iter().any(|e| e.key() <= &max_slot_inclusive)
+        self.cache
+            .iter()
+            .any(|e| e.slot.load(Ordering::Relaxed) <= max_slot_inclusive)
     }
 
     pub fn cached_frozen_slots(&self) -> Vec<Slot> {
         self.cache
             .iter()
-            .filter_map(|item| {
-                let (slot, slot_cache) = item.pair();
-                slot_cache.is_frozen().then_some(*slot)
-            })
+            .enumerate()
+            .filter_map(|(index, item)| item.is_frozen().then_some(index as u64))
             .collect()
     }
 
     pub fn contains(&self, slot: Slot) -> bool {
-        self.cache.contains_key(&slot)
+        self.slot_cache(slot).is_some()                
     }
 
     pub fn num_slots(&self) -> usize {
-        self.cache.len()
+        self.num_slots.load(Ordering::Relaxed) as usize
     }
 
     pub fn fetch_max_flush_root(&self) -> Slot {
@@ -294,39 +315,6 @@ impl AccountsCache {
 #[cfg(test)]
 pub mod tests {
     use super::*;
-
-    impl AccountsCache {
-        // Removes slots less than or equal to `max_root`. Only safe to pass in a rooted slot,
-        // otherwise the slot removed could still be undergoing replay!
-        pub fn remove_slots_le(&self, max_root: Slot) -> Vec<(Slot, SlotCache)> {
-            let mut removed_slots = vec![];
-            self.cache.retain(|slot, slot_cache| {
-                let should_remove = *slot <= max_root;
-                if should_remove {
-                    removed_slots.push((*slot, slot_cache.clone()))
-                }
-                !should_remove
-            });
-            removed_slots
-        }
-    }
-
-    #[test]
-    fn test_remove_slots_le() {
-        let cache = AccountsCache::default();
-        // Cache is empty, should return nothing
-        assert!(cache.remove_slots_le(1).is_empty());
-        let inserted_slot = 0;
-        cache.store(
-            inserted_slot,
-            &Pubkey::new_unique(),
-            AccountSharedData::new(1, 0, &Pubkey::default()),
-        );
-        // If the cache is told the size limit is 0, it should return the one slot
-        let removed = cache.remove_slots_le(0);
-        assert_eq!(removed.len(), 1);
-        assert_eq!(removed[0].0, inserted_slot);
-    }
 
     #[test]
     fn test_cached_frozen_slots() {

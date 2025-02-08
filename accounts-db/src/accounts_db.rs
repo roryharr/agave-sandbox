@@ -5730,7 +5730,7 @@ impl AccountsDb {
                 remove_cache_elapsed.stop();
                 remove_cache_elapsed_across_slots += remove_cache_elapsed.as_us();
                 // Nobody else should have removed the slot cache entry yet
-                assert!(self.accounts_cache.remove_slot(*remove_slot).is_some());
+                self.accounts_cache.remove_slot(*remove_slot);
             } else {
                 self.purge_slot_storage(*remove_slot, purge_stats);
             }
@@ -6421,7 +6421,7 @@ impl AccountsDb {
         // atomic switch from the cache to storage.
         // There is some racy condition for existing readers who just has read exactly while
         // flushing. That case is handled by retry_to_get_account_accessor()
-        assert!(self.accounts_cache.remove_slot(slot).is_some());
+        //self.accounts_cache.remove_slot(slot);
 
         // Add `accounts` to uncleaned_pubkeys since we know they were written
         // to a storage and should be visited by `clean`.
@@ -6465,7 +6465,12 @@ impl AccountsDb {
                 // still exists in the cache, we know the slot cannot be removed
                 // by any other threads past this point. We are now responsible for
                 // flushing this slot.
-                self.do_flush_slot_cache(slot, &slot_cache, should_flush_f, max_clean_root)
+                let flush_stats =
+                    self.do_flush_slot_cache(slot, &slot_cache, should_flush_f, max_clean_root);
+
+                self.accounts_cache.remove_slot(slot);
+
+                flush_stats
             });
 
             // Nobody else should have been purging this slot, so should not have been removed

@@ -3553,7 +3553,7 @@ fn test_flush_accounts_cache() {
 
 fn max_cache_slots() -> usize {
     // this used to be the limiting factor - used here to facilitate tests.
-    200
+    63
 }
 
 #[test]
