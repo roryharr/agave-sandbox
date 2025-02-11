@@ -6502,6 +6502,8 @@ impl AccountsDb {
             0
         };
 
+        let mut calc_store_cache_time = Measure::start("calc_store_cache_time");
+
         let (account_infos, cached_accounts) = (0..accounts_and_meta_to_store.len())
             .map(|index| {
                 let txn = txs.map(|txs| *txs.get(index).expect("txs must be present if provided"));
@@ -6531,6 +6533,11 @@ impl AccountsDb {
         if let Some(ref sender) = &self.sender_bg_hasher {
             let _ = sender.send(cached_accounts);
         };
+
+        calc_store_cache_time.stop();
+        self.stats
+            .calc_store_cache_time
+            .fetch_add(calc_store_cache_time.as_us(), Ordering::Relaxed);
 
         account_infos
     }
@@ -8220,6 +8227,11 @@ impl AccountsDb {
                 (
                     "purge_exact_count",
                     self.stats.purge_exact_count.swap(0, Ordering::Relaxed),
+                    i64
+                ),
+                (
+                    "calc_store_cache_time",
+                    self.stats.calc_store_cache_time.swap(0, Ordering::Relaxed),
                     i64
                 ),
             );
