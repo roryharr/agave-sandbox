@@ -1215,7 +1215,7 @@ pub struct AccountStorageEntry {
     /// and as a zero lamport single ref. If this happens, we will count this
     /// account as "dead" twice. However, this should be fine. It just makes
     /// shrink more likely to visit this storage.
-    zero_lamport_single_ref_offsets: RwLock<IntSet<Offset>>,
+    zero_lamport_count: AtomicUsize,
 }
 
 impl AccountStorageEntry {
@@ -1236,7 +1236,7 @@ impl AccountStorageEntry {
             accounts,
             count_and_status: SeqLock::new((0, AccountStorageStatus::Available)),
             alive_bytes: AtomicUsize::new(0),
-            zero_lamport_single_ref_offsets: RwLock::default(),
+            zero_lamport_count: AtomicUsize::new(0),
         }
     }
 
@@ -1254,7 +1254,7 @@ impl AccountStorageEntry {
             count_and_status: SeqLock::new(*count_and_status),
             alive_bytes: AtomicUsize::new(self.alive_bytes()),
             accounts,
-            zero_lamport_single_ref_offsets: RwLock::default(),
+            zero_lamport_count: AtomicUsize::new(0),
         })
     }
 
@@ -1270,7 +1270,7 @@ impl AccountStorageEntry {
             accounts,
             count_and_status: SeqLock::new((0, AccountStorageStatus::Available)),
             alive_bytes: AtomicUsize::new(0),
-            zero_lamport_single_ref_offsets: RwLock::default(),
+            zero_lamport_count: AtomicUsize::new(0),
         }
     }
 
@@ -1309,15 +1309,14 @@ impl AccountStorageEntry {
 
     /// Return true if offset is "new" and inserted successfully. Otherwise,
     /// return false if the offset exists already.
-    fn insert_zero_lamport_single_ref_account_offset(&self, offset: usize) -> bool {
-        let mut zero_lamport_single_ref_offsets =
-            self.zero_lamport_single_ref_offsets.write().unwrap();
-        zero_lamport_single_ref_offsets.insert(offset)
+    fn insert_zero_lamport_single_ref_account_offset(&self) -> bool {
+        self.zero_lamport_count.fetch_add(1, Ordering::Relaxed);
+        true
     }
 
     /// Return the number of zero_lamport_single_ref accounts in the storage.
     fn num_zero_lamport_single_ref_accounts(&self) -> usize {
-        self.zero_lamport_single_ref_offsets.read().unwrap().len()
+        self.zero_lamport_count.load(Ordering::Relaxed)
     }
 
     /// Return the "alive_bytes" minus "zero_lamport_single_ref_accounts bytes".
@@ -3855,10 +3854,7 @@ impl AccountsDb {
                         if slot_list.len() == 1 && ref_count == 2 {
                             if let Some((slot_alive, acct_info)) = slot_list.first() {
                                 if acct_info.is_zero_lamport() && !acct_info.is_cached() {
-                                    self.zero_lamport_single_ref_found(
-                                        *slot_alive,
-                                        acct_info.offset(),
-                                    );
+                                    self.zero_lamport_single_ref_found(*slot_alive);
                                 }
                             }
                         }
@@ -3887,7 +3883,7 @@ impl AccountsDb {
     }
 
     /// This function handles the case when zero lamport single ref accounts are found during shrink.
-    pub(crate) fn zero_lamport_single_ref_found(&self, slot: Slot, offset: Offset) {
+    pub(crate) fn zero_lamport_single_ref_found(&self, slot: Slot) {
         // This function can be called when a zero lamport single ref account is
         // found during shrink. Therefore, we can't use the safe version of
         // `get_slot_storage_entry` because shrink_in_progress map may not be
@@ -3904,21 +3900,13 @@ impl AccountsDb {
             .storage
             .get_slot_storage_entry_shrinking_in_progress_ok(slot)
         {
-            if store.insert_zero_lamport_single_ref_account_offset(offset) {
+            if store.insert_zero_lamport_single_ref_account_offset() {
                 // this wasn't previously marked as zero lamport single ref
                 self.shrink_stats
                     .num_zero_lamport_single_ref_accounts_found
                     .fetch_add(1, Ordering::Relaxed);
 
-                if store.num_zero_lamport_single_ref_accounts() == store.count() {
-                    // all accounts in this storage can be dead
-                    self.dirty_stores.entry(slot).or_insert(store);
-                    self.shrink_stats
-                        .num_dead_slots_added_to_clean
-                        .fetch_add(1, Ordering::Relaxed);
-                } else if Self::is_shrinking_productive(&store)
-                    && self.is_candidate_for_shrink(&store)
-                {
+                if Self::is_shrinking_productive(&store) && self.is_candidate_for_shrink(&store) {
                     // this store might be eligible for shrinking now
                     let is_new = self.shrink_candidate_slots.lock().unwrap().insert(slot);
                     if is_new {
@@ -7899,10 +7887,7 @@ impl AccountsDb {
                             if slot_list.len() == 1 && ref_count == 2 {
                                 if let Some((slot_alive, acct_info)) = slot_list.first() {
                                     if acct_info.is_zero_lamport() && !acct_info.is_cached() {
-                                        self.zero_lamport_single_ref_found(
-                                            *slot_alive,
-                                            acct_info.offset(),
-                                        );
+                                        self.zero_lamport_single_ref_found(*slot_alive);
                                     }
                                 }
                             }
@@ -9038,7 +9023,7 @@ impl AccountsDb {
                     assert!(!account_info.is_cached());
                     if account_info.is_zero_lamport() {
                         count += 1;
-                        self.zero_lamport_single_ref_found(*slot_alive, account_info.offset());
+                        self.zero_lamport_single_ref_found(*slot_alive);
                     }
                 }
                 AccountsIndexScanResult::OnlyKeepInMemoryIfDirty
