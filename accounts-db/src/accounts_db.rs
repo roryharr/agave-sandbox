@@ -6236,6 +6236,7 @@ impl AccountsDb {
                 "accounts_db-flush_accounts_cache_aggressively",
                 ("num_flushed", flush_stats.num_flushed.0, i64),
                 ("num_purged", flush_stats.num_purged.0, i64),
+                ("num_zero_lamports_purged", flush_stats.num_zero_lamports_purged.0, i64),
                 ("total_flush_size", flush_stats.total_size.0, i64),
                 ("total_cache_size", self.accounts_cache.size(), i64),
                 ("total_frozen_slots", excess_slot_count, i64),
@@ -6391,11 +6392,22 @@ impl AccountsDb {
                     &_pubkeys_removed_from_accounts_index,
                     HandleReclaims::ProcessDeadSlots(&_purge_stats),
                 );
-
-                if should_flush && account.lamports() > 0 {
-                    flush_stats.total_size += aligned_stored_size(account.data().len()) as u64;
-                    flush_stats.num_flushed += 1;
-                    Some((key, account))
+                
+                if should_flush {
+                    if account.lamports() > 0 {
+                        flush_stats.total_size += aligned_stored_size(account.data().len()) as u64;
+                        flush_stats.num_flushed += 1;
+                        Some((key, account))
+                    }
+                    else
+                    {
+                        // Handle zero lamport accounts here
+                        // Hopefully this counter increases
+                        pubkey_to_slot_set.push((*key, slot));
+                        flush_stats.num_purged += 1;
+                        flush_stats.num_zero_lamports_purged += 1;
+                        None
+                    }
                 } else {
                     // If we don't flush, we have to remove the entry from the
                     // index, since it's equivalent to purging
