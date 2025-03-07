@@ -4608,6 +4608,7 @@ fn run_flush_rooted_accounts_cache(should_clean: bool) {
             // All these other slots have been cleaned before flush
             std::iter::once(keys[*slot as usize]).collect::<HashSet<Pubkey>>()
         };
+        println!("Checking slots for slot {}", slot);
         assert_eq!(slot_accounts, expected_accounts);
     }
 }

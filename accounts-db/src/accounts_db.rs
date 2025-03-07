@@ -23,6 +23,8 @@ mod scan_account_storage;
 pub mod stats;
 pub mod tests;
 
+use std::u64::MAX;
+
 #[cfg(feature = "dev-context-only-utils")]
 use qualifier_attr::qualifiers;
 use {
@@ -6293,6 +6295,12 @@ impl AccountsDb {
             self.max_clean_root(requested_flush_root)
         });
 
+        let max_clean_root = match max_clean_root
+        {
+            Some(max_clean_root) => max_clean_root,
+            None => MAX,
+        };        
+
         let mut written_accounts = HashSet::new();
 
         // If `should_clean` is None, then`should_flush_f` is also None, which will cause
@@ -6318,9 +6326,29 @@ impl AccountsDb {
         // outdated updates in earlier roots
         let mut num_roots_flushed = 0;
         let mut flush_stats = FlushStats::default();
-        for &root in flushed_roots.iter().rev() {
+        for &root in flushed_roots.iter().rev() {            
+            if &root > &max_clean_root
+            {                
+                continue;
+            }
             if let Some(stats) =
-                self.flush_slot_cache_with_clean(root, should_flush_f.as_mut(), max_clean_root)
+                    self.flush_slot_cache_with_clean(root, should_flush_f.as_mut())
+            {
+                num_roots_flushed += 1;
+                flush_stats.accumulate(&stats);
+            }
+        }
+
+        for &root in flushed_roots.iter() {
+            should_flush_f = None;            
+            if &root <= &max_clean_root
+            {
+                
+                continue;
+            }
+            println!("Actually doing someting {}\n", &root);
+            if let Some(stats) =
+                    self.flush_slot_cache_with_clean(root, should_flush_f.as_mut())
             {
                 num_roots_flushed += 1;
                 flush_stats.accumulate(&stats);
@@ -6347,21 +6375,12 @@ impl AccountsDb {
         slot: Slot,
         slot_cache: &SlotCache,
         mut should_flush_f: Option<&mut impl FnMut(&Pubkey, &AccountSharedData) -> bool>,
-        max_clean_root: Option<Slot>,
     ) -> FlushStats {
         let mut flush_stats = FlushStats::default();
         let iter_items: Vec<_> = slot_cache.iter().collect();
         let mut pubkey_to_slot_set: Vec<(Pubkey, Slot)> = vec![];
-        if should_flush_f.is_some() {
-            if let Some(max_clean_root) = max_clean_root {
-                if slot > max_clean_root {
-                    // Only if the root is greater than the `max_clean_root` do we
-                    // have to prevent cleaning, otherwise, just default to `should_flush_f`
-                    // for any slots <= `max_clean_root`
-                    should_flush_f = None;
-                }
-            }
-        }
+        //let mut reclaims = Vec::new();
+        //let mut purged_older_pubkeys: HashSet<(Slot, Pubkey)> = HashSet::new();
 
         let accounts: Vec<(&Pubkey, &AccountSharedData)> = iter_items
             .iter()
@@ -6372,26 +6391,28 @@ impl AccountsDb {
                     .as_mut()
                     .map(|should_flush_f| should_flush_f(key, account))
                     .unwrap_or(true);
-
-                let mut reclaims = Vec::new();
-                let mut _pubkeys_removed_from_accounts_index = HashSet::new();
-                let mut _purge_stats = PurgeStats::default();
-                let mut _purged_stored_account_slots = HashMap::new();
-                let purged_older_pubkeys =
-                    self.accounts_index.purge_older(key, slot, &mut reclaims);
-
-                self.unref_accounts(
-                    purged_older_pubkeys,
-                    &mut _purged_stored_account_slots,
-                    &_pubkeys_removed_from_accounts_index,
-                );
-                self.handle_reclaims(
-                    (!reclaims.is_empty()).then(|| reclaims.iter()),
-                    None,
-                    false,
-                    &_pubkeys_removed_from_accounts_index,
-                    HandleReclaims::ProcessDeadSlots(&_purge_stats),
-                );
+            
+                    //purged_older_pubkeys.extend(
+                    //self.accounts_index.purge_older(key, slot, &mut reclaims));
+                    let mut reclaims = Vec::new();
+                    let mut _pubkeys_removed_from_accounts_index = HashSet::new();
+                    let mut _purge_stats = PurgeStats::default();
+                    let mut _purged_stored_account_slots = HashMap::new();
+                    let purged_older_pubkeys =
+                        self.accounts_index.purge_older(key, slot, &mut reclaims);
+    
+                    self.unref_accounts(
+                        purged_older_pubkeys,
+                        &mut _purged_stored_account_slots,
+                        &_pubkeys_removed_from_accounts_index,
+                    );
+                    self.handle_reclaims(
+                        (!reclaims.is_empty()).then(|| reclaims.iter()),
+                        None,
+                        false,
+                        &_pubkeys_removed_from_accounts_index,
+                        HandleReclaims::ProcessDeadSlots(&_purge_stats),
+                    );
                 
                 if should_flush {
                     if account.lamports() > 0 {
@@ -6442,6 +6463,23 @@ impl AccountsDb {
             self.reopen_storage_as_readonly_shrinking_in_progress_ok(slot);
         }
 
+        //let mut _pubkeys_removed_from_accounts_index = HashSet::new();
+        //let mut _purge_stats = PurgeStats::default();
+        //let mut _purged_stored_account_slots = HashMap::new();
+
+        //self.unref_accounts(
+        //    purged_older_pubkeys,
+        //    &mut _purged_stored_account_slots,
+        //    &_pubkeys_removed_from_accounts_index,
+        //);
+        //self.handle_reclaims(
+        //    (!reclaims.is_empty()).then(|| reclaims.iter()),
+        //    None,
+        //    false,
+        //    &_pubkeys_removed_from_accounts_index,
+        //    HandleReclaims::ProcessDeadSlots(&_purge_stats),
+        //);
+
         // Remove this slot from the cache, which will to AccountsDb's new readers should look like an
         // atomic switch from the cache to storage.
         // There is some racy condition for existing readers who just has read exactly while
@@ -6460,7 +6498,7 @@ impl AccountsDb {
 
     /// flush all accounts in this slot
     fn flush_slot_cache(&self, slot: Slot) -> Option<FlushStats> {
-        self.flush_slot_cache_with_clean(slot, None::<&mut fn(&_, &_) -> bool>, None)
+        self.flush_slot_cache_with_clean(slot, None::<&mut fn(&_, &_) -> bool>)
     }
 
     /// `should_flush_f` is an optional closure that determines whether a given
@@ -6470,7 +6508,6 @@ impl AccountsDb {
         &self,
         slot: Slot,
         should_flush_f: Option<&mut impl FnMut(&Pubkey, &AccountSharedData) -> bool>,
-        max_clean_root: Option<Slot>,
     ) -> Option<FlushStats> {
         if self
             .remove_unrooted_slots_synchronization
@@ -6490,7 +6527,7 @@ impl AccountsDb {
                 // still exists in the cache, we know the slot cannot be removed
                 // by any other threads past this point. We are now responsible for
                 // flushing this slot.
-                self.do_flush_slot_cache(slot, &slot_cache, should_flush_f, max_clean_root)
+                self.do_flush_slot_cache(slot, &slot_cache, should_flush_f)
             });
 
             // Nobody else should have been purging this slot, so should not have been removed
@@ -7937,7 +7974,7 @@ impl AccountsDb {
             purged_slot_pubkeys.len(),
             pubkeys_removed_from_accounts_index,
         );
-        for (slot, pubkey) in purged_slot_pubkeys {
+        for (slot, pubkey) in purged_slot_pubkeys {            
             purged_stored_account_slots
                 .entry(pubkey)
                 .or_default()
