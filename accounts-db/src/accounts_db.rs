@@ -6175,18 +6175,14 @@ impl AccountsDb {
         // the relevant roots in storage.
         let mut flush_roots_elapsed = Measure::start("flush_roots_elapsed");
         let mut account_bytes_saved = 0;
-        let mut num_accounts_saved = 0;
 
         let _guard = self.active_stats.activate(ActiveStatItem::Flush);
 
         // Note even if force_flush is false, we will still flush all roots <= the
         // given `requested_flush_root`, even if some of the later roots cannot be used for
         // cleaning due to an ongoing scan
-        let (total_new_cleaned_roots, num_cleaned_roots_flushed, mut flush_stats) = self
-            .flush_rooted_accounts_cache(
-                requested_flush_root,
-                Some((&mut account_bytes_saved, &mut num_accounts_saved)),
-            );
+        let (total_new_cleaned_roots, num_cleaned_roots_flushed, mut flush_stats) =
+            self.flush_rooted_accounts_cache(requested_flush_root, Some(&mut account_bytes_saved));
         flush_roots_elapsed.stop();
 
         // Note we don't purge unrooted slots here because there may be ongoing scans/references
@@ -6252,7 +6248,15 @@ impl AccountsDb {
             ),
             ("flush_roots_elapsed", flush_roots_elapsed.as_us(), i64),
             ("account_bytes_saved", account_bytes_saved, i64),
-            ("num_accounts_saved", num_accounts_saved, i64),
+            ("account_bytes_written", flush_stats.total_size.0, i64),
+            ("num_accounts_saved", flush_stats.num_purged.0, i64),
+            ("num_accounts_flushed", flush_stats.num_flushed.0, i64),
+            ("num_accounts_reclaimed", flush_stats.num_reclaimed.0, i64),
+            (
+                "num_accounts_zero_lamports",
+                flush_stats.num_zero_lamport.0,
+                i64
+            ),
             (
                 "store_accounts_total_us",
                 flush_stats.store_accounts_total_us.0,
@@ -6279,7 +6283,7 @@ impl AccountsDb {
     fn flush_rooted_accounts_cache(
         &self,
         requested_flush_root: Option<Slot>,
-        should_clean: Option<(&mut usize, &mut usize)>,
+        should_clean: Option<&mut usize>,
     ) -> (usize, usize, FlushStats) {
         let max_clean_root = should_clean.as_ref().and_then(|_| {
             // If there is a long running scan going on, this could prevent any cleaning
@@ -6291,13 +6295,12 @@ impl AccountsDb {
 
         // If `should_clean` is None, then`should_flush_f` is also None, which will cause
         // `flush_slot_cache` to flush all accounts to storage without cleaning any accounts.
-        let mut should_flush_f = should_clean.map(|(account_bytes_saved, num_accounts_saved)| {
+        let mut should_flush_f = should_clean.map(|account_bytes_saved| {
             move |&pubkey: &Pubkey, account: &AccountSharedData| {
                 // if not in hashset, then not flushed previously, so flush it
                 let should_flush = written_accounts.insert(pubkey);
                 if !should_flush {
                     *account_bytes_saved += account.data().len();
-                    *num_accounts_saved += 1;
                     // If a later root already wrote this account, no point
                     // in flushing it
                 }

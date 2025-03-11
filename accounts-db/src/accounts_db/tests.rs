@@ -4592,10 +4592,9 @@ fn test_accounts_db_cache_clean_max_root_with_cache_limit_hit_and_scan() {
 fn run_flush_rooted_accounts_cache(should_clean: bool) {
     let num_slots = 10;
     let (accounts_db, keys, slots, _) = setup_accounts_db_cache_clean(num_slots, None, None);
-    let mut cleaned_bytes = 0;
     let mut cleaned_accounts = 0;
     let should_clean_tracker = if should_clean {
-        Some((&mut cleaned_bytes, &mut cleaned_accounts))
+        Some(&mut cleaned_accounts)
     } else {
         None
     };
