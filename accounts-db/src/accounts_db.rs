@@ -6238,7 +6238,11 @@ impl AccountsDb {
                 "accounts_db-flush_accounts_cache_aggressively",
                 ("num_flushed", flush_stats.num_flushed.0, i64),
                 ("num_purged", flush_stats.num_purged.0, i64),
-                ("num_zero_lamports_purged", flush_stats.num_zero_lamports_purged.0, i64),
+                (
+                    "num_zero_lamports_purged",
+                    flush_stats.num_zero_lamports_purged.0,
+                    i64
+                ),
                 ("total_flush_size", flush_stats.total_size.0, i64),
                 ("total_cache_size", self.accounts_cache.size(), i64),
                 ("total_frozen_slots", excess_slot_count, i64),
@@ -6295,11 +6299,10 @@ impl AccountsDb {
             self.max_clean_root(requested_flush_root)
         });
 
-        let max_clean_root = match max_clean_root
-        {
+        let _max_clean_root = match max_clean_root {
             Some(max_clean_root) => max_clean_root,
             None => MAX,
-        };        
+        };
 
         let mut written_accounts = HashSet::new();
 
@@ -6326,9 +6329,9 @@ impl AccountsDb {
         // outdated updates in earlier roots
         let mut num_roots_flushed = 0;
         let mut flush_stats = FlushStats::default();
-        for &root in flushed_roots.iter().rev() {            
+        /*for &root in flushed_roots.iter().rev() {
             if &root > &max_clean_root
-            {                
+            {
                 continue;
             }
             if let Some(stats) =
@@ -6337,19 +6340,11 @@ impl AccountsDb {
                 num_roots_flushed += 1;
                 flush_stats.accumulate(&stats);
             }
-        }
+        }*/
+        should_flush_f = None;
 
         for &root in flushed_roots.iter() {
-            should_flush_f = None;            
-            if &root <= &max_clean_root
-            {
-                
-                continue;
-            }
-            println!("Actually doing someting {}\n", &root);
-            if let Some(stats) =
-                    self.flush_slot_cache_with_clean(root, should_flush_f.as_mut())
-            {
+            if let Some(stats) = self.flush_slot_cache_with_clean(root, should_flush_f.as_mut()) {
                 num_roots_flushed += 1;
                 flush_stats.accumulate(&stats);
             }
@@ -6391,37 +6386,35 @@ impl AccountsDb {
                     .as_mut()
                     .map(|should_flush_f| should_flush_f(key, account))
                     .unwrap_or(true);
-            
-                    //purged_older_pubkeys.extend(
-                    //self.accounts_index.purge_older(key, slot, &mut reclaims));
-                    let mut reclaims = Vec::new();
-                    let mut _pubkeys_removed_from_accounts_index = HashSet::new();
-                    let mut _purge_stats = PurgeStats::default();
-                    let mut _purged_stored_account_slots = HashMap::new();
-                    let purged_older_pubkeys =
-                        self.accounts_index.purge_older(key, slot, &mut reclaims);
-    
-                    self.unref_accounts(
-                        purged_older_pubkeys,
-                        &mut _purged_stored_account_slots,
-                        &_pubkeys_removed_from_accounts_index,
-                    );
-                    self.handle_reclaims(
-                        (!reclaims.is_empty()).then(|| reclaims.iter()),
-                        None,
-                        false,
-                        &_pubkeys_removed_from_accounts_index,
-                        HandleReclaims::ProcessDeadSlots(&_purge_stats),
-                    );
-                
+
+                //purged_older_pubkeys.extend(
+                //self.accounts_index.purge_older(key, slot, &mut reclaims));
+                let mut reclaims = Vec::new();
+                let mut _pubkeys_removed_from_accounts_index = HashSet::new();
+                let mut _purge_stats = PurgeStats::default();
+                let mut _purged_stored_account_slots = HashMap::new();
+                let purged_older_pubkeys =
+                    self.accounts_index.purge_older(key, slot, &mut reclaims);
+
+                self.unref_accounts(
+                    purged_older_pubkeys,
+                    &mut _purged_stored_account_slots,
+                    &_pubkeys_removed_from_accounts_index,
+                );
+                self.handle_reclaims(
+                    (!reclaims.is_empty()).then(|| reclaims.iter()),
+                    None,
+                    false,
+                    &_pubkeys_removed_from_accounts_index,
+                    HandleReclaims::ProcessDeadSlots(&_purge_stats),
+                );
+
                 if should_flush {
                     if account.lamports() > 0 {
                         flush_stats.total_size += aligned_stored_size(account.data().len()) as u64;
                         flush_stats.num_flushed += 1;
                         Some((key, account))
-                    }
-                    else
-                    {
+                    } else {
                         // Handle zero lamport accounts here
                         // Hopefully this counter increases
                         pubkey_to_slot_set.push((*key, slot));
@@ -7974,7 +7967,7 @@ impl AccountsDb {
             purged_slot_pubkeys.len(),
             pubkeys_removed_from_accounts_index,
         );
-        for (slot, pubkey) in purged_slot_pubkeys {            
+        for (slot, pubkey) in purged_slot_pubkeys {
             purged_stored_account_slots
                 .entry(pubkey)
                 .or_default()

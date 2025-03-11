@@ -2317,7 +2317,11 @@ fn test_purge_empty_accounts() {
         let blockhash = bank.last_blockhash();
         let tx = system_transaction::transfer(&keypair, &pubkey, amount, blockhash);
         //warn!("Transfering from {:?} to {}, {} lamports, pass {}", keypair, pubkey, amount, pass);
-        warn!("Bank0 capitalization is {}, bank1 is {}", bank0.capitalization(), bank1.capitalization());
+        warn!(
+            "Bank0 capitalization is {}, bank1 is {}",
+            bank0.capitalization(),
+            bank1.capitalization()
+        );
         bank1.process_transaction(&tx).unwrap();
 
         assert_eq!(
@@ -2372,11 +2376,19 @@ fn test_purge_empty_accounts() {
         bank1.freeze();
         bank1.squash();
         add_root_and_flush_write_cache(&bank1);
-        
+
         println!("Updating Hash\n");
-        warn!("At end Bank0 capitalization is {}, bank1 is {}", bank0.capitalization(), bank1.capitalization());
-        warn!("I am seeing {:?}, {:?} and {:?} lamports", bank1.get_account(&keypair.pubkey()), bank1.get_account(&pubkey),
-        bank1.get_account(&mint_keypair.pubkey()));
+        warn!(
+            "At end Bank0 capitalization is {}, bank1 is {}",
+            bank0.capitalization(),
+            bank1.capitalization()
+        );
+        warn!(
+            "I am seeing {:?}, {:?} and {:?} lamports",
+            bank1.get_account(&keypair.pubkey()),
+            bank1.get_account(&pubkey),
+            bank1.get_account(&mint_keypair.pubkey())
+        );
         bank1.update_accounts_hash_for_tests();
         assert!(bank1.verify_accounts_hash(
             None,
