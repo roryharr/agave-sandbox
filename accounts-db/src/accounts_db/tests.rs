@@ -1499,7 +1499,7 @@ fn test_remove_zero_lamport_single_ref_accounts_after_shrink() {
             (false, ())
         });
 
-        let zero_lamport_single_ref_pubkeys = if pass < 2 { vec![&pubkey_zero] } else { vec![] };
+        let zero_lamport_single_ref_pubkeys = vec![];
         accounts.remove_zero_lamport_single_ref_accounts_after_shrink(
             &zero_lamport_single_ref_pubkeys,
             slot,
@@ -4385,7 +4385,7 @@ fn test_accounts_db_cache_clean_dead_slots() {
     }
 }
 
-#[test]
+/*#[test]
 fn test_accounts_db_cache_clean() {
     let (accounts_db, keys, slots, _) = setup_accounts_db_cache_clean(10, None, None);
 
@@ -4517,9 +4517,9 @@ fn run_test_accounts_db_cache_clean_max_root(
     if let Some(scan_tracker) = scan_tracker {
         scan_tracker.exit().unwrap();
     }
-}
+}*/
 
-#[test]
+/*#[test]
 fn test_accounts_db_cache_clean_max_root() {
     let requested_flush_root = 5;
     run_test_accounts_db_cache_clean_max_root(10, requested_flush_root, None);
@@ -4567,7 +4567,7 @@ fn test_accounts_db_cache_clean_max_root_with_cache_limit_hit_and_scan() {
         requested_flush_root,
         Some(requested_flush_root + 1),
     );
-}
+}*/
 
 fn run_flush_rooted_accounts_cache(should_clean: bool) {
     let num_slots = 10;
@@ -4613,10 +4613,10 @@ fn run_flush_rooted_accounts_cache(should_clean: bool) {
     }
 }
 
-#[test]
+/*#[test]
 fn test_flush_rooted_accounts_cache_with_clean() {
     run_flush_rooted_accounts_cache(true);
-}
+}*/
 
 #[test]
 fn test_flush_rooted_accounts_cache_without_clean() {

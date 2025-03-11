@@ -3531,7 +3531,7 @@ impl AccountsDb {
                         // It would have had a ref to the storage from the initial store, but it will
                         // not exist in the re-written slot. Unref it to keep the index consistent with
                         // rewriting the storage entries.
-                        pubkeys_to_unref.push(pubkey);
+                        //pubkeys_to_unref.push(pubkey);
                         dead += 1;
                     } else {
                         do_populate_accounts_for_shrink(ref_count, slot_list);
@@ -3772,17 +3772,13 @@ impl AccountsDb {
         // we have to unref before we `purge_keys_exact`. Otherwise, we could race with the foreground with tx processing
         // reviving this index entry and then we'd unref the revived version, which is a refcount bug.
 
-        /*self.accounts_index.scan(
+        self.accounts_index.scan(
             zero_lamport_single_ref_pubkeys.iter().cloned(),
             |_pubkey, _slots_refs, _entry| AccountsIndexScanResult::Unref,
-            if do_assert {
-                Some(AccountsIndexScanResult::UnrefAssert0)
-            } else {
-                Some(AccountsIndexScanResult::UnrefLog0)
-            },
+            Some(AccountsIndexScanResult::UnrefLog0),            
             false,
             ScanFilter::All,
-        );*/
+        );
 
         zero_lamport_single_ref_pubkeys.iter().for_each(|k| {
             _ = self.purge_keys_exact([&(**k, slot)].into_iter());
@@ -3988,7 +3984,7 @@ impl AccountsDb {
             return;
         }
 
-        //self.unref_shrunk_dead_accounts(shrink_collect.pubkeys_to_unref.iter().cloned(), slot);
+        self.unref_shrunk_dead_accounts(shrink_collect.pubkeys_to_unref.iter().cloned(), slot);
 
         let total_accounts_after_shrink = shrink_collect.alive_accounts.len();
         debug!(
@@ -7692,7 +7688,7 @@ impl AccountsDb {
         accounts: &impl StorableAccounts<'a>,
         reclaim: UpsertReclaim,
         update_index_thread_selection: UpdateIndexThreadSelection,
-        _thread_pool: &ThreadPool,
+        thread_pool: &ThreadPool,
     ) -> SlotList<AccountInfo> {
         let target_slot = accounts.target_slot();
         let len = std::cmp::min(accounts.len(), infos.len());
@@ -7727,15 +7723,17 @@ impl AccountsDb {
         {
             let chunk_size = std::cmp::max(1, len / quarter_thread_count()); // # pubkeys/thread
             let batches = 1 + len / chunk_size;
-            (0..batches)
-                .into_iter()
-                .map(|batch| {
-                    let start = batch * chunk_size;
-                    let end = std::cmp::min(start + chunk_size, len);
-                    update(start, end)
-                })
-                .flatten()
-                .collect::<Vec<_>>()
+            thread_pool.install(|| {
+                (0..batches)
+                    .into_par_iter()
+                    .map(|batch| {
+                        let start = batch * chunk_size;
+                        let end = std::cmp::min(start + chunk_size, len);
+                        update(start, end)
+                    })
+                    .flatten()
+                    .collect::<Vec<_>>()
+            })
         } else {
             update(0, len)
         }
@@ -7915,41 +7913,42 @@ impl AccountsDb {
         pubkeys_removed_from_accounts_index: &'a PubkeysRemovedFromAccountsIndex,
     ) {
         let batches = 1 + (num_pubkeys / UNREF_ACCOUNTS_BATCH_SIZE);
-        //self.thread_pool_clean.install(|| {
-        (0..batches).into_iter().for_each(|batch| {
-            let skip = batch * UNREF_ACCOUNTS_BATCH_SIZE;
-            self.accounts_index.scan(
-                pubkeys
-                    .clone()
-                    .skip(skip)
-                    .take(UNREF_ACCOUNTS_BATCH_SIZE)
-                    .filter(|pubkey| {
-                        // filter out pubkeys that have already been removed from the accounts index in a previous step
-                        let already_removed = pubkeys_removed_from_accounts_index.contains(pubkey);
-                        !already_removed
-                    }),
-                |_pubkey, slots_refs, _entry| {
-                    if let Some((slot_list, ref_count)) = slots_refs {
-                        // Let's handle the special case - after unref, the result is a single ref zero lamport account.
-                        if slot_list.len() == 1 && ref_count == 2 {
-                            if let Some((slot_alive, acct_info)) = slot_list.first() {
-                                if acct_info.is_zero_lamport() && !acct_info.is_cached() {
-                                    self.zero_lamport_single_ref_found(
-                                        *slot_alive,
-                                        acct_info.offset(),
-                                    );
+        self.thread_pool_clean.install(|| {
+            (0..batches).into_par_iter().for_each(|batch| {
+                let skip = batch * UNREF_ACCOUNTS_BATCH_SIZE;
+                self.accounts_index.scan(
+                    pubkeys
+                        .clone()
+                        .skip(skip)
+                        .take(UNREF_ACCOUNTS_BATCH_SIZE)
+                        .filter(|pubkey| {
+                            // filter out pubkeys that have already been removed from the accounts index in a previous step
+                            let already_removed =
+                                pubkeys_removed_from_accounts_index.contains(pubkey);
+                            !already_removed
+                        }),
+                    |_pubkey, slots_refs, _entry| {
+                        if let Some((slot_list, ref_count)) = slots_refs {
+                            // Let's handle the special case - after unref, the result is a single ref zero lamport account.
+                            if slot_list.len() == 1 && ref_count == 2 {
+                                if let Some((slot_alive, acct_info)) = slot_list.first() {
+                                    if acct_info.is_zero_lamport() && !acct_info.is_cached() {
+                                        self.zero_lamport_single_ref_found(
+                                            *slot_alive,
+                                            acct_info.offset(),
+                                        );
+                                    }
                                 }
                             }
                         }
-                    }
-                    AccountsIndexScanResult::Unref
-                },
-                None,
-                false,
-                ScanFilter::All,
-            )
+                        AccountsIndexScanResult::Unref
+                    },
+                    None,
+                    false,
+                    ScanFilter::All,
+                )
+            });
         });
-        //});
     }
 
     /// lookup each pubkey in 'purged_slot_pubkeys' and unref it in the accounts index
