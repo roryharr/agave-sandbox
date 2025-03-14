@@ -1,6 +1,7 @@
 use {
     serde::{Deserialize, Serialize},
     solana_accounts_db::accounts_db::AccountStorageEntry,
+    solana_clock::Slot,
 };
 
 /// The serialized AccountsFileId type is fixed as usize
@@ -32,6 +33,16 @@ impl From<&AccountStorageEntry> for SerializableAccountStorageEntry {
         Self {
             id: rhs.id() as SerializedAccountsFileId,
             accounts_current_len: rhs.accounts.len(),
+        }
+    }
+}
+
+impl From<(&AccountStorageEntry, Slot)> for SerializableAccountStorageEntry {
+    fn from(value: (&AccountStorageEntry, Slot)) -> Self {
+        Self {
+            id: value.0.id() as SerializedAccountsFileId,
+            accounts_current_len: value.0.accounts.len()
+                - value.0.get_obsolete_bytes(Some(value.1)),
         }
     }
 }
