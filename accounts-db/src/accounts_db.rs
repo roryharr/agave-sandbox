@@ -6258,7 +6258,7 @@ impl AccountsDb {
             ("num_flushed", flush_stats.num_accounts_flushed.0, i64),
             ("total_flush_size", flush_stats.num_bytes_flushed.0, i64),
             (
-                "num_accounts_recalimed",
+                "num_accounts_reclaimed",
                 flush_stats.num_accounts_reclaimed.0,
                 i64
             ),
