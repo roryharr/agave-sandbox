@@ -1125,6 +1125,13 @@ impl LoadedAccount<'_> {
         }
     }
 
+    pub fn offset(&self) -> Offset {
+        match self {
+            LoadedAccount::Stored(stored_account_meta) => stored_account_meta.offset(),
+            LoadedAccount::Cached(_) => panic!(),
+        }
+    }
+
     /// data_len can be calculated without having access to `&data` in future implementations
     pub fn data_len(&self) -> usize {
         self.data().len()
@@ -1216,6 +1223,11 @@ pub struct AccountStorageEntry {
     /// account as "dead" twice. However, this should be fine. It just makes
     /// shrink more likely to visit this storage.
     zero_lamport_single_ref_offsets: RwLock<IntSet<Offset>>,
+
+    // Dead Accounts. These are accounts that are still present in the storage
+    // but should be ignored during replay. They have been removed
+    // from the accounts index, so they will not be picked up by scan.
+    dead_account_offsets: RwLock<Vec<(Offset, usize, Slot)>>,
 }
 
 impl AccountStorageEntry {
@@ -1237,6 +1249,7 @@ impl AccountStorageEntry {
             count_and_status: SeqLock::new((0, AccountStorageStatus::Available)),
             alive_bytes: AtomicUsize::new(0),
             zero_lamport_single_ref_offsets: RwLock::default(),
+            dead_account_offsets: RwLock::default(),
         }
     }
 
@@ -1255,6 +1268,7 @@ impl AccountStorageEntry {
             alive_bytes: AtomicUsize::new(self.alive_bytes()),
             accounts,
             zero_lamport_single_ref_offsets: RwLock::default(),
+            dead_account_offsets: RwLock::default(),
         })
     }
 
@@ -1271,6 +1285,7 @@ impl AccountStorageEntry {
             count_and_status: SeqLock::new((0, AccountStorageStatus::Available)),
             alive_bytes: AtomicUsize::new(0),
             zero_lamport_single_ref_offsets: RwLock::default(),
+            dead_account_offsets: RwLock::default(),
         }
     }
 
@@ -1305,6 +1320,33 @@ impl AccountStorageEntry {
 
     pub fn alive_bytes(&self) -> usize {
         self.alive_bytes.load(Ordering::Acquire)
+    }
+
+    pub fn add_dead_account(&self, offset: Offset, size: usize, slot: Slot) {
+        self.dead_account_offsets
+            .write()
+            .unwrap()
+            .push((offset, size, slot));
+    }
+
+    pub fn is_account_dead(&self, offset: Offset, slot: Slot) -> bool {
+        self.dead_account_offsets
+            .read()
+            .unwrap()
+            .iter()
+            .any(|(dead_offset, _, dead_slot)| *dead_offset == offset && *dead_slot < slot)
+    }
+
+    pub fn get_dead_account_stats(&self) -> (usize, usize) {
+        let number_of_accounts = self.dead_account_offsets.read().unwrap().len();
+        let dead_bytes = self
+            .dead_account_offsets
+            .read()
+            .unwrap()
+            .iter()
+            .map(|(_, size, _)| *size)
+            .sum();
+        (number_of_accounts, dead_bytes)
     }
 
     /// Return true if offset is "new" and inserted successfully. Otherwise,
@@ -2218,6 +2260,7 @@ impl AccountsDb {
             reset_accounts,
             pubkeys_removed_from_accounts_index,
             HandleReclaims::ProcessDeadSlots(&self.clean_accounts_stats.purge_stats),
+            None,
         );
         measure.stop();
         debug!("{}", measure);
@@ -3117,6 +3160,7 @@ impl AccountsDb {
             reset_accounts,
             &pubkeys_removed_from_accounts_index,
             HandleReclaims::ProcessDeadSlots(&self.clean_accounts_stats.purge_stats),
+            None,
         );
 
         reclaims_time.stop();
@@ -3309,14 +3353,19 @@ impl AccountsDb {
         reset_accounts: bool,
         pubkeys_removed_from_accounts_index: &PubkeysRemovedFromAccountsIndex,
         handle_reclaims: HandleReclaims<'a>,
+        purge_slot: Option<Slot>,
     ) -> ReclaimResult
     where
         I: Iterator<Item = &'a (Slot, AccountInfo)>,
     {
         let mut reclaim_result = ReclaimResult::default();
         if let Some(reclaims) = reclaims {
-            let (dead_slots, reclaimed_offsets) =
-                self.remove_dead_accounts(reclaims, expected_single_dead_slot, reset_accounts);
+            let (dead_slots, reclaimed_offsets) = self.remove_dead_accounts(
+                reclaims,
+                expected_single_dead_slot,
+                reset_accounts,
+                purge_slot,
+            );
             reclaim_result.1 = reclaimed_offsets;
 
             if let HandleReclaims::ProcessDeadSlots(purge_stats) = handle_reclaims {
@@ -5903,6 +5952,7 @@ impl AccountsDb {
             false,
             &pubkeys_removed_from_accounts_index,
             HandleReclaims::ProcessDeadSlots(purge_stats),
+            None,
         );
         handle_reclaims_elapsed.stop();
         purge_stats
@@ -6405,6 +6455,7 @@ impl AccountsDb {
                     false,
                     &_pubkeys_removed_from_accounts_index,
                     HandleReclaims::ProcessDeadSlots(&_purge_stats),
+                    Some(slot),
                 );
 
                 if should_flush {
@@ -7781,6 +7832,7 @@ impl AccountsDb {
         reclaims: I,
         expected_slot: Option<Slot>,
         reset_accounts: bool,
+        purge_slot: Option<Slot>,
     ) -> (IntSet<Slot>, SlotOffsets)
     where
         I: Iterator<Item = &'a (Slot, AccountInfo)>,
@@ -7830,8 +7882,14 @@ impl AccountsDb {
                         let mut offsets = offsets.iter().cloned().collect::<Vec<_>>();
                         // sort so offsets are in order. This improves efficiency of loading the accounts.
                         offsets.sort_unstable();
-                        let dead_bytes = store.accounts.get_account_sizes(&offsets).iter().sum();
+                        let sizes = store.accounts.get_account_sizes(&offsets);
+                        let dead_bytes = sizes.iter().sum();
                         store.remove_accounts(dead_bytes, reset_accounts, offsets.len());
+                        if purge_slot.is_some() {
+                            (sizes, offsets).into_par_iter().for_each(|(size, offset)| {
+                                store.add_dead_account(offset, size, purge_slot.unwrap());
+                            });
+                        }
                         if Self::is_shrinking_productive(&store)
                             && self.is_candidate_for_shrink(&store)
                         {
@@ -8404,6 +8462,7 @@ impl AccountsDb {
                 &HashSet::default(),
                 // this callsite does NOT process dead slots
                 HandleReclaims::DoNotProcessDeadSlots,
+                None,
             );
             handle_reclaims_time.stop();
             handle_reclaims_elapsed = handle_reclaims_time.as_us();

@@ -4186,7 +4186,7 @@ define_accounts_db_test!(test_alive_bytes, |accounts_db| {
             [0];
         assert_eq!(account_info.0, slot);
         let reclaims = [account_info];
-        accounts_db.remove_dead_accounts(reclaims.iter(), None, true);
+        accounts_db.remove_dead_accounts(reclaims.iter(), None, true, None);
         let after_size = storage0.alive_bytes();
         if storage0.count() == 0
             && AccountsFileProvider::HotStorage == accounts_db.accounts_file_provider
