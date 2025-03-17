@@ -99,7 +99,6 @@ use {
         boxed::Box,
         collections::{BTreeSet, HashMap, HashSet, VecDeque},
         fs,
-        hash::{Hash as StdHash, Hasher as StdHasher},
         io::Result as IoResult,
         iter,
         num::{NonZeroUsize, Saturating},
@@ -140,11 +139,6 @@ const MAX_ITEMS_PER_CHUNK: Slot = 2_500;
 // When getting accounts for shrinking from the index, this is the # of accounts to lookup per thread.
 // This allows us to split up accounts index accesses across multiple threads.
 const SHRINK_COLLECT_CHUNK_SIZE: usize = 50;
-
-/// The number of shrink candidate slots that is small enough so that
-/// additional storages from ancient slots can be added to the
-/// candidates for shrinking.
-const SHRINK_INSERT_ANCIENT_THRESHOLD: usize = 10;
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum CreateAncientStorage {
@@ -1125,6 +1119,13 @@ impl LoadedAccount<'_> {
         }
     }
 
+    pub fn offset(&self) -> Offset {
+        match self {
+            LoadedAccount::Stored(stored_account_meta) => stored_account_meta.offset(),
+            LoadedAccount::Cached(_) => panic!(),
+        }
+    }
+
     /// data_len can be calculated without having access to `&data` in future implementations
     pub fn data_len(&self) -> usize {
         self.data().len()
@@ -1216,6 +1217,11 @@ pub struct AccountStorageEntry {
     /// account as "dead" twice. However, this should be fine. It just makes
     /// shrink more likely to visit this storage.
     zero_lamport_single_ref_offsets: RwLock<IntSet<Offset>>,
+
+    // Dead Accounts. These are accounts that are still present in the storage
+    // but should be ignored during replay. They have been removed
+    // from the accounts index, so they will not be picked up by scan.
+    dead_account_offsets: RwLock<Vec<(Offset, usize, Slot)>>,
 }
 
 impl AccountStorageEntry {
@@ -1237,6 +1243,7 @@ impl AccountStorageEntry {
             count_and_status: SeqLock::new((0, AccountStorageStatus::Available)),
             alive_bytes: AtomicUsize::new(0),
             zero_lamport_single_ref_offsets: RwLock::default(),
+            dead_account_offsets: RwLock::default(),
         }
     }
 
@@ -1255,6 +1262,7 @@ impl AccountStorageEntry {
             alive_bytes: AtomicUsize::new(self.alive_bytes()),
             accounts,
             zero_lamport_single_ref_offsets: RwLock::default(),
+            dead_account_offsets: RwLock::default(),
         })
     }
 
@@ -1271,6 +1279,7 @@ impl AccountStorageEntry {
             count_and_status: SeqLock::new((0, AccountStorageStatus::Available)),
             alive_bytes: AtomicUsize::new(0),
             zero_lamport_single_ref_offsets: RwLock::default(),
+            dead_account_offsets: RwLock::default(),
         }
     }
 
@@ -1305,6 +1314,33 @@ impl AccountStorageEntry {
 
     pub fn alive_bytes(&self) -> usize {
         self.alive_bytes.load(Ordering::Acquire)
+    }
+
+    pub fn add_dead_account(&self, offset: Offset, size: usize, slot: Slot) {
+        self.dead_account_offsets
+            .write()
+            .unwrap()
+            .push((offset, size, slot));
+    }
+
+    pub fn is_account_dead(&self, offset: Offset, slot: Slot) -> bool {
+        self.dead_account_offsets
+            .read()
+            .unwrap()
+            .iter()
+            .any(|(dead_offset, _, dead_slot)| *dead_offset == offset && *dead_slot <= slot)
+    }
+
+    pub fn get_dead_account_stats(&self) -> (usize, usize) {
+        let number_of_accounts = self.dead_account_offsets.read().unwrap().len();
+        let dead_bytes = self
+            .dead_account_offsets
+            .read()
+            .unwrap()
+            .iter()
+            .map(|(_, size, _)| *size)
+            .sum();
+        (number_of_accounts, dead_bytes)
     }
 
     /// Return true if offset is "new" and inserted successfully. Otherwise,
@@ -2218,6 +2254,7 @@ impl AccountsDb {
             reset_accounts,
             pubkeys_removed_from_accounts_index,
             HandleReclaims::ProcessDeadSlots(&self.clean_accounts_stats.purge_stats),
+            None,
         );
         measure.stop();
         debug!("{}", measure);
@@ -3117,6 +3154,7 @@ impl AccountsDb {
             reset_accounts,
             &pubkeys_removed_from_accounts_index,
             HandleReclaims::ProcessDeadSlots(&self.clean_accounts_stats.purge_stats),
+            None,
         );
 
         reclaims_time.stop();
@@ -3309,14 +3347,19 @@ impl AccountsDb {
         reset_accounts: bool,
         pubkeys_removed_from_accounts_index: &PubkeysRemovedFromAccountsIndex,
         handle_reclaims: HandleReclaims<'a>,
+        purge_slot: Option<Slot>,
     ) -> ReclaimResult
     where
         I: Iterator<Item = &'a (Slot, AccountInfo)>,
     {
         let mut reclaim_result = ReclaimResult::default();
         if let Some(reclaims) = reclaims {
-            let (dead_slots, reclaimed_offsets) =
-                self.remove_dead_accounts(reclaims, expected_single_dead_slot, reset_accounts);
+            let (dead_slots, reclaimed_offsets) = self.remove_dead_accounts(
+                reclaims,
+                expected_single_dead_slot,
+                reset_accounts,
+                purge_slot,
+            );
             reclaim_result.1 = reclaimed_offsets;
 
             if let HandleReclaims::ProcessDeadSlots(purge_stats) = handle_reclaims {
@@ -4636,7 +4679,7 @@ impl AccountsDb {
             .store(shrink_candidates_slots.len() as u64, Ordering::Relaxed);
 
         let candidates_count = shrink_candidates_slots.len();
-        let ((mut shrink_slots, shrink_slots_next_batch), select_time_us) = measure_us!({
+        let ((shrink_slots, shrink_slots_next_batch), select_time_us) = measure_us!({
             if let AccountShrinkThreshold::TotalSpace { shrink_ratio } = self.shrink_ratio {
                 let (shrink_slots, shrink_slots_next_batch) =
                     self.select_candidates_by_total_usage(&shrink_candidates_slots, shrink_ratio);
@@ -4659,7 +4702,7 @@ impl AccountsDb {
 
         // If there are too few slots to shrink, add an ancient slot
         // for shrinking.
-        if shrink_slots.len() < SHRINK_INSERT_ANCIENT_THRESHOLD {
+        /*if shrink_slots.len() < SHRINK_INSERT_ANCIENT_THRESHOLD {
             let mut ancients = self.best_ancient_slots_to_shrink.write().unwrap();
             while let Some((slot, capacity)) = ancients.pop_front() {
                 if let Some(store) = self.storage.get_slot_storage_entry(slot) {
@@ -4679,7 +4722,7 @@ impl AccountsDb {
                     }
                 }
             }
-        }
+        }*/
         if shrink_slots.is_empty()
             && shrink_slots_next_batch
                 .as_ref()
@@ -5903,6 +5946,7 @@ impl AccountsDb {
             false,
             &pubkeys_removed_from_accounts_index,
             HandleReclaims::ProcessDeadSlots(purge_stats),
+            None,
         );
         handle_reclaims_elapsed.stop();
         purge_stats
@@ -6384,6 +6428,9 @@ impl AccountsDb {
         let mut flush_stats = FlushStats::default();
         let iter_items: Vec<_> = slot_cache.iter().collect();
         let mut pubkey_to_slot_set: Vec<(Pubkey, Slot)> = vec![];
+        let mut purged_older_pubkeys = HashSet::new();
+        let mut reclaims = Vec::new();
+
         if should_flush_f.is_some() {
             if let Some(max_clean_root) = max_clean_root {
                 if slot > max_clean_root {
@@ -6405,27 +6452,11 @@ impl AccountsDb {
                     .map(|should_flush_f| should_flush_f(key))
                     .unwrap_or(true);
 
-                let mut reclaims = Vec::new();
-                let mut _pubkeys_removed_from_accounts_index = HashSet::new();
-                let mut _purge_stats = PurgeStats::default();
-                let mut _purged_stored_account_slots = HashMap::new();
-                let purged_older_pubkeys =
-                    self.accounts_index.purge_older(key, slot, &mut reclaims);
-
-                self.unref_accounts(
-                    purged_older_pubkeys,
-                    &mut _purged_stored_account_slots,
-                    &_pubkeys_removed_from_accounts_index,
-                );
-
-                flush_stats.num_accounts_reclaimed += reclaims.len();
-                self.handle_reclaims(
-                    (!reclaims.is_empty()).then(|| reclaims.iter()),
-                    None,
-                    false,
-                    &_pubkeys_removed_from_accounts_index,
-                    HandleReclaims::ProcessDeadSlots(&_purge_stats),
-                );
+                purged_older_pubkeys.extend(self.accounts_index.purge_older(
+                    key,
+                    slot,
+                    &mut reclaims,
+                ));
 
                 if should_flush {
                     flush_stats.num_bytes_flushed +=
@@ -6468,6 +6499,8 @@ impl AccountsDb {
             self.reopen_storage_as_readonly_shrinking_in_progress_ok(slot);
             let storage = self.storage.get_slot_storage_entry(slot);
             assert!(storage.is_some());
+
+            // Find all the zero lamport accounts that were added and makr them
             let storage = storage.unwrap();
             storage.accounts.scan_accounts(|account| {
                 if account.lamports() == 0 {
@@ -6476,6 +6509,26 @@ impl AccountsDb {
                 }
             });
         }
+
+        let mut _pubkeys_removed_from_accounts_index = HashSet::new();
+        let mut _purge_stats = PurgeStats::default();
+        let mut _purged_stored_account_slots = HashMap::new();
+
+        self.unref_accounts(
+            purged_older_pubkeys,
+            &mut _purged_stored_account_slots,
+            &_pubkeys_removed_from_accounts_index,
+        );
+
+        flush_stats.num_accounts_reclaimed += reclaims.len();
+        self.handle_reclaims(
+            (!reclaims.is_empty()).then(|| reclaims.iter()),
+            None,
+            false,
+            &_pubkeys_removed_from_accounts_index,
+            HandleReclaims::ProcessDeadSlots(&_purge_stats),
+            Some(slot),
+        );
 
         // Remove this slot from the cache, which will to AccountsDb's new readers should look like an
         // atomic switch from the cache to storage.
@@ -6952,34 +7005,6 @@ impl AccountsDb {
             // 0 will have the effect of causing ALL older append vecs to be chunked together, just like every other append vec.
             Some(0)
         }
-    }
-
-    /// hash info about 'storage' into 'hasher'
-    /// return true iff storage is valid for loading from cache
-    fn hash_storage_info(
-        hasher: &mut impl StdHasher,
-        storage: &AccountStorageEntry,
-        slot: Slot,
-    ) -> bool {
-        // hash info about this storage
-        storage.written_bytes().hash(hasher);
-        slot.hash(hasher);
-        let storage_file = storage.accounts.path();
-        storage_file.hash(hasher);
-        let Ok(metadata) = std::fs::metadata(storage_file) else {
-            return false;
-        };
-        let Ok(amod) = metadata.modified() else {
-            return false;
-        };
-        let amod = amod
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-        amod.hash(hasher);
-
-        // if we made it here, we have hashed info and we should try to load from the cache
-        true
     }
 
     pub fn calculate_accounts_hash_from(
@@ -7802,6 +7827,7 @@ impl AccountsDb {
         reclaims: I,
         expected_slot: Option<Slot>,
         reset_accounts: bool,
+        purge_slot: Option<Slot>,
     ) -> (IntSet<Slot>, SlotOffsets)
     where
         I: Iterator<Item = &'a (Slot, AccountInfo)>,
@@ -7851,8 +7877,14 @@ impl AccountsDb {
                         let mut offsets = offsets.iter().cloned().collect::<Vec<_>>();
                         // sort so offsets are in order. This improves efficiency of loading the accounts.
                         offsets.sort_unstable();
-                        let dead_bytes = store.accounts.get_account_sizes(&offsets).iter().sum();
+                        let sizes = store.accounts.get_account_sizes(&offsets);
+                        let dead_bytes = sizes.iter().sum();
                         store.remove_accounts(dead_bytes, reset_accounts, offsets.len());
+                        if purge_slot.is_some() {
+                            (sizes, offsets).into_par_iter().for_each(|(size, offset)| {
+                                store.add_dead_account(offset, size, purge_slot.unwrap());
+                            });
+                        }
                         if Self::is_shrinking_productive(&store)
                             && self.is_candidate_for_shrink(&store)
                         {
@@ -8425,6 +8457,7 @@ impl AccountsDb {
                 &HashSet::default(),
                 // this callsite does NOT process dead slots
                 HandleReclaims::DoNotProcessDeadSlots,
+                None,
             );
             handle_reclaims_time.stop();
             handle_reclaims_elapsed = handle_reclaims_time.as_us();
