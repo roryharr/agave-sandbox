@@ -6414,6 +6414,9 @@ impl AccountsDb {
         let mut flush_stats = FlushStats::default();
         let iter_items: Vec<_> = slot_cache.iter().collect();
         let mut pubkey_to_slot_set: Vec<(Pubkey, Slot)> = vec![];
+        let mut purged_older_pubkeys = HashSet::new();
+        let mut reclaims = Vec::new();
+
         if should_flush_f.is_some() {
             if let Some(max_clean_root) = max_clean_root {
                 if slot > max_clean_root {
@@ -6435,28 +6438,8 @@ impl AccountsDb {
                     .map(|should_flush_f| should_flush_f(key))
                     .unwrap_or(true);
 
-                let mut reclaims = Vec::new();
-                let mut _pubkeys_removed_from_accounts_index = HashSet::new();
-                let mut _purge_stats = PurgeStats::default();
-                let mut _purged_stored_account_slots = HashMap::new();
-                let purged_older_pubkeys =
-                    self.accounts_index.purge_older(key, slot, &mut reclaims);
-
-                self.unref_accounts(
-                    purged_older_pubkeys,
-                    &mut _purged_stored_account_slots,
-                    &_pubkeys_removed_from_accounts_index,
-                );
-
-                flush_stats.num_accounts_reclaimed += reclaims.len();
-                self.handle_reclaims(
-                    (!reclaims.is_empty()).then(|| reclaims.iter()),
-                    None,
-                    false,
-                    &_pubkeys_removed_from_accounts_index,
-                    HandleReclaims::ProcessDeadSlots(&_purge_stats),
-                    Some(slot),
-                );
+                purged_older_pubkeys.extend(
+                    self.accounts_index.purge_older(key, slot, &mut reclaims));
 
                 if should_flush {
                     flush_stats.num_bytes_flushed +=
@@ -6499,6 +6482,8 @@ impl AccountsDb {
             self.reopen_storage_as_readonly_shrinking_in_progress_ok(slot);
             let storage = self.storage.get_slot_storage_entry(slot);
             assert!(storage.is_some());
+
+            // Find all the zero lamport accounts that were added and makr them
             let storage = storage.unwrap();
             storage.accounts.scan_accounts(|account| {
                 if account.lamports() == 0 {
@@ -6507,6 +6492,30 @@ impl AccountsDb {
                 }
             });
         }
+        else
+        {
+            println!("Found dead slot {}", slot);
+        }
+
+        let mut _pubkeys_removed_from_accounts_index = HashSet::new();
+        let mut _purge_stats = PurgeStats::default();
+        let mut _purged_stored_account_slots = HashMap::new();
+
+        self.unref_accounts(
+            purged_older_pubkeys,
+            &mut _purged_stored_account_slots,
+            &_pubkeys_removed_from_accounts_index,
+        );
+
+        flush_stats.num_accounts_reclaimed += reclaims.len();
+        self.handle_reclaims(
+            (!reclaims.is_empty()).then(|| reclaims.iter()),
+            None,
+            false,
+            &_pubkeys_removed_from_accounts_index,
+            HandleReclaims::ProcessDeadSlots(&_purge_stats),
+            Some(slot),
+        );
 
         // Remove this slot from the cache, which will to AccountsDb's new readers should look like an
         // atomic switch from the cache to storage.
