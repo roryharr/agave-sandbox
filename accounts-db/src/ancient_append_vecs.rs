@@ -233,7 +233,7 @@ impl AncientSlotInfos {
         for (i, info) in self.all_infos.iter().enumerate() {
             cumulative_bytes += info.alive_bytes;
             let ancient_storages_required =
-            cumulative_bytes.0.div_ceil(tuning.ideal_storage_size.get()) as usize;
+                cumulative_bytes.0.div_ceil(tuning.ideal_storage_size.get()) as usize;
             let storages_remaining = total_storages - i - 1;
 
             // if the remaining uncombined storages and the # of resulting
@@ -1211,9 +1211,7 @@ pub mod tests {
             accounts_file::StorageAccess,
             accounts_hash::AccountHash,
             accounts_index::{AccountsIndexScanResult, ScanFilter, UpsertReclaim},
-            append_vec::{
-                aligned_stored_size, AppendVec, AppendVecStoredAccountMeta,
-            },
+            append_vec::{aligned_stored_size, AppendVec, AppendVecStoredAccountMeta},
             storable_accounts::{tests::build_accounts_from_storage, StorableAccountsBySlot},
         },
         rand::seq::SliceRandom as _,
@@ -1222,7 +1220,7 @@ pub mod tests {
         solana_pubkey::Pubkey,
         std::{collections::HashSet, ops::Range},
         strum::IntoEnumIterator,
-        strum_macros::EnumIter,        
+        strum_macros::EnumIter,
     };
 
     fn get_sample_storages(
