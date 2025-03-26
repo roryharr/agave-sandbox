@@ -1334,7 +1334,7 @@ impl AccountStorageEntry {
             .read()
             .unwrap()
             .iter()
-            .any(|(dead_offset, _, dead_slot)| *dead_offset == offset && *dead_slot < slot)
+            .any(|(dead_offset, _, dead_slot)| *dead_offset == offset && *dead_slot <= slot)
     }
 
     pub fn get_dead_account_stats(&self) -> (usize, usize) {
