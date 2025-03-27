@@ -121,8 +121,6 @@ impl AppendVecScan for ScanState<'_> {
 }
 
 enum ScanAccountStorageResult {
-    /// this data has already been scanned and cached
-    CacheFileAlreadyExists(CacheHashDataFileReference),
     /// this data needs to be scanned and cached
     CacheFileNeedsToBeCreated((String, Range<Slot>)),
 }
@@ -226,25 +224,16 @@ impl AccountsDb {
             .filter_map(|chunk| {
                 let range_this_chunk = splitter.get_slot_range(chunk)?;
 
-                let mut load_from_cache = true;
                 let mut hasher = DefaultHasher::new();
                 bin_range.start.hash(&mut hasher);
                 bin_range.end.hash(&mut hasher);
                 let is_first_scan_pass = bin_range.start == 0;
 
-                // calculate hash representing all storages in this chunk
                 let mut empty = true;
                 for (slot, storage) in snapshot_storages.iter_range(&range_this_chunk) {
                     empty = false;
                     if is_first_scan_pass && slot < one_epoch_old {
                         self.update_old_slot_stats(stats, storage);
-                    }
-                    if let Some(storage) = storage {
-                        let ok = Self::hash_storage_info(&mut hasher, storage, slot);
-                        if !ok {
-                            load_from_cache = false;
-                            break;
-                        }
                     }
                 }
                 if empty {
@@ -261,15 +250,6 @@ impl AccountsDb {
                     bin_range.end,
                     hash
                 );
-                if load_from_cache {
-                    if let Ok(mapped_file) =
-                        cache_hash_data.get_file_reference_to_map_later(&file_name)
-                    {
-                        return Some(ScanAccountStorageResult::CacheFileAlreadyExists(
-                            mapped_file,
-                        ));
-                    }
-                }
 
                 // fall through and load normally - we failed to load from a cache file but there are storages present
                 Some(ScanAccountStorageResult::CacheFileNeedsToBeCreated((
@@ -285,11 +265,10 @@ impl AccountsDb {
         // There are approximately 173 items in the cache files list,
         // so should be very fast to iterate and compute.
         // (173 cache files == 432,000 slots / 2,500 slots-per-cache-file)
-        let mut hits = 0;
+        let hits = 0;
         let mut misses = 0;
         for cache_file in &cache_files {
             match cache_file {
-                ScanAccountStorageResult::CacheFileAlreadyExists(_) => hits += 1,
                 ScanAccountStorageResult::CacheFileNeedsToBeCreated(_) => misses += 1,
             };
         }
@@ -309,7 +288,6 @@ impl AccountsDb {
             .into_par_iter()
             .map(|chunk| {
                 match chunk {
-                    ScanAccountStorageResult::CacheFileAlreadyExists(file) => Some(file),
                     ScanAccountStorageResult::CacheFileNeedsToBeCreated((
                         file_name,
                         range_this_chunk,

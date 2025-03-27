@@ -99,7 +99,6 @@ use {
         boxed::Box,
         collections::{BTreeSet, HashMap, HashSet, VecDeque},
         fs,
-        hash::{Hash as StdHash, Hasher as StdHasher},
         io::Result as IoResult,
         iter,
         num::{NonZeroUsize, Saturating},
@@ -6433,8 +6432,11 @@ impl AccountsDb {
                     .map(|should_flush_f| should_flush_f(key))
                     .unwrap_or(true);
 
-                purged_older_pubkeys.extend(
-                    self.accounts_index.purge_older(key, slot, &mut reclaims));
+                purged_older_pubkeys.extend(self.accounts_index.purge_older(
+                    key,
+                    slot,
+                    &mut reclaims,
+                ));
 
                 if should_flush {
                     flush_stats.num_bytes_flushed +=
@@ -6486,9 +6488,7 @@ impl AccountsDb {
                     flush_stats.num_zero_lamport_accounts_flushed += 1;
                 }
             });
-        }
-        else
-        {
+        } else {
             println!("Found dead slot {}", slot);
         }
 
@@ -6986,34 +6986,6 @@ impl AccountsDb {
             // 0 will have the effect of causing ALL older append vecs to be chunked together, just like every other append vec.
             Some(0)
         }
-    }
-
-    /// hash info about 'storage' into 'hasher'
-    /// return true iff storage is valid for loading from cache
-    fn hash_storage_info(
-        hasher: &mut impl StdHasher,
-        storage: &AccountStorageEntry,
-        slot: Slot,
-    ) -> bool {
-        // hash info about this storage
-        storage.written_bytes().hash(hasher);
-        slot.hash(hasher);
-        let storage_file = storage.accounts.path();
-        storage_file.hash(hasher);
-        let Ok(metadata) = std::fs::metadata(storage_file) else {
-            return false;
-        };
-        let Ok(amod) = metadata.modified() else {
-            return false;
-        };
-        let amod = amod
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-        amod.hash(hasher);
-
-        // if we made it here, we have hashed info and we should try to load from the cache
-        true
     }
 
     pub fn calculate_accounts_hash_from(

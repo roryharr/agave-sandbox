@@ -23,7 +23,6 @@ use {
     solana_hash::HASH_BYTES,
     solana_pubkey::PUBKEY_BYTES,
     std::{
-        hash::DefaultHasher,
         iter::{self, FromIterator},
         str::FromStr,
         sync::{atomic::AtomicBool, RwLock},
@@ -6514,48 +6513,6 @@ define_accounts_db_test!(test_get_ancient_slots_one_large, |db| {
         }
     }
 });
-
-#[test]
-fn test_hash_storage_info() {
-    {
-        let hasher = DefaultHasher::new();
-        let hash = hasher.finish();
-        assert_eq!(15130871412783076140, hash);
-    }
-    {
-        let mut hasher = DefaultHasher::new();
-        let slot: Slot = 0;
-        let tf = crate::append_vec::test_utils::get_append_vec_path("test_hash_storage_info");
-        let pubkey1 = solana_pubkey::new_rand();
-        let mark_alive = false;
-        let storage = sample_storage_with_entries(&tf, slot, &pubkey1, mark_alive);
-
-        let load = AccountsDb::hash_storage_info(&mut hasher, &storage, slot);
-        let hash = hasher.finish();
-        // can't assert hash here - it is a function of mod date
-        assert!(load);
-        let slot = 2; // changed this
-        let mut hasher = DefaultHasher::new();
-        let load = AccountsDb::hash_storage_info(&mut hasher, &storage, slot);
-        let hash2 = hasher.finish();
-        assert_ne!(hash, hash2); // slot changed, these should be different
-                                 // can't assert hash here - it is a function of mod date
-        assert!(load);
-        let mut hasher = DefaultHasher::new();
-        append_sample_data_to_storage(&storage, &solana_pubkey::new_rand(), false, None);
-        let load = AccountsDb::hash_storage_info(&mut hasher, &storage, slot);
-        let hash3 = hasher.finish();
-        assert_ne!(hash2, hash3); // moddate and written size changed
-                                  // can't assert hash here - it is a function of mod date
-        assert!(load);
-        let mut hasher = DefaultHasher::new();
-        let load = AccountsDb::hash_storage_info(&mut hasher, &storage, slot);
-        let hash4 = hasher.finish();
-        assert_eq!(hash4, hash3); // same
-                                  // can't assert hash here - it is a function of mod date
-        assert!(load);
-    }
-}
 
 #[test]
 fn test_sweep_get_oldest_non_ancient_slot_max() {
