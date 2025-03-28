@@ -6488,8 +6488,6 @@ impl AccountsDb {
                     flush_stats.num_zero_lamport_accounts_flushed += 1;
                 }
             });
-        } else {
-            println!("Found dead slot {}", slot);
         }
 
         let mut _pubkeys_removed_from_accounts_index = HashSet::new();
