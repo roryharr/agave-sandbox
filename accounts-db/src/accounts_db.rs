@@ -3581,13 +3581,12 @@ impl AccountsDb {
                         // This pubkey was found in the storage, but no longer exists in the index.
                         // If this slot was unrefed by clean, then it would have a reference from the
                         // initial store.
-                        // However if this was dereferenced during flush, no reference exists. 
+                        // However if this was dereferenced during flush, no reference exists.
                         if let Some(store) = self
                             .storage
                             .get_slot_storage_entry_shrinking_in_progress_ok(slot_to_shrink)
                         {
-                            if store.is_account_dead(stored_account.index_info.offset(), None) == false
-                            {
+                            if !store.is_account_dead(stored_account.index_info.offset(), None) {
                                 pubkeys_to_unref.push(pubkey);
                             }
                         }
@@ -6495,7 +6494,7 @@ impl AccountsDb {
             let storage = self.storage.get_slot_storage_entry(slot);
             assert!(storage.is_some());
 
-            // Find all the zero lamport accounts that were added and makr them
+            // Find all the zero lamport accounts that were added and mark them
             let storage = storage.unwrap();
             storage.accounts.scan_accounts(|account| {
                 if account.lamports() == 0 {

@@ -1416,11 +1416,18 @@ fn test_clean_zero_lamport_and_dead_slot() {
     accounts.calculate_accounts_delta_hash(2);
     accounts.add_root_and_flush_write_cache(2);
 
+    // After flush before clean, ref count should be 1
+    assert_eq!(accounts.ref_count_for_pubkey(&pubkey1), 1);
+
     // Slot 1 should be removed, slot 0 cannot be removed because it still has
     // the latest update for pubkey 2
     accounts.clean_accounts_for_tests();
     assert!(accounts.storage.get_slot_storage_entry(0).is_some());
     assert!(accounts.storage.get_slot_storage_entry(1).is_none());
+    assert!(accounts.storage.get_slot_storage_entry(2).is_none());
+
+    // If this passes, then clean is working
+    assert_eq!(accounts.ref_count_for_pubkey(&pubkey1), 0);
 
     // Slot 1 should be cleaned because all it's accounts are
     // zero lamports, and are not present in any other slot's
