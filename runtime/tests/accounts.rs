@@ -29,8 +29,7 @@ fn test_shrink_and_clean() {
     solana_logger::setup();
 
     // repeat the whole test scenario
-    for i in 0..5 {
-        println!("Iter {}", i);
+    for _ in 0..5 {
         let accounts = Arc::new(AccountsDb::new_single_for_tests());
         let accounts_for_shrink = accounts.clone();
 
