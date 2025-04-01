@@ -5440,7 +5440,7 @@ fn test_is_candidate_for_shrink() {
 
     entry
         .alive_bytes
-        .store(store_file_size as usize - 1, Ordering::Release);
+        .store(store_file_size as usize - 2000, Ordering::Release);
     assert!(accounts.is_candidate_for_shrink(&entry));
     entry
         .alive_bytes
@@ -5453,7 +5453,7 @@ fn test_is_candidate_for_shrink() {
         .alive_bytes
         .store(file_size_shrink_limit + 1, Ordering::Release);
     accounts.shrink_ratio = AccountShrinkThreshold::TotalSpace { shrink_ratio };
-    assert!(accounts.is_candidate_for_shrink(&entry));
+    assert!(!accounts.is_candidate_for_shrink(&entry));
     accounts.shrink_ratio = AccountShrinkThreshold::IndividualStore { shrink_ratio };
     assert!(!accounts.is_candidate_for_shrink(&entry));
 }

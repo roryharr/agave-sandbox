@@ -140,6 +140,11 @@ const MAX_ITEMS_PER_CHUNK: Slot = 2_500;
 // This allows us to split up accounts index accesses across multiple threads.
 const SHRINK_COLLECT_CHUNK_SIZE: usize = 50;
 
+/// The number of shrink candidate slots that is small enough so that
+/// additional storages from ancient slots can be added to the
+/// candidates for shrinking.
+const SHRINK_INSERT_ANCIENT_THRESHOLD: usize = 10;
+
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum CreateAncientStorage {
     /// ancient storages are created by appending
@@ -691,7 +696,7 @@ pub enum AccountShrinkThreshold {
     IndividualStore { shrink_ratio: f64 },
 }
 pub const DEFAULT_ACCOUNTS_SHRINK_OPTIMIZE_TOTAL_SPACE: bool = true;
-pub const DEFAULT_ACCOUNTS_SHRINK_RATIO: f64 = 0.80;
+pub const DEFAULT_ACCOUNTS_SHRINK_RATIO: f64 = 0.99;
 // The default extra account space in percentage from the ideal target
 const DEFAULT_ACCOUNTS_SHRINK_THRESHOLD_OPTION: AccountShrinkThreshold =
     AccountShrinkThreshold::TotalSpace {
@@ -1323,12 +1328,14 @@ impl AccountStorageEntry {
             .push((offset, size, slot));
     }
 
-    pub fn is_account_dead(&self, offset: Offset, slot: Slot) -> bool {
+    pub fn is_account_dead(&self, offset: Offset, slot: Option<Slot>) -> bool {
         self.dead_account_offsets
             .read()
             .unwrap()
             .iter()
-            .any(|(dead_offset, _, dead_slot)| *dead_offset == offset && *dead_slot <= slot)
+            .any(|(dead_offset, _, dead_slot)| {
+                *dead_offset == offset && (slot.map_or(true, |s| *dead_slot <= s))
+            })
     }
 
     pub fn get_dead_account_stats(&self) -> (usize, usize) {
@@ -3527,7 +3534,7 @@ impl AccountsDb {
     ) -> LoadAccountsIndexForShrink<'a, T> {
         let count = accounts.len();
         let mut alive_accounts = T::with_capacity(count, slot_to_shrink);
-        let pubkeys_to_unref = Vec::with_capacity(count);
+        let mut pubkeys_to_unref = Vec::with_capacity(count);
         let mut zero_lamport_single_ref_pubkeys = Vec::with_capacity(count);
 
         let mut alive = 0;
@@ -3572,10 +3579,18 @@ impl AccountsDb {
 
                     if !is_alive {
                         // This pubkey was found in the storage, but no longer exists in the index.
-                        // It would have had a ref to the storage from the initial store, but it will
-                        // not exist in the re-written slot. Unref it to keep the index consistent with
-                        // rewriting the storage entries.
-                        //pubkeys_to_unref.push(pubkey);
+                        // If this slot was unrefed by clean, then it would have a reference from the
+                        // initial store.
+                        // However if this was dereferenced during flush, no reference exists. 
+                        if let Some(store) = self
+                            .storage
+                            .get_slot_storage_entry_shrinking_in_progress_ok(slot_to_shrink)
+                        {
+                            if store.is_account_dead(stored_account.index_info.offset(), None) == false
+                            {
+                                pubkeys_to_unref.push(pubkey);
+                            }
+                        }
                         dead += 1;
                     } else {
                         do_populate_accounts_for_shrink(ref_count, slot_list);
@@ -4679,7 +4694,7 @@ impl AccountsDb {
             .store(shrink_candidates_slots.len() as u64, Ordering::Relaxed);
 
         let candidates_count = shrink_candidates_slots.len();
-        let ((shrink_slots, shrink_slots_next_batch), select_time_us) = measure_us!({
+        let ((mut shrink_slots, shrink_slots_next_batch), select_time_us) = measure_us!({
             if let AccountShrinkThreshold::TotalSpace { shrink_ratio } = self.shrink_ratio {
                 let (shrink_slots, shrink_slots_next_batch) =
                     self.select_candidates_by_total_usage(&shrink_candidates_slots, shrink_ratio);
@@ -4702,7 +4717,7 @@ impl AccountsDb {
 
         // If there are too few slots to shrink, add an ancient slot
         // for shrinking.
-        /*if shrink_slots.len() < SHRINK_INSERT_ANCIENT_THRESHOLD {
+        if shrink_slots.len() < SHRINK_INSERT_ANCIENT_THRESHOLD {
             let mut ancients = self.best_ancient_slots_to_shrink.write().unwrap();
             while let Some((slot, capacity)) = ancients.pop_front() {
                 if let Some(store) = self.storage.get_slot_storage_entry(slot) {
@@ -4722,7 +4737,7 @@ impl AccountsDb {
                     }
                 }
             }
-        }*/
+        }
         if shrink_slots.is_empty()
             && shrink_slots_next_batch
                 .as_ref()
@@ -7793,7 +7808,9 @@ impl AccountsDb {
 
         let alive_bytes = store.alive_bytes_exclude_zero_lamport_single_ref_accounts() as u64;
         match self.shrink_ratio {
-            AccountShrinkThreshold::TotalSpace { shrink_ratio: _ } => alive_bytes < total_bytes,
+            AccountShrinkThreshold::TotalSpace { shrink_ratio } => {
+                (alive_bytes as f64 / total_bytes as f64) < shrink_ratio
+            }
             AccountShrinkThreshold::IndividualStore { shrink_ratio } => {
                 (alive_bytes as f64 / total_bytes as f64) < shrink_ratio
             }
