@@ -2184,7 +2184,6 @@ mod tests {
         assert_eq!(other_incremental_accounts_hash, incremental_accounts_hash);
     }
 
-
     /// Test that snapshots are loaded correctly when some slots only contain
     /// zero lamport accounts
     ///
@@ -2282,7 +2281,7 @@ mod tests {
         while !bank2.is_complete() {
             bank2.register_unique_tick();
         }
-        bank2.force_flush_accounts_cache();   
+        bank2.force_flush_accounts_cache();
 
         let slot = slot + 1;
         let bank3 =
@@ -2295,7 +2294,7 @@ mod tests {
             bank3.register_unique_tick();
         }
 
-        // Ensure account1 has been cleaned/purged from everywhere        
+        // Ensure account1 has been cleaned/purged from everywhere
         bank3.force_flush_accounts_cache();
         assert!(
             bank3.get_account_modified_slot(&key1.pubkey()).is_none(),
@@ -2344,7 +2343,7 @@ mod tests {
                 .get_account_modified_slot(&key1.pubkey())
                 .is_none(),
             "Ensure Account1 has not been brought back from the dead"
-        );        
+        );
     }
 
     #[test_case(StorageAccess::Mmap)]
