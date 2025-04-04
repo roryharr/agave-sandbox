@@ -1322,6 +1322,7 @@ impl AccountStorageEntry {
     }
 
     pub fn add_dead_account(&self, offset: Offset, size: usize, slot: Slot) {
+        let size = std::cmp::min(self.accounts.len() - offset, size);
         self.dead_account_offsets
             .write()
             .unwrap()
@@ -1340,6 +1341,10 @@ impl AccountStorageEntry {
 
     pub fn get_dead_account_stats(&self) -> (usize, usize) {
         let number_of_accounts = self.dead_account_offsets.read().unwrap().len();
+        let mut dead_accounts = self.dead_account_offsets.read().unwrap().clone();
+        dead_accounts.sort();
+        println!("number of dead accounts: {}", number_of_accounts);
+        println!("dead accounts: {:?}", dead_accounts);
         let dead_bytes = self
             .dead_account_offsets
             .read()
@@ -1348,6 +1353,10 @@ impl AccountStorageEntry {
             .map(|(_, size, _)| *size)
             .sum();
         (number_of_accounts, dead_bytes)
+    }
+
+    pub fn get_dead_accounts_vector(&self) -> Vec<(Offset, usize, Slot)> {
+        self.dead_account_offsets.read().unwrap().clone()
     }
 
     /// Return true if offset is "new" and inserted successfully. Otherwise,
@@ -1396,7 +1405,11 @@ impl AccountStorageEntry {
     }
 
     fn get_account_shared_data(&self, offset: usize) -> Option<AccountSharedData> {
-        self.accounts.get_account_shared_data(offset)
+        let entry = self.accounts.get_account_shared_data(offset);
+        if entry.is_some() && !self.is_account_dead(offset, None) {
+            return entry;
+        }
+        None
     }
 
     fn add_accounts(&self, num_accounts: usize, num_bytes: usize) {
