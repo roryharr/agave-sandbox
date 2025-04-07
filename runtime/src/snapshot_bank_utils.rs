@@ -2193,7 +2193,7 @@ mod tests {
     ///     - take a full snapshot to allow zero lamport in slot1 to shrink
     /// slot 2:
     ///     - make Account1 have zero lamports (send back to Account2)
-    ///     - Flush to ensure that it is not purged when slot3 is flushed      
+    ///     - Flush to ensure that it is not purged when slot3 is flushed
     /// slot 3:
     ///     - remove Account2's reference back to slot 2 by transferring from the mint to Account2
     ///     - take a full snap shot
