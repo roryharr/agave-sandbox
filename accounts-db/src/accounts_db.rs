@@ -1343,8 +1343,8 @@ impl AccountStorageEntry {
         let number_of_accounts = self.dead_account_offsets.read().unwrap().len();
         let mut dead_accounts = self.dead_account_offsets.read().unwrap().clone();
         dead_accounts.sort();
-        println!("number of dead accounts: {}", number_of_accounts);
-        println!("dead accounts: {:?}", dead_accounts);
+        //println!("number of dead accounts: {}", number_of_accounts);
+        //println!("dead accounts: {:?}", dead_accounts);
         let dead_bytes = self
             .dead_account_offsets
             .read()
