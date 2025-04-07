@@ -982,14 +982,14 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> AccountsIndex<T, U> {
         pubkey: &Pubkey,
         slots_to_purge: Slot,
         reclaims: &mut SlotList<T>,
-    ) -> HashSet<(Slot, Pubkey)> {
-        let mut purged_keys: HashSet<(Slot, Pubkey)> = HashSet::new();
+    ) -> Vec<(Slot, Pubkey)> {
+        let mut purged_keys: Vec<(Slot, Pubkey)> = Vec::new();
         self.slot_list_mut(pubkey, |slot_list| {
             slot_list.retain(|(slot, item)| {
                 let should_purge = slots_to_purge > *slot;
                 let is_cached = item.is_cached();
                 if should_purge && !is_cached {
-                    purged_keys.insert((*slot, *pubkey));
+                    purged_keys.push((*slot, *pubkey));
                     reclaims.push((*slot, *item));
                     false
                 } else {

@@ -5861,7 +5861,7 @@ impl AccountsDb {
     fn test_unref(
         &self,
         call_clean: bool,
-        purged_slot_pubkeys: HashSet<(Slot, Pubkey)>,
+        purged_slot_pubkeys: Vec<(Slot, Pubkey)>,
         purged_stored_account_slots: &mut AccountSlots,
         pubkeys_removed_from_accounts_index: &PubkeysRemovedFromAccountsIndex,
     ) {
@@ -5890,8 +5890,8 @@ fn test_unref_pubkeys_removed_from_accounts_index() {
         }
         // pk1 in slot1, purge it
         let db = AccountsDb::new_single_for_tests();
-        let mut purged_slot_pubkeys = HashSet::default();
-        purged_slot_pubkeys.insert((slot1, pk1));
+        let mut purged_slot_pubkeys = Vec::default();
+        purged_slot_pubkeys.push((slot1, pk1));
         let mut reclaims = SlotList::default();
         db.accounts_index.upsert(
             slot1,
@@ -5930,7 +5930,7 @@ fn test_unref_accounts() {
 
             db.test_unref(
                 call_clean,
-                HashSet::default(),
+                Vec::default(),
                 &mut purged_stored_account_slots,
                 &pubkeys_removed_from_accounts_index,
             );
@@ -5944,8 +5944,8 @@ fn test_unref_accounts() {
         {
             // pk1 in slot1, purge it
             let db = AccountsDb::new_single_for_tests();
-            let mut purged_slot_pubkeys = HashSet::default();
-            purged_slot_pubkeys.insert((slot1, pk1));
+            let mut purged_slot_pubkeys = Vec::default();
+            purged_slot_pubkeys.push((slot1, pk1));
             let mut reclaims = SlotList::default();
             db.accounts_index.upsert(
                 slot1,
@@ -5974,7 +5974,7 @@ fn test_unref_accounts() {
         {
             let db = AccountsDb::new_single_for_tests();
             let mut purged_stored_account_slots = AccountSlots::default();
-            let mut purged_slot_pubkeys = HashSet::default();
+            let mut purged_slot_pubkeys = Vec::default();
             let mut reclaims = SlotList::default();
             // pk1 and pk2 both in slot1 and slot2, so each has refcount of 2
             for slot in [slot1, slot2] {
@@ -5994,7 +5994,7 @@ fn test_unref_accounts() {
             // purge pk1 from both 1 and 2 and pk2 from slot 1
             let purges = vec![(slot1, pk1), (slot1, pk2), (slot2, pk1)];
             purges.into_iter().for_each(|(slot, pk)| {
-                purged_slot_pubkeys.insert((slot, pk));
+                purged_slot_pubkeys.push((slot, pk));
             });
             db.test_unref(
                 call_clean,
@@ -6034,7 +6034,7 @@ define_accounts_db_test!(test_many_unrefs, |db| {
             );
             (slot, pk1)
         })
-        .collect::<HashSet<_>>();
+        .collect::<Vec<_>>();
 
     assert_eq!(db.accounts_index.ref_count_from_storage(&pk1), n);
     // unref all 'n' slots

@@ -6385,6 +6385,18 @@ impl AccountsDb {
                 flush_stats.store_accounts_timing.handle_reclaims_elapsed,
                 i64
             ),
+            ("unref_time", flush_stats.unref_time.0, i64),
+            (
+                "zero_lamport_find_time",
+                flush_stats.zero_lamport_find_time.0,
+                i64
+            ),
+            ("reclaim_time", flush_stats.reclaim_time.0, i64),
+            (
+                "collect_accounts_time",
+                flush_stats.collect_accounts_time.0,
+                i64
+            ),
         );
     }
 
@@ -6455,7 +6467,7 @@ impl AccountsDb {
         let mut flush_stats = FlushStats::default();
         let iter_items: Vec<_> = slot_cache.iter().collect();
         let mut pubkey_to_slot_set: Vec<(Pubkey, Slot)> = vec![];
-        let mut purged_older_pubkeys = HashSet::new();
+        let mut purged_older_pubkeys = Vec::new();
         let mut reclaims = Vec::new();
 
         if should_flush_f.is_some() {
@@ -6469,6 +6481,7 @@ impl AccountsDb {
             }
         }
 
+        let mut collect_accounts = Measure::start("collect_accounts");
         let accounts: Vec<(&Pubkey, &AccountSharedData)> = iter_items
             .iter()
             .filter_map(|iter_item| {
@@ -6502,11 +6515,14 @@ impl AccountsDb {
             })
             .collect();
 
+        collect_accounts.stop();
+        flush_stats.collect_accounts_time = Saturating(collect_accounts.as_us());
         let is_dead_slot = accounts.is_empty();
         // Remove the account index entries from earlier roots that are outdated by later roots.
         // Safe because queries to the index will be reading updates from later roots.
         self.purge_slot_cache_pubkeys(slot, pubkey_to_slot_set, is_dead_slot);
 
+        let mut zero_lamport_find = Measure::start("zero_lamport_find");
         if !is_dead_slot {
             // This ensures that all updates are written to an AppendVec, before any
             // updates to the index happen, so anybody that sees a real entry in the index,
@@ -6536,17 +6552,23 @@ impl AccountsDb {
                 }
             });
         }
+        zero_lamport_find.stop();
+        flush_stats.zero_lamport_find_time = Saturating(zero_lamport_find.as_us());
 
         let mut _pubkeys_removed_from_accounts_index = HashSet::new();
         let mut _purge_stats = PurgeStats::default();
         let mut _purged_stored_account_slots = HashMap::new();
 
+        let mut unref_time = Measure::start("unref_time");
         self.unref_accounts(
             purged_older_pubkeys,
             &mut _purged_stored_account_slots,
             &_pubkeys_removed_from_accounts_index,
         );
+        unref_time.stop();
+        flush_stats.unref_time = Saturating(unref_time.as_us());
 
+        let mut reclaim_time = Measure::start("reclaim_time");
         flush_stats.num_accounts_reclaimed += reclaims.len();
         self.handle_reclaims(
             (!reclaims.is_empty()).then(|| reclaims.iter()),
@@ -6556,6 +6578,8 @@ impl AccountsDb {
             HandleReclaims::ProcessDeadSlots(&_purge_stats),
             Some(slot),
         );
+        reclaim_time.stop();
+        flush_stats.reclaim_time = Saturating(reclaim_time.as_us());
 
         // Remove this slot from the cache, which will to AccountsDb's new readers should look like an
         // atomic switch from the cache to storage.
@@ -8028,7 +8052,7 @@ impl AccountsDb {
     ///    and should not be unref'd. If they exist in the accounts index, they are NEW.
     fn unref_accounts(
         &self,
-        purged_slot_pubkeys: HashSet<(Slot, Pubkey)>,
+        purged_slot_pubkeys: Vec<(Slot, Pubkey)>,
         purged_stored_account_slots: &mut AccountSlots,
         pubkeys_removed_from_accounts_index: &PubkeysRemovedFromAccountsIndex,
     ) {
