@@ -5890,8 +5890,7 @@ fn test_unref_pubkeys_removed_from_accounts_index() {
         }
         // pk1 in slot1, purge it
         let db = AccountsDb::new_single_for_tests();
-        let mut purged_slot_pubkeys = Vec::default();
-        purged_slot_pubkeys.push((slot1, pk1));
+        let purged_slot_pubkeys = vec![(slot1, pk1)];
         let mut reclaims = SlotList::default();
         db.accounts_index.upsert(
             slot1,
@@ -5944,8 +5943,7 @@ fn test_unref_accounts() {
         {
             // pk1 in slot1, purge it
             let db = AccountsDb::new_single_for_tests();
-            let mut purged_slot_pubkeys = Vec::default();
-            purged_slot_pubkeys.push((slot1, pk1));
+            let purged_slot_pubkeys = vec![(slot1, pk1)];
             let mut reclaims = SlotList::default();
             db.accounts_index.upsert(
                 slot1,

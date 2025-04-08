@@ -6555,15 +6555,15 @@ impl AccountsDb {
         zero_lamport_find.stop();
         flush_stats.zero_lamport_find_time = Saturating(zero_lamport_find.as_us());
 
-        let mut _pubkeys_removed_from_accounts_index = HashSet::new();
-        let mut _purge_stats = PurgeStats::default();
-        let mut _purged_stored_account_slots = HashMap::new();
+        let pubkeys_removed_from_accounts_index = HashSet::new();
+        let purge_stats = PurgeStats::default();
+        let mut purged_stored_account_slots = HashMap::new();
 
         let mut unref_time = Measure::start("unref_time");
         self.unref_accounts(
             purged_older_pubkeys,
-            &mut _purged_stored_account_slots,
-            &_pubkeys_removed_from_accounts_index,
+            &mut purged_stored_account_slots,
+            &pubkeys_removed_from_accounts_index,
         );
         unref_time.stop();
         flush_stats.unref_time = Saturating(unref_time.as_us());
@@ -6574,8 +6574,8 @@ impl AccountsDb {
             (!reclaims.is_empty()).then(|| reclaims.iter()),
             None,
             false,
-            &_pubkeys_removed_from_accounts_index,
-            HandleReclaims::ProcessDeadSlots(&_purge_stats),
+            &pubkeys_removed_from_accounts_index,
+            HandleReclaims::ProcessDeadSlots(&purge_stats),
             Some(slot),
         );
         reclaim_time.stop();
