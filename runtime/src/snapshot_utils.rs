@@ -1057,7 +1057,7 @@ fn archive_snapshot(
                 .append_dir_all(SNAPSHOTS_DIR, &staging_snapshots_dir)
                 .map_err(E::ArchiveSnapshotsDir)?;
 
-            archive_snapshot_storages(&mut archive, snapshot_storages)?;
+            archive_snapshot_storages(&mut archive, snapshot_storages, snapshot_slot)?;
 
             archive.into_inner().map_err(E::FinishArchive)?;
             Ok(())
@@ -1140,6 +1140,7 @@ fn archive_snapshot(
 fn archive_snapshot_storages(
     archive: &mut tar::Builder<impl Write>,
     snapshot_storages: &[Arc<AccountStorageEntry>],
+    snapshot_slot: Slot,
 ) -> std::result::Result<(), ArchiveSnapshotPackageError> {
     const ACCOUNTS_DIR: &str = "accounts";
     use ArchiveSnapshotPackageError as E;
@@ -1153,6 +1154,15 @@ fn archive_snapshot_storages(
                 let dead_accounts = storage.get_dead_accounts_vector();
                 let mut sorted_dead_accounts = dead_accounts.clone();
                 sorted_dead_accounts.sort();
+
+                let sorted_dead_accounts: Vec<(usize, usize, u64)> = sorted_dead_accounts
+                    .into_iter()
+                    .filter(|&dead_account| {
+                        // Filter out dead accounts that are not in the range of the data
+                        let (_dead_account_start, _dead_account_size, slot) = dead_account;
+                        slot <= snapshot_slot
+                    })
+                    .collect();
 
                 let mut current_offset = 0;
                 for &(dead_account_start, dead_account_size, _slot) in &sorted_dead_accounts {

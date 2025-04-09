@@ -16,6 +16,7 @@ pub struct SerializableAccountStorageEntry {
 pub(super) trait SerializableStorage {
     fn id(&self) -> SerializedAccountsFileId;
     fn current_len(&self) -> usize;
+    fn set_len(&mut self, len: usize);
 }
 
 impl SerializableStorage for SerializableAccountStorageEntry {
@@ -25,13 +26,16 @@ impl SerializableStorage for SerializableAccountStorageEntry {
     fn current_len(&self) -> usize {
         self.accounts_current_len
     }
+    fn set_len(&mut self, len: usize) {
+        self.accounts_current_len = len;
+    }
 }
 
 impl From<&AccountStorageEntry> for SerializableAccountStorageEntry {
     fn from(rhs: &AccountStorageEntry) -> Self {
         Self {
             id: rhs.id() as SerializedAccountsFileId,
-            accounts_current_len: rhs.accounts.len() - rhs.get_dead_account_stats().1,
+            accounts_current_len: rhs.accounts.len(),
         }
     }
 }

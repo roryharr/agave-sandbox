@@ -1339,17 +1339,16 @@ impl AccountStorageEntry {
             })
     }
 
-    pub fn get_dead_account_stats(&self) -> (usize, usize) {
+    pub fn get_dead_account_stats(&self, slot: Option<Slot>) -> (usize, usize) {
         let number_of_accounts = self.dead_account_offsets.read().unwrap().len();
         let mut dead_accounts = self.dead_account_offsets.read().unwrap().clone();
         dead_accounts.sort();
-        //println!("number of dead accounts: {}", number_of_accounts);
-        //println!("dead accounts: {:?}", dead_accounts);
         let dead_bytes = self
             .dead_account_offsets
             .read()
             .unwrap()
             .iter()
+            .filter(|(_, _, dead_slot)| slot.is_none_or(|s| *dead_slot <= s))
             .map(|(_, size, _)| *size)
             .sum();
         (number_of_accounts, dead_bytes)
@@ -6467,7 +6466,7 @@ impl AccountsDb {
         let mut flush_stats = FlushStats::default();
         let iter_items: Vec<_> = slot_cache.iter().collect();
         let mut pubkey_to_slot_set: Vec<(Pubkey, Slot)> = vec![];
-        let mut purged_older_pubkeys = Vec::new();
+        let mut purged_older_pubkeys = Vec::with_capacity(iter_items.len());
         let mut reclaims = Vec::new();
 
         if should_flush_f.is_some() {
