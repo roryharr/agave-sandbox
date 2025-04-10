@@ -1189,6 +1189,15 @@ fn archive_snapshot_storages(
                 let mut sorted_dead_accounts = dead_accounts.clone();
                 sorted_dead_accounts.sort();
 
+                let sorted_dead_accounts: Vec<(usize, usize, u64)> = sorted_dead_accounts
+                .into_iter()
+                .filter(|&dead_account| {
+                    // Filter out dead accounts that are not in the range of the data
+                    let (_dead_account_start, _dead_account_size, slot) = dead_account;
+                    slot <= snapshot_slot
+                })
+                .collect();
+
                 let mut current_offset = 0;
                 for &(dead_account_offset, dead_account_size, _slot) in &sorted_dead_accounts {
                     let length = dead_account_offset - current_offset;
