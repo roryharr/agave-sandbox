@@ -2190,14 +2190,14 @@ mod tests {
     /// slot 1:
     ///     - send some lamports to Account1 (from Account2) to bring it to life
     ///     - Send some lamports to Account3 (from mint) to preserve this slot
-    ///     - take a full snapshot to allow zero lamport in slot1 to shrink
+    ///     - take a full snapshot to allow Account1 Slot1 to clean/shrink
     /// slot 2:
     ///     - make Account1 have zero lamports (send back to Account2)
     ///     - Flush to ensure that it is not purged when slot3 is flushed
     /// slot 3:
     ///     - remove Account2's reference back to slot 2 by transferring from the mint to Account2
     ///     - take a full snap shot
-    ///     - verify that the full snap shot does not bring account1 back to life
+    ///     - verify that recovery from full snapshot does not bring account1 back to life
     #[test]
     fn test_snapshots_handle_zero_lamport_accounts() {
         let collector = Pubkey::new_unique();
@@ -2313,7 +2313,7 @@ mod tests {
         )
         .unwrap();
 
-        // Cleanup the run directory TODO: Check if needed
+        // Cleanup the run directory
         fs::remove_dir_all(&accounts_dir).unwrap();
 
         let (deserialized_bank, _) = bank_from_snapshot_archives(
