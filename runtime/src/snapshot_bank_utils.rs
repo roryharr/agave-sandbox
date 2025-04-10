@@ -1187,7 +1187,9 @@ mod tests {
         let genesis_config = GenesisConfig::default();
         let original_bank = Bank::new_for_tests(&genesis_config);
 
-        original_bank.fill_bank_with_ticks_for_tests();
+        while !original_bank.is_complete() {
+            original_bank.register_unique_tick();
+        }
 
         let (_tmp_dir, accounts_dir) = create_tmp_accounts_dir_for_tests();
         let bank_snapshots_dir = tempfile::TempDir::new().unwrap();
@@ -1251,7 +1253,9 @@ mod tests {
         bank0
             .transfer(sol_to_lamports(3.), &mint_keypair, &key3.pubkey())
             .unwrap();
-        bank0.fill_bank_with_ticks_for_tests();
+        while !bank0.is_complete() {
+            bank0.register_unique_tick();
+        }
 
         let slot = 1;
         let bank1 =
@@ -1265,7 +1269,9 @@ mod tests {
         bank1
             .transfer(sol_to_lamports(5.), &mint_keypair, &key5.pubkey())
             .unwrap();
-        bank1.fill_bank_with_ticks_for_tests();
+        while !bank1.is_complete() {
+            bank1.register_unique_tick();
+        }
 
         let slot = slot + 1;
         let bank2 =
@@ -1273,7 +1279,9 @@ mod tests {
         bank2
             .transfer(sol_to_lamports(1.), &mint_keypair, &key1.pubkey())
             .unwrap();
-        bank2.fill_bank_with_ticks_for_tests();
+        while !bank2.is_complete() {
+            bank2.register_unique_tick();
+        }
 
         let slot = slot + 1;
         let bank3 =
@@ -1281,7 +1289,9 @@ mod tests {
         bank3
             .transfer(sol_to_lamports(1.), &mint_keypair, &key1.pubkey())
             .unwrap();
-        bank3.fill_bank_with_ticks_for_tests();
+        while !bank3.is_complete() {
+            bank3.register_unique_tick();
+        }
 
         let slot = slot + 1;
         let bank4 =
@@ -1289,7 +1299,9 @@ mod tests {
         bank4
             .transfer(sol_to_lamports(1.), &mint_keypair, &key1.pubkey())
             .unwrap();
-        bank4.fill_bank_with_ticks_for_tests();
+        while !bank4.is_complete() {
+            bank4.register_unique_tick();
+        }
 
         let (_tmp_dir, accounts_dir) = create_tmp_accounts_dir_for_tests();
         let bank_snapshots_dir = tempfile::TempDir::new().unwrap();
@@ -1359,7 +1371,9 @@ mod tests {
         bank0
             .transfer(sol_to_lamports(3.), &mint_keypair, &key3.pubkey())
             .unwrap();
-        bank0.fill_bank_with_ticks_for_tests();
+        while !bank0.is_complete() {
+            bank0.register_unique_tick();
+        }
 
         let slot = 1;
         let bank1 =
@@ -1373,7 +1387,9 @@ mod tests {
         bank1
             .transfer(sol_to_lamports(5.), &mint_keypair, &key5.pubkey())
             .unwrap();
-        bank1.fill_bank_with_ticks_for_tests();
+        while !bank1.is_complete() {
+            bank1.register_unique_tick();
+        }
 
         let (_tmp_dir, accounts_dir) = create_tmp_accounts_dir_for_tests();
         let bank_snapshots_dir = tempfile::TempDir::new().unwrap();
@@ -1398,7 +1414,9 @@ mod tests {
         bank2
             .transfer(sol_to_lamports(1.), &mint_keypair, &key1.pubkey())
             .unwrap();
-        bank2.fill_bank_with_ticks_for_tests();
+        while !bank2.is_complete() {
+            bank2.register_unique_tick();
+        }
 
         let slot = slot + 1;
         let bank3 =
@@ -1406,7 +1424,9 @@ mod tests {
         bank3
             .transfer(sol_to_lamports(1.), &mint_keypair, &key1.pubkey())
             .unwrap();
-        bank3.fill_bank_with_ticks_for_tests();
+        while !bank3.is_complete() {
+            bank3.register_unique_tick();
+        }
 
         let slot = slot + 1;
         let bank4 =
@@ -1414,7 +1434,9 @@ mod tests {
         bank4
             .transfer(sol_to_lamports(1.), &mint_keypair, &key1.pubkey())
             .unwrap();
-        bank4.fill_bank_with_ticks_for_tests();
+        while !bank4.is_complete() {
+            bank4.register_unique_tick();
+        }
 
         let incremental_snapshot_archive_info = bank_to_incremental_snapshot_archive(
             bank_snapshots_dir.path(),
@@ -1469,7 +1491,9 @@ mod tests {
         bank0
             .transfer(sol_to_lamports(3.), &mint_keypair, &key3.pubkey())
             .unwrap();
-        bank0.fill_bank_with_ticks_for_tests();
+        while !bank0.is_complete() {
+            bank0.register_unique_tick();
+        }
 
         let slot = 1;
         let bank1 =
@@ -1483,7 +1507,9 @@ mod tests {
         bank1
             .transfer(sol_to_lamports(3.), &mint_keypair, &key3.pubkey())
             .unwrap();
-        bank1.fill_bank_with_ticks_for_tests();
+        while !bank1.is_complete() {
+            bank1.register_unique_tick();
+        }
 
         let (_tmp_dir, accounts_dir) = create_tmp_accounts_dir_for_tests();
         let bank_snapshots_dir = tempfile::TempDir::new().unwrap();
@@ -1508,7 +1534,9 @@ mod tests {
         bank2
             .transfer(sol_to_lamports(1.), &mint_keypair, &key1.pubkey())
             .unwrap();
-        bank2.fill_bank_with_ticks_for_tests();
+        while !bank2.is_complete() {
+            bank2.register_unique_tick();
+        }
 
         let slot = slot + 1;
         let bank3 =
@@ -1516,7 +1544,9 @@ mod tests {
         bank3
             .transfer(sol_to_lamports(2.), &mint_keypair, &key2.pubkey())
             .unwrap();
-        bank3.fill_bank_with_ticks_for_tests();
+        while !bank3.is_complete() {
+            bank3.register_unique_tick();
+        }
 
         let slot = slot + 1;
         let bank4 =
@@ -1524,7 +1554,9 @@ mod tests {
         bank4
             .transfer(sol_to_lamports(3.), &mint_keypair, &key3.pubkey())
             .unwrap();
-        bank4.fill_bank_with_ticks_for_tests();
+        while !bank4.is_complete() {
+            bank4.register_unique_tick();
+        }
 
         bank_to_incremental_snapshot_archive(
             &bank_snapshots_dir,
@@ -1594,7 +1626,9 @@ mod tests {
         let incremental_snapshot_archives_dir = tempfile::TempDir::new().unwrap();
         let snapshot_archive_format = ArchiveFormat::Tar;
 
-        let (genesis_config, mint_keypair) = create_genesis_config(sol_to_lamports(1_000_000.));
+        let (mut genesis_config, mint_keypair) = create_genesis_config(sol_to_lamports(1_000_000.));
+        // test expects 0 transaction fee
+        genesis_config.fee_rate_governor = solana_sdk::fee_calculator::FeeRateGovernor::new(0, 0);
 
         let lamports_to_transfer = sol_to_lamports(123_456.);
         let (bank0, bank_forks) = Bank::new_with_paths_for_tests(
@@ -1607,7 +1641,9 @@ mod tests {
         bank0
             .transfer(lamports_to_transfer, &mint_keypair, &key2.pubkey())
             .unwrap();
-        bank0.fill_bank_with_ticks_for_tests();
+        while !bank0.is_complete() {
+            bank0.register_unique_tick();
+        }
 
         let slot = 1;
         let bank1 =
@@ -1615,7 +1651,9 @@ mod tests {
         bank1
             .transfer(lamports_to_transfer, &key2, &key1.pubkey())
             .unwrap();
-        bank1.fill_bank_with_ticks_for_tests();
+        while !bank1.is_complete() {
+            bank1.register_unique_tick();
+        }
 
         let full_snapshot_slot = slot;
         let full_snapshot_archive_info = bank_to_full_snapshot_archive(
@@ -1639,15 +1677,21 @@ mod tests {
             blockhash,
         ));
         let fee = bank2.get_fee_for_message(tx.message()).unwrap();
-        bank2
-            .transfer(lamports_to_transfer - fee, &key1, &key2.pubkey())
-            .unwrap();
+        let tx = system_transaction::transfer(
+            &key1,
+            &key2.pubkey(),
+            lamports_to_transfer - fee,
+            blockhash,
+        );
+        bank2.process_transaction(&tx).unwrap();
         assert_eq!(
             bank2.get_balance(&key1.pubkey()),
             0,
             "Ensure Account1's balance is zero"
         );
-        bank2.fill_bank_with_ticks_for_tests();
+        while !bank2.is_complete() {
+            bank2.register_unique_tick();
+        }
 
         // Take an incremental snapshot and then do a roundtrip on the bank and ensure it
         // deserializes correctly.
@@ -1693,12 +1737,16 @@ mod tests {
         bank3
             .transfer(lamports_to_transfer, &mint_keypair, &key2.pubkey())
             .unwrap();
-        bank3.fill_bank_with_ticks_for_tests();
+        while !bank3.is_complete() {
+            bank3.register_unique_tick();
+        }
 
         let slot = slot + 1;
         let bank4 =
             new_bank_from_parent_with_bank_forks(bank_forks.as_ref(), bank3, &collector, slot);
-        bank4.fill_bank_with_ticks_for_tests();
+        while !bank4.is_complete() {
+            bank4.register_unique_tick();
+        }
 
         // Ensure account1 has been cleaned/purged from everywhere
         bank4.squash();
@@ -1761,12 +1809,16 @@ mod tests {
 
         let (genesis_config, mint_keypair) = create_genesis_config(sol_to_lamports(1_000_000.));
         let (bank0, bank_forks) = Bank::new_with_bank_forks_for_tests(&genesis_config);
-        bank0.fill_bank_with_ticks_for_tests();
+        while !bank0.is_complete() {
+            bank0.register_unique_tick();
+        }
 
         let slot = 1;
         let bank1 =
             new_bank_from_parent_with_bank_forks(bank_forks.as_ref(), bank0, &collector, slot);
-        bank1.fill_bank_with_ticks_for_tests();
+        while !bank1.is_complete() {
+            bank1.register_unique_tick();
+        }
 
         let all_snapshots_dir = tempfile::TempDir::new().unwrap();
         let snapshot_archive_format = ArchiveFormat::Tar;
@@ -1788,7 +1840,9 @@ mod tests {
         bank2
             .transfer(sol_to_lamports(1.), &mint_keypair, &key1.pubkey())
             .unwrap();
-        bank2.fill_bank_with_ticks_for_tests();
+        while !bank2.is_complete() {
+            bank2.register_unique_tick();
+        }
 
         bank_to_incremental_snapshot_archive(
             &all_snapshots_dir,
