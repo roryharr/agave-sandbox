@@ -546,7 +546,6 @@ impl HotStorageReader {
         };
 
         Ok(Some(callback(stored_account)))
-
     }
 
     /// Returns the account located at the specified index offset.

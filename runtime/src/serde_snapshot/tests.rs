@@ -214,6 +214,15 @@ mod serde_snapshot_tests {
         }
     }
 
+    fn check_ref_count(track_dead_accounts: bool, expected_ref_count: u64, actual_ref_count: u64) {
+        let expected_ref_count = if track_dead_accounts {
+            1
+        } else {
+            expected_ref_count
+        };
+        assert_eq!(expected_ref_count, actual_ref_count);
+    }
+
     #[test_case(StorageAccess::Mmap)]
     fn test_accounts_serialize(storage_access: StorageAccess) {
         solana_logger::setup();
@@ -410,8 +419,16 @@ mod serde_snapshot_tests {
             // Don't check the first 35 accounts which have not been modified on slot 0
             daccounts.check_accounts(&pubkeys[35..], 0, 65, 37);
             daccounts.check_accounts(&pubkeys1, 1, 10, 1);
-            daccounts.check_storage(0, 100, 100);
-            daccounts.check_storage(1, 21, 21);
+
+            // With dead accounts tracked in the storages, storages are shrunk when saved/restored
+            if daccounts.track_dead_accounts {
+                daccounts.check_storage(0, 78, 78);
+                daccounts.check_storage(1, 11, 11);
+            } else {
+                daccounts.check_storage(0, 100, 100);
+                daccounts.check_storage(1, 21, 21);
+            }
+
             daccounts.check_storage(2, 31, 31);
 
             assert_eq!(
@@ -524,8 +541,16 @@ mod serde_snapshot_tests {
         accounts.print_accounts_stats("post_f");
 
         accounts.assert_load_account(current_slot, pubkey, some_lamport);
-        accounts.assert_load_account(current_slot, purged_pubkey1, 0);
-        accounts.assert_load_account(current_slot, purged_pubkey2, 0);
+
+        // With dead accounts tracked in the storages, they will be entirely purged when the
+        // accounts are deserialized and serialized.
+        if accounts.track_dead_accounts {
+            accounts.assert_not_load_account(current_slot, purged_pubkey1);
+            accounts.assert_not_load_account(current_slot, purged_pubkey2);
+        } else {
+            accounts.assert_load_account(current_slot, purged_pubkey1, 0);
+            accounts.assert_load_account(current_slot, purged_pubkey2, 0);
+        }
         accounts.assert_load_account(current_slot, dummy_pubkey, dummy_lamport);
 
         let ancestors = Ancestors::default();
@@ -542,9 +567,7 @@ mod serde_snapshot_tests {
             .unwrap();
     }
 
-    //TODO This test seems useful, but can't pass in its current form.
-    // It doesn't use the custom serializer for data. Need to abstract so it can use it or figure out something else
-    /*  #[test_case(StorageAccess::Mmap)]
+    #[test_case(StorageAccess::Mmap)]
     #[test_case(StorageAccess::File)]
     fn test_accounts_purge_chained_purge_before_snapshot_restore(storage_access: StorageAccess) {
         solana_logger::setup();
@@ -552,7 +575,7 @@ mod serde_snapshot_tests {
             accounts.clean_accounts_for_tests();
             reconstruct_accounts_db_via_serialization(&accounts, current_slot, storage_access)
         });
-    }*/
+    }
 
     #[test_case(StorageAccess::Mmap)]
     #[test_case(StorageAccess::File)]
@@ -633,8 +656,16 @@ mod serde_snapshot_tests {
         accounts.print_count_and_status("after purge zero");
 
         accounts.assert_load_account(current_slot, pubkey, old_lamport);
-        accounts.assert_load_account(current_slot, purged_pubkey1, 0);
-        accounts.assert_load_account(current_slot, purged_pubkey2, 0);
+
+        // With dead accounts tracked in the storages, they will be entirely purged when the
+        // accounts are deserialized and serialized.
+        if accounts.track_dead_accounts {
+            accounts.assert_not_load_account(current_slot, purged_pubkey1);
+            accounts.assert_not_load_account(current_slot, purged_pubkey2);
+        } else {
+            accounts.assert_load_account(current_slot, purged_pubkey1, 0);
+            accounts.assert_load_account(current_slot, purged_pubkey2, 0);
+        }
     }
 
     #[test_case(StorageAccess::Mmap)]
@@ -672,28 +703,48 @@ mod serde_snapshot_tests {
         current_slot += 1;
         assert_eq!(0, accounts.alive_account_count_in_slot(current_slot));
         accounts.add_root_and_flush_write_cache(current_slot - 1);
-        assert_eq!(1, accounts.ref_count_for_pubkey(&pubkey1));
+        check_ref_count(
+            accounts.track_dead_accounts,
+            1,
+            accounts.ref_count_for_pubkey(&pubkey1),
+        );
         accounts.store_for_tests(current_slot, &[(&pubkey1, &account2)]);
         accounts.store_for_tests(current_slot, &[(&pubkey1, &account2)]);
         accounts.add_root_and_flush_write_cache(current_slot);
         assert_eq!(1, accounts.alive_account_count_in_slot(current_slot));
         // Stores to same pubkey, same slot only count once towards the
         // ref count
-        assert_eq!(1, accounts.ref_count_for_pubkey(&pubkey1));
+        check_ref_count(
+            accounts.track_dead_accounts,
+            2,
+            accounts.ref_count_for_pubkey(&pubkey1),
+        );
         accounts.calculate_accounts_delta_hash(current_slot);
 
         // C: Yet more update to trigger lazy clean of step A
         current_slot += 1;
-        assert_eq!(1, accounts.ref_count_for_pubkey(&pubkey1));
+        check_ref_count(
+            accounts.track_dead_accounts,
+            2,
+            accounts.ref_count_for_pubkey(&pubkey1),
+        );
         accounts.store_for_tests(current_slot, &[(&pubkey1, &account3)]);
         accounts.add_root_and_flush_write_cache(current_slot);
-        assert_eq!(1, accounts.ref_count_for_pubkey(&pubkey1));
+        check_ref_count(
+            accounts.track_dead_accounts,
+            3,
+            accounts.ref_count_for_pubkey(&pubkey1),
+        );
         accounts.calculate_accounts_delta_hash(current_slot);
         accounts.add_root_and_flush_write_cache(current_slot);
 
         // D: Make pubkey1 0-lamport; also triggers clean of step B
         current_slot += 1;
-        assert_eq!(1, accounts.ref_count_for_pubkey(&pubkey1));
+        check_ref_count(
+            accounts.track_dead_accounts,
+            3,
+            accounts.ref_count_for_pubkey(&pubkey1),
+        );
         accounts.store_for_tests(current_slot, &[(&pubkey1, &zero_lamport_account)]);
         accounts.store_for_tests(current_slot, &[(&pubkey3, &account2)]);
         accounts.add_root_and_flush_write_cache(current_slot);
@@ -715,11 +766,12 @@ mod serde_snapshot_tests {
             .alive_roots
             .insert(current_slot);
 
-        assert_eq!(
-            // Removed one reference from the dead slot (reference only counted once
-            // even though there were two stores to the pubkey in that slot)
-            1, /* == 3 - 1 + 1 */
-            accounts.ref_count_for_pubkey(&pubkey1)
+        // Removed one reference from the dead slot (reference only counted once
+        // even though there were two stores to the pubkey in that slot)
+        check_ref_count(
+            accounts.track_dead_accounts,
+            3,
+            accounts.ref_count_for_pubkey(&pubkey1),
         );
         accounts.calculate_accounts_delta_hash(current_slot);
         accounts.add_root(current_slot);

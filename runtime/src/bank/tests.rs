@@ -5,6 +5,7 @@ use {
         *,
     },
     crate::{
+        accounts_background_service::{PrunedBanksRequestHandler, SendDroppedBankCallback},
         bank_client::BankClient,
         bank_forks::BankForks,
         genesis_utils::{
@@ -6680,10 +6681,18 @@ fn test_clean_nonrooted() {
     bank3.force_flush_accounts_cache();
 
     bank3.clean_accounts_for_tests();
-    assert_eq!(
-        bank3.rc.accounts.accounts_db.ref_count_for_pubkey(&pubkey0),
-        1
-    );
+    if bank3.rc.accounts.accounts_db.track_dead_accounts {
+        assert_eq!(
+            bank3.rc.accounts.accounts_db.ref_count_for_pubkey(&pubkey0),
+            1
+        );
+    } else {
+        assert_eq!(
+            bank3.rc.accounts.accounts_db.ref_count_for_pubkey(&pubkey0),
+            2
+        );
+    }
+
     assert!(bank3
         .rc
         .accounts
@@ -8452,6 +8461,7 @@ fn test_debug_bank() {
 #[derive(Debug)]
 enum AcceptableScanResults {
     DroppedSlotError,
+    NoFailure,
     Both,
 }
 
@@ -8552,7 +8562,8 @@ fn test_store_scan_consistency<F>(
                                     })
                                 );
                             }
-                            (AcceptableScanResults::Both, false) => {
+                            (AcceptableScanResults::NoFailure, _)
+                            | (AcceptableScanResults::Both, false) => {
                                 assert!(accounts_result.is_ok())
                             }
                         }
@@ -8626,7 +8637,7 @@ fn test_store_scan_consistency<F>(
     assert!(remaining_loops > 0, "test timed out");
 }
 
-/*#[test]
+#[test]
 fn test_store_scan_consistency_unrooted() {
     let (pruned_banks_sender, pruned_banks_receiver) = unbounded();
     let pruned_banks_request_handler = PrunedBanksRequestHandler {
@@ -8767,7 +8778,7 @@ fn test_store_scan_consistency_root() {
         None,
         AcceptableScanResults::NoFailure,
     );
-}*/
+}
 
 fn setup_banks_on_fork_to_remove(
     bank0: Arc<Bank>,
@@ -9912,7 +9923,7 @@ fn do_test_clean_dropped_unrooted_banks(freeze_bank1: FreezeBank1) {
     bank2
         .transfer(amount, &mint_keypair, &key3.pubkey())
         .unwrap();
-    bank2.store_account(&key5.pubkey(), &AccountSharedData::new(1, 0, &owner));
+    bank2.store_account(&key5.pubkey(), &AccountSharedData::new(0, 0, &owner));
 
     bank2.freeze(); // the freeze here is not strictly necessary, but more for illustration
     bank2.squash();
