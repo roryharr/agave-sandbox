@@ -1313,6 +1313,17 @@ impl AccountStorageEntry {
         self.alive_bytes.load(Ordering::Acquire)
     }
 
+    // Returns the dead accounts sorted as a vector
+    pub fn get_sorted_dead_accounts(&self) -> Vec<(Offset, usize, Slot)> {
+        Vec::new()
+    }
+
+    // Returns the number of dead bytes in the storage as of a given slot
+    // If slot is None, it returns all dead bytes
+    pub fn get_dead_account_bytes(&self, _slot: Option<Slot>) -> usize {
+        0
+    }
+
     /// Return true if offset is "new" and inserted successfully. Otherwise,
     /// return false if the offset exists already.
     fn insert_zero_lamport_single_ref_account_offset(&self, offset: usize) -> bool {
