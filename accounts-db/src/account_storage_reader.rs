@@ -79,19 +79,28 @@ impl Read for AccountStorageReader<'_> {
                 }
             }
 
-            let remaining = if let Some(&(dead_start, _, _)) = next_dead_account {
-                (dead_start as isize - self.current_offset as isize).max(0) as usize
-            } else {
-                buf_len - total_read
+            // Determine how much data to read
+            let remaining = {
+                let max_readable = self.length - self.current_offset;
+                if let Some(&(dead_start, _, _)) = next_dead_account {
+                    (dead_start - self.current_offset).min(max_readable)
+                } else {
+                    (buf_len - total_read).min(max_readable)
+                }
             };
 
-            let read_size = if let Some(file) = &mut self.file {
-                file.read(&mut buf[total_read..total_read + remaining.min(buf_len - total_read)])?
-            } else if let InternalsForArchive::Mmap(data) = &self.internals {
-                (&data[self.current_offset..])
-                    .read(&mut buf[total_read..total_read + remaining.min(buf_len - total_read)])?
-            } else {
-                0
+            // Perform the read operation
+            let read_size = match self.internals {
+                InternalsForArchive::Mmap(data) => (&data
+                    [self.current_offset..self.current_offset + remaining])
+                    .read(&mut buf[total_read..total_read + remaining])?,
+                InternalsForArchive::FileIo(_) => {
+                    if let Some(file) = &mut self.file {
+                        file.read(&mut buf[total_read..total_read + remaining])?
+                    } else {
+                        0
+                    }
+                }
             };
 
             if read_size == 0 {
