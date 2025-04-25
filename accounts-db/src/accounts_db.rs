@@ -1073,6 +1073,13 @@ pub struct AccountStorageEntry {
     /// account as "dead" twice. However, this should be fine. It just makes
     /// shrink more likely to visit this storage.
     zero_lamport_single_ref_offsets: RwLock<IntSet<Offset>>,
+
+    /// Dead Accounts. These are accounts that are still present in the storage
+    /// but should be ignored during rebuild. They have been removed
+    /// from the accounts index, so they will not be picked up by scan.
+    /// Slot is the slot that the account was rewritten to a newer
+    /// Slot and invalidated from this storage.
+    dead_account_offsets: RwLock<Vec<(Offset, usize, Slot)>>,
 }
 
 impl AccountStorageEntry {
@@ -1094,6 +1101,7 @@ impl AccountStorageEntry {
             count_and_status: SeqLock::new((0, AccountStorageStatus::Available)),
             alive_bytes: AtomicUsize::new(0),
             zero_lamport_single_ref_offsets: RwLock::default(),
+            dead_account_offsets: RwLock::default(),
         }
     }
 
@@ -1112,6 +1120,7 @@ impl AccountStorageEntry {
             alive_bytes: AtomicUsize::new(self.alive_bytes()),
             accounts,
             zero_lamport_single_ref_offsets: RwLock::default(),
+            dead_account_offsets: RwLock::default(),
         })
     }
 
@@ -1128,6 +1137,7 @@ impl AccountStorageEntry {
             count_and_status: SeqLock::new((0, AccountStorageStatus::Available)),
             alive_bytes: AtomicUsize::new(0),
             zero_lamport_single_ref_offsets: RwLock::default(),
+            dead_account_offsets: RwLock::default(),
         }
     }
 
@@ -1164,15 +1174,39 @@ impl AccountStorageEntry {
         self.alive_bytes.load(Ordering::Acquire)
     }
 
-    // Returns the dead accounts sorted as a vector
-    pub fn get_sorted_dead_accounts(&self) -> Vec<(Offset, usize, Slot)> {
-        Vec::new()
+    /// Adds passed in offset to the dead account vector
+    pub fn add_dead_account(&self, offset: Offset, size: usize, slot: Slot) {
+        let size = std::cmp::min(self.accounts.len() - offset, size);
+        self.dead_account_offsets
+            .write()
+            .unwrap()
+            .push((offset, size, slot));
     }
 
-    // Returns the number of dead bytes in the storage as of a given slot
-    // If slot is None, it returns all dead bytes
-    pub fn get_dead_account_bytes(&self, _slot: Option<Slot>) -> usize {
-        0
+    /// Returns the dead accounts that were dead as of Slot or older
+    /// If slot is None then it will be assumed to be the max root
+    /// and all dead accounts will be returned
+    pub fn get_dead_accounts(&self, slot: Option<Slot>) -> Vec<(Offset, usize)> {
+        self.dead_account_offsets
+            .read()
+            .unwrap()
+            .iter()
+            .filter(|(_, _, dead_slot)| slot.is_none_or(|s| *dead_slot <= s))
+            .map(|(offset, size, _)| (*offset, *size))
+            .collect()
+    }
+
+    /// Returns the number of dead bytes in the storage as of a given slot
+    /// If slot is None then it will be assumed to be the max root
+    /// and all dead bytes will be returned
+    pub fn get_dead_account_bytes(&self, slot: Option<Slot>) -> usize {
+        let dead_accounts = self.dead_account_offsets.read().unwrap();
+        let dead_bytes = dead_accounts
+            .iter()
+            .filter(|(_, _, dead_slot)| slot.is_none_or(|s| *dead_slot <= s))
+            .map(|(_, size, _)| *size)
+            .sum();
+        dead_bytes
     }
 
     /// Return true if offset is "new" and inserted successfully. Otherwise,

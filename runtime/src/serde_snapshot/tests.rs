@@ -34,7 +34,8 @@ mod serde_snapshot_tests {
         solana_rent_collector::RentCollector,
         std::{
             fs::File,
-            io::{copy, BufReader, Cursor, Read, Write},
+            io,
+            io::{BufReader, Cursor, Read, Write},
             ops::RangeFull,
             path::{Path, PathBuf},
             sync::{
@@ -144,11 +145,11 @@ mod serde_snapshot_tests {
             let output_path = output_dir.as_ref().join(file_name);
             let mut reader = AccountStorageReader::new(&storage_entry, None).unwrap();
             let mut writer = File::create(&output_path)?;
-            copy(&mut reader, &mut writer)?;
+            io::copy(&mut reader, &mut writer)?;
 
             // Read new file into append-vec and build new entry
             let (accounts_file, num_accounts) =
-                AccountsFile::new_from_file(output_path, reader.get_length(), storage_access)?;
+                AccountsFile::new_from_file(output_path, reader.len(), storage_access)?;
             let new_storage_entry = AccountStorageEntry::new_existing(
                 storage_entry.slot(),
                 storage_entry.id(),
