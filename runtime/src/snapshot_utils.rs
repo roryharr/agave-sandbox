@@ -517,6 +517,9 @@ pub enum ArchiveSnapshotPackageError {
 
     #[error("failed to move archive from '{1}' to '{2}': {0}")]
     MoveArchive(#[source] IoError, PathBuf, PathBuf),
+
+    #[error("failed to create account storage reader '{1}': {0}")]
+    AccountStorageReaderError(#[source] IoError, PathBuf),
 }
 
 /// Errors that can happen in `hard_link_storages_to_snapshot()`
@@ -1064,12 +1067,15 @@ fn archive_snapshot(
                 let path_in_archive = Path::new(ACCOUNTS_DIR)
                     .join(AccountsFile::file_name(storage.slot(), storage.id()));
 
-                let reader = AccountStorageReader::new(storage, Some(snapshot_slot)).unwrap();
+                let reader =
+                    AccountStorageReader::new(storage, Some(snapshot_slot)).map_err(|err| {
+                        E::AccountStorageReaderError(err, storage.path().to_path_buf())
+                    })?;
                 let mut header = tar::Header::new_gnu();
                 header.set_path(path_in_archive).map_err(|err| {
                     E::ArchiveAccountStorageFile(err, storage.path().to_path_buf())
                 })?;
-                header.set_size(reader.get_length() as u64);
+                header.set_size(reader.len() as u64);
                 header.set_cksum();
                 archive.append(&header, reader).map_err(|err| {
                     E::ArchiveAccountStorageFile(err, storage.path().to_path_buf())
