@@ -265,7 +265,7 @@ impl AccountsCache {
         }
     }
 
-    pub fn clear_these_roots(&self, roots_to_clear: BTreeSet<Slot>)  {
+    pub fn clear_these_roots(&self, roots_to_clear: BTreeSet<Slot>) {
         let mut w_maybe_unflushed_roots = self.maybe_unflushed_roots.write().unwrap();
         for root in roots_to_clear {
             w_maybe_unflushed_roots.remove(&root);

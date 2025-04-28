@@ -6350,8 +6350,7 @@ impl AccountsDb {
         let mut flush_stats = FlushStats::default();
         let mut flushed_roots = BTreeSet::new();
         for (i, &root) in roots_list.iter().rev().enumerate() {
-            if i < 10  && should_flush_f.is_some()
-                {
+            if i < 10 && should_flush_f.is_some() {
                 if let Some(slot_cache) = self.accounts_cache.slot_cache(root) {
                     for account in slot_cache.iter() {
                         let _ret = should_flush_f
