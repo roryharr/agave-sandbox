@@ -6342,20 +6342,35 @@ impl AccountsDb {
             .flatten();
 
         // Always flush up to `requested_flush_root`, which is necessary for things like snapshotting.
-        let flushed_roots: BTreeSet<Slot> = self.accounts_cache.clear_roots(requested_flush_root);
+        let roots_list: BTreeSet<Slot> = self.accounts_cache.get_roots(requested_flush_root);
 
         // Iterate from highest to lowest so that we don't need to flush earlier
         // outdated updates in earlier roots
         let mut num_roots_flushed = 0;
         let mut flush_stats = FlushStats::default();
-        for &root in flushed_roots.iter().rev() {
-            if let Some(stats) =
+        let mut flushed_roots = BTreeSet::new();
+        for (i, &root) in roots_list.iter().rev().enumerate() {
+            if i < 10  && should_flush_f.is_some()
+                {
+                if let Some(slot_cache) = self.accounts_cache.slot_cache(root) {
+                    for account in slot_cache.iter() {
+                        let _ret = should_flush_f
+                            .as_mut()
+                            .map(|should_flush_f| should_flush_f(account.key()))
+                            .unwrap_or(true);
+                    }
+                }
+            } else if let Some(stats) =
                 self.flush_slot_cache_with_clean(root, should_flush_f.as_mut(), max_clean_root)
             {
                 num_roots_flushed += 1;
                 flush_stats.accumulate(&stats);
+                flushed_roots.insert(root);
             }
         }
+
+        //
+        self.accounts_cache.clear_these_roots(flushed_roots.clone());
 
         // Note that self.flush_slot_cache_with_clean() can return None if the
         // slot is already been flushed. This can happen if the cache is

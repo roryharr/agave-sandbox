@@ -252,6 +252,26 @@ impl AccountsCache {
         }
     }
 
+    pub fn get_roots(&self, max_root: Option<Slot>) -> BTreeSet<Slot> {
+        let w_maybe_unflushed_roots = self.maybe_unflushed_roots.read().unwrap();
+        if let Some(max_root) = max_root {
+            w_maybe_unflushed_roots
+                .iter()
+                .filter(|&&root| root <= max_root)
+                .cloned()
+                .collect()
+        } else {
+            w_maybe_unflushed_roots.iter().cloned().collect()
+        }
+    }
+
+    pub fn clear_these_roots(&self, roots_to_clear: BTreeSet<Slot>)  {
+        let mut w_maybe_unflushed_roots = self.maybe_unflushed_roots.write().unwrap();
+        for root in roots_to_clear {
+            w_maybe_unflushed_roots.remove(&root);
+        }
+    }
+
     pub fn contains_any_slots(&self, max_slot_inclusive: Slot) -> bool {
         self.cache.iter().any(|e| e.key() <= &max_slot_inclusive)
     }
