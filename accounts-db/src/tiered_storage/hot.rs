@@ -298,6 +298,7 @@ pub struct HotAccount<'accounts_file, M: TieredAccountMeta> {
     /// The account block that contains this account.  Note that this account
     /// block may be shared with other accounts.
     pub account_block: &'accounts_file [u8],
+    pub account_offset: HotAccountOffset,
 }
 
 impl<'accounts_file, M: TieredAccountMeta> HotAccount<'accounts_file, M> {
@@ -546,6 +547,7 @@ impl HotStorageReader {
         };
 
         Ok(Some(callback(stored_account)))
+
     }
 
     /// Returns the account located at the specified index offset.

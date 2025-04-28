@@ -23,7 +23,6 @@ use {
     solana_hash::HASH_BYTES,
     solana_pubkey::PUBKEY_BYTES,
     std::{
-        hash::DefaultHasher,
         iter::{self, FromIterator},
         str::FromStr,
         sync::{atomic::AtomicBool, RwLock},
@@ -1449,11 +1448,18 @@ fn test_clean_zero_lamport_and_dead_slot() {
     accounts.calculate_accounts_delta_hash(2);
     accounts.add_root_and_flush_write_cache(2);
 
+    // After flush before clean, ref count should be 1
+    assert_eq!(accounts.ref_count_for_pubkey(&pubkey1), 1);
+
     // Slot 1 should be removed, slot 0 cannot be removed because it still has
     // the latest update for pubkey 2
     accounts.clean_accounts_for_tests();
     assert!(accounts.storage.get_slot_storage_entry(0).is_some());
     assert!(accounts.storage.get_slot_storage_entry(1).is_none());
+    assert!(accounts.storage.get_slot_storage_entry(2).is_none());
+
+    // If this passes, then clean is working
+    assert_eq!(accounts.ref_count_for_pubkey(&pubkey1), 0);
 
     // Slot 1 should be cleaned because all it's accounts are
     // zero lamports, and are not present in any other slot's
@@ -1463,7 +1469,7 @@ fn test_clean_zero_lamport_and_dead_slot() {
 
 //#[test]
 //#[should_panic(expected = "ref count expected to be zero")]
-// Test doesn't fail, because I fix the ref count
+// Test doesn't fail, because the ref count is fixed
 /*fn test_remove_zero_lamport_multi_ref_accounts_panic() {
     let accounts = AccountsDb::new_single_for_tests();
     let pubkey_zero = Pubkey::from([1; 32]);
@@ -3993,7 +3999,7 @@ fn test_flush_cache_dont_clean_zero_lamport_account() {
     // removals, only using clean_accounts
     //let load_hint = LoadHint::FixedMaxRoot;
     /*assert_eq!(
-        db.do_load(ß
+        db.do_load(
             &Ancestors::default(),
             &zero_lamport_account_key,
             max_root,
@@ -4223,7 +4229,7 @@ define_accounts_db_test!(test_alive_bytes, |accounts_db| {
             [0];
         assert_eq!(account_info.0, slot);
         let reclaims = [account_info];
-        accounts_db.remove_dead_accounts(reclaims.iter(), None, true);
+        accounts_db.remove_dead_accounts(reclaims.iter(), None, true, None);
         let after_size = storage0.alive_bytes();
         if storage0.count() == 0
             && AccountsFileProvider::HotStorage == accounts_db.accounts_file_provider
@@ -4724,8 +4730,8 @@ fn run_test_shrink_unref(do_intra_cache_clean: bool) {
     // Flushes all roots
     db.flush_accounts_cache(true, None);
 
-    // Should be one store before clean for slot 0. Check why this is failing tomorrow
-    //db.get_and_assert_single_storage(0);
+    // Store should be gone for slot 0 now due to being invalidated
+    assert_no_storages_at_slot(&db, 0);
     db.calculate_accounts_delta_hash(2);
     db.clean_accounts(
         Some(2),
@@ -5475,7 +5481,7 @@ fn test_is_candidate_for_shrink() {
 
     entry
         .alive_bytes
-        .store(store_file_size as usize - 1, Ordering::Release);
+        .store(store_file_size as usize - 2000, Ordering::Release);
     assert!(accounts.is_candidate_for_shrink(&entry));
     entry
         .alive_bytes
@@ -5488,7 +5494,7 @@ fn test_is_candidate_for_shrink() {
         .alive_bytes
         .store(file_size_shrink_limit + 1, Ordering::Release);
     accounts.shrink_ratio = AccountShrinkThreshold::TotalSpace { shrink_ratio };
-    assert!(accounts.is_candidate_for_shrink(&entry));
+    assert!(!accounts.is_candidate_for_shrink(&entry));
     accounts.shrink_ratio = AccountShrinkThreshold::IndividualStore { shrink_ratio };
     assert!(!accounts.is_candidate_for_shrink(&entry));
 }
@@ -6505,48 +6511,6 @@ define_accounts_db_test!(test_get_ancient_slots_one_large, |db| {
         }
     }
 });
-
-#[test]
-fn test_hash_storage_info() {
-    {
-        let hasher = DefaultHasher::new();
-        let hash = hasher.finish();
-        assert_eq!(15130871412783076140, hash);
-    }
-    {
-        let mut hasher = DefaultHasher::new();
-        let slot: Slot = 0;
-        let tf = crate::append_vec::test_utils::get_append_vec_path("test_hash_storage_info");
-        let pubkey1 = solana_pubkey::new_rand();
-        let mark_alive = false;
-        let storage = sample_storage_with_entries(&tf, slot, &pubkey1, mark_alive);
-
-        let load = AccountsDb::hash_storage_info(&mut hasher, &storage, slot);
-        let hash = hasher.finish();
-        // can't assert hash here - it is a function of mod date
-        assert!(load);
-        let slot = 2; // changed this
-        let mut hasher = DefaultHasher::new();
-        let load = AccountsDb::hash_storage_info(&mut hasher, &storage, slot);
-        let hash2 = hasher.finish();
-        assert_ne!(hash, hash2); // slot changed, these should be different
-                                 // can't assert hash here - it is a function of mod date
-        assert!(load);
-        let mut hasher = DefaultHasher::new();
-        append_sample_data_to_storage(&storage, &solana_pubkey::new_rand(), false, None);
-        let load = AccountsDb::hash_storage_info(&mut hasher, &storage, slot);
-        let hash3 = hasher.finish();
-        assert_ne!(hash2, hash3); // moddate and written size changed
-                                  // can't assert hash here - it is a function of mod date
-        assert!(load);
-        let mut hasher = DefaultHasher::new();
-        let load = AccountsDb::hash_storage_info(&mut hasher, &storage, slot);
-        let hash4 = hasher.finish();
-        assert_eq!(hash4, hash3); // same
-                                  // can't assert hash here - it is a function of mod date
-        assert!(load);
-    }
-}
 
 #[test]
 fn test_sweep_get_oldest_non_ancient_slot_max() {
