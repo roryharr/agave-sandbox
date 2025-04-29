@@ -34,8 +34,7 @@ mod serde_snapshot_tests {
         solana_rent_collector::RentCollector,
         std::{
             fs::File,
-            io,
-            io::{BufReader, Cursor, Read, Write},
+            io::{self, BufReader, Cursor, Read, Write},
             ops::RangeFull,
             path::{Path, PathBuf},
             sync::{

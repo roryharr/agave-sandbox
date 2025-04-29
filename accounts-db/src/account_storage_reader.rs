@@ -115,8 +115,7 @@ mod tests {
     use {
         super::*,
         crate::{
-            accounts_db::get_temp_accounts_paths,
-            accounts_db::AccountStorageEntry,
+            accounts_db::{get_temp_accounts_paths, AccountStorageEntry},
             accounts_file::{AccountsFile, AccountsFileProvider, StorageAccess},
         },
         solana_account::AccountSharedData,
