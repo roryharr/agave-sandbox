@@ -54,7 +54,7 @@ use {
 };
 
 pub const DEFAULT_FULL_SNAPSHOT_ARCHIVE_INTERVAL_SLOTS: Slot = 50_000;
-pub const DEFAULT_INCREMENTAL_SNAPSHOT_ARCHIVE_INTERVAL_SLOTS: Slot = 100;
+pub const DEFAULT_INCREMENTAL_SNAPSHOT_ARCHIVE_INTERVAL_SLOTS: Slot = 1000;
 pub const DISABLED_SNAPSHOT_ARCHIVE_INTERVAL: Slot = Slot::MAX;
 
 pub fn serialize_status_cache(
@@ -940,7 +940,7 @@ fn bank_to_full_snapshot_archive_with(
         .set_latest_full_snapshot_slot(bank.slot());
     bank.squash(); // Bank may not be a root
     bank.rehash(); // Bank may have been manually modified by the caller
-    bank.force_flush_accounts_cache();
+    bank.force_flush_accounts_cache(5);
     bank.clean_accounts();
 
     let merkle_or_lattice_accounts_hash = if bank.is_snapshots_lt_hash_enabled() {
@@ -1009,7 +1009,7 @@ pub fn bank_to_incremental_snapshot_archive(
         .set_latest_full_snapshot_slot(full_snapshot_slot);
     bank.squash(); // Bank may not be a root
     bank.rehash(); // Bank may have been manually modified by the caller
-    bank.force_flush_accounts_cache();
+    bank.force_flush_accounts_cache(6);
     bank.clean_accounts();
 
     let (merkle_or_lattice_accounts_hash, bank_incremental_snapshot_persistence) =

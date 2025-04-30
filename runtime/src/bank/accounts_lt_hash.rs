@@ -965,7 +965,7 @@ mod tests {
             // flush the write cache to disk to ensure there are duplicates across the storages
             bank.fill_bank_with_ticks_for_tests();
             bank.squash();
-            bank.force_flush_accounts_cache();
+            bank.force_flush_accounts_cache(8);
         }
 
         // verification happens at startup, so mimic the behavior by loading from a snapshot
@@ -1095,7 +1095,7 @@ mod tests {
                 .unwrap();
             bank.fill_bank_with_ticks_for_tests();
             bank.squash();
-            bank.force_flush_accounts_cache();
+            bank.force_flush_accounts_cache(100);
         }
 
         // Create a new bank so that we can store the feature gate account;
@@ -1229,7 +1229,7 @@ mod tests {
                 .unwrap();
             bank.fill_bank_with_ticks_for_tests();
             bank.squash();
-            bank.force_flush_accounts_cache();
+            bank.force_flush_accounts_cache(100);
         }
 
         let snapshot_config = SnapshotConfig::default();

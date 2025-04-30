@@ -2384,7 +2384,7 @@ fn main() {
                         // during snapshot creation if we try to add roots out
                         // of order.
                         bank.squash();
-                        bank.force_flush_accounts_cache();
+                        bank.force_flush_accounts_cache(7);
                         Arc::new(Bank::warp_from_parent(
                             bank.clone(),
                             bank.collector_id(),

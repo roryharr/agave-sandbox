@@ -2292,7 +2292,7 @@ fn maybe_warp_slot(
         // requires that the accounts cache has been flushed, which requires the parent slot to be
         // rooted.
         root_bank.squash();
-        root_bank.force_flush_accounts_cache();
+        root_bank.force_flush_accounts_cache(2);
 
         bank_forks.insert(Bank::warp_from_parent(
             root_bank,

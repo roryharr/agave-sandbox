@@ -4628,7 +4628,7 @@ fn run_flush_rooted_accounts_cache(should_clean: bool) {
     let (accounts_db, keys, slots, _) = setup_accounts_db_cache_clean(num_slots, None, None);
 
     // If no cleaning is specified, then flush everything
-    accounts_db.flush_rooted_accounts_cache(None, should_clean);
+    accounts_db.flush_rooted_accounts_cache(None, should_clean, true);
     for slot in &slots {
         let ScanStorageResult::Stored(slot_accounts) = accounts_db.scan_account_storage(
             *slot as Slot,

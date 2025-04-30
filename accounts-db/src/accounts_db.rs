@@ -6185,7 +6185,7 @@ impl AccountsDb {
     // `force_flush` flushes all the cached roots `<= requested_flush_root`. It also then
     // flushes:
     // 1) excess remaining roots or unrooted slots while 'should_aggressively_flush_cache' is true
-    pub fn flush_accounts_cache(&self, force_flush: bool, requested_flush_root: Option<Slot>) {
+    pub fn flush_accounts_cache(&self, force_flush: bool, requested_flush_root: Option<Slot>, skip_new: u32) {
         #[cfg(not(test))]
         assert!(requested_flush_root.is_some());
 
@@ -6206,6 +6206,7 @@ impl AccountsDb {
             .flush_rooted_accounts_cache(
                 requested_flush_root,
                 true, // should_clean
+                skip_new == 0,
             );
         flush_roots_elapsed.stop();
 
@@ -6214,14 +6215,14 @@ impl AccountsDb {
         // banks
 
         // If 'should_aggressively_flush_cache', then flush the excess ones to storage
-        let (total_new_excess_roots, num_excess_roots_flushed, flush_stats_aggressively) =
+        let (_total_new_excess_roots, num_excess_roots_flushed, flush_stats_aggressively) =
             if self.should_aggressively_flush_cache() {
                 // Start by flushing the roots
                 //
                 // Cannot do any cleaning on roots past `requested_flush_root` because future
                 // snapshots may need updates from those later slots, hence we pass `false`
                 // for `should_clean`.
-                self.flush_rooted_accounts_cache(None, false)
+                self.flush_rooted_accounts_cache(None, false, false)
             } else {
                 (0, 0, FlushStats::default())
             };
@@ -6271,7 +6272,7 @@ impl AccountsDb {
             "accounts_db-flush_accounts_cache",
             ("total_new_cleaned_roots", total_new_cleaned_roots, i64),
             ("num_cleaned_roots_flushed", num_cleaned_roots_flushed, i64),
-            ("total_new_excess_roots", total_new_excess_roots, i64),
+            ("total_new_excess_roots", skip_new as i64, i64),
             ("num_excess_roots_flushed", num_excess_roots_flushed, i64),
             ("excess_slot_count", excess_slot_count, i64),
             (
@@ -6319,6 +6320,7 @@ impl AccountsDb {
         &self,
         requested_flush_root: Option<Slot>,
         should_clean: bool,
+        skip_new: bool,
     ) -> (usize, usize, FlushStats) {
         let max_clean_root = should_clean
             .then(|| {
@@ -6329,6 +6331,28 @@ impl AccountsDb {
             .flatten();
 
         let mut written_accounts = HashSet::new();
+
+        // Always flush up to `requested_flush_root`, which is necessary for things like snapshotting.
+        let mut flushed_roots: BTreeSet<Slot> = self.accounts_cache.get_roots(requested_flush_root);
+
+        if should_clean && skip_new
+        {
+            // Iterate 10 times
+            for _ in 0..10 {
+                let root = flushed_roots.pop_last();
+                if let Some(root) = root
+                {
+                    if let Some(slot_cache) = self.accounts_cache.slot_cache(root) {
+                        for account in slot_cache.iter() {
+                            let pubkey = *account.key();
+                            written_accounts.insert(pubkey);
+                        }
+                    }
+                }
+            }
+        }
+
+        let num_pre_added = written_accounts.len();
 
         // If `should_clean` is false, then`should_flush_f` will be None, which will cause
         // `flush_slot_cache` to flush all accounts to storage without cleaning any accounts.
@@ -6341,35 +6365,20 @@ impl AccountsDb {
             })
             .flatten();
 
-        // Always flush up to `requested_flush_root`, which is necessary for things like snapshotting.
-        let roots_list: BTreeSet<Slot> = self.accounts_cache.get_roots(requested_flush_root);
-
         // Iterate from highest to lowest so that we don't need to flush earlier
         // outdated updates in earlier roots
-        let mut num_roots_flushed = 0;
+        let mut _num_roots_flushed = 0;
         let mut flush_stats = FlushStats::default();
-        let mut flushed_roots = BTreeSet::new();
-        for (i, &root) in roots_list.iter().rev().enumerate() {
-            if i < 10  && should_flush_f.is_some()
-                {
-                if let Some(slot_cache) = self.accounts_cache.slot_cache(root) {
-                    for account in slot_cache.iter() {
-                        let _ret = should_flush_f
-                            .as_mut()
-                            .map(|should_flush_f| should_flush_f(account.key()))
-                            .unwrap_or(true);
-                    }
-                }
-            } else if let Some(stats) =
+
+        for &root in flushed_roots.iter().rev() {
+            if let Some(stats) =
                 self.flush_slot_cache_with_clean(root, should_flush_f.as_mut(), max_clean_root)
             {
-                num_roots_flushed += 1;
+                _num_roots_flushed += 1;
                 flush_stats.accumulate(&stats);
-                flushed_roots.insert(root);
             }
         }
 
-        //
         self.accounts_cache.clear_these_roots(flushed_roots.clone());
 
         // Note that self.flush_slot_cache_with_clean() can return None if the
@@ -6384,7 +6393,7 @@ impl AccountsDb {
             self.accounts_cache.set_max_flush_root(root);
         }
         let num_new_roots = flushed_roots.len();
-        (num_new_roots, num_roots_flushed, flush_stats)
+        (num_new_roots, num_pre_added, flush_stats)
     }
 
     fn do_flush_slot_cache(
@@ -9505,7 +9514,7 @@ impl AccountsDb {
                 .contains(&root),
             "slot: {root}"
         );
-        self.flush_accounts_cache(true, Some(root));
+        self.flush_accounts_cache(true, Some(root), 200);
     }
 
     pub fn all_account_count_in_accounts_file(&self, slot: Slot) -> usize {

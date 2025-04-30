@@ -138,7 +138,7 @@ mod tests {
         let accounts_db = &bank2.rc.accounts.accounts_db;
 
         bank2.squash();
-        bank2.force_flush_accounts_cache();
+        bank2.force_flush_accounts_cache(100);
         let expected_accounts_hash = AccountsHash(Hash::new_unique());
         accounts_db.set_accounts_hash(bank2_slot, (expected_accounts_hash, 30));
 

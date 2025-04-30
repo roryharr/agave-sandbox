@@ -78,7 +78,7 @@ impl<'a> SnapshotMinimizer<'a> {
         minimizer.minimize_accounts_db();
 
         // Update accounts_cache and capitalization
-        minimizer.bank.force_flush_accounts_cache();
+        minimizer.bank.force_flush_accounts_cache(4);
         minimizer.bank.set_capitalization();
     }
 

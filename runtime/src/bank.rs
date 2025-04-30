@@ -4808,18 +4808,25 @@ impl Bank {
             .fetch_add(m.as_us(), Relaxed);
     }
 
-    pub fn force_flush_accounts_cache(&self) {
+    pub fn notforce_flush_accounts_cache(&self) {
         self.rc
             .accounts
             .accounts_db
-            .flush_accounts_cache(true, Some(self.slot()))
+            .flush_accounts_cache(true, Some(self.slot()), 0)
+    }
+
+    pub fn force_flush_accounts_cache(&self, caller: u32) {
+        self.rc
+            .accounts
+            .accounts_db
+            .flush_accounts_cache(true, Some(self.slot()), caller)
     }
 
     pub fn flush_accounts_cache_if_needed(&self) {
         self.rc
             .accounts
             .accounts_db
-            .flush_accounts_cache(false, Some(self.slot()))
+            .flush_accounts_cache(false, Some(self.slot()), 400)
     }
 
     /// Technically this issues (or even burns!) new lamports,
@@ -5435,7 +5442,7 @@ impl Bank {
     /// Used by ledger tool to run a final hash calculation once all ledger replay has completed.
     /// This should not be called by validator code.
     pub fn run_final_hash_calc(&self, on_halt_store_hash_raw_data_for_debug: bool) {
-        self.force_flush_accounts_cache();
+        self.force_flush_accounts_cache(3);
         // note that this slot may not be a root
         _ = self.verify_accounts_hash(
             None,
@@ -6388,7 +6395,7 @@ impl Bank {
         // may not match the frozen hash.
         //
         // So when we're snapshotting, the highest slot to clean is lowered by one.
-        let highest_slot_to_clean = self.slot().saturating_sub(1);
+        let highest_slot_to_clean = self.rc.accounts.accounts_db.accounts_cache.fetch_max_flush_root();
 
         self.rc.accounts.accounts_db.clean_accounts(
             Some(highest_slot_to_clean),
