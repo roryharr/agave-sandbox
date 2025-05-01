@@ -30,11 +30,11 @@ impl<'a> AccountStorageReader<'a> {
 
         let mut sorted_dead_accounts = storage.get_dead_accounts(snapshot_slot);
         sorted_dead_accounts
-            .sort_unstable_by(|&(a_offset, _), &(b_offset, _)| b_offset.cmp(&a_offset));
+            .sort_unstable_by(|(a_offset, _), (b_offset, _)| b_offset.cmp(a_offset));
 
         let file = match internals {
             InternalsForArchive::Mmap(_internals) => None,
-            InternalsForArchive::FileIo(_internals) => Some(File::open(storage.accounts.path())?),
+            InternalsForArchive::FileIo(path) => Some(File::open(path)?),
         };
 
         Ok(Self {
@@ -86,15 +86,15 @@ impl Read for AccountStorageReader<'_> {
             let read_size = match self.internals {
                 InternalsForArchive::Mmap(data) => (&data
                     [self.current_offset..self.current_offset + bytes_to_read])
-                    .read(&mut buf[total_read..total_read + bytes_to_read])?,
+                    .read(&mut buf[total_read..][..bytes_to_read])?,
 
                 InternalsForArchive::FileIo(_) => {
-                    if let Some(file) = &mut self.file {
-                        file.seek(SeekFrom::Start(self.current_offset as u64))?;
-                        file.read(&mut buf[total_read..total_read + bytes_to_read])?
-                    } else {
-                        0
-                    }
+                    let file = &mut self
+                        .file
+                        .as_mut()
+                        .expect("File is opened during initialization");
+                    file.seek(SeekFrom::Start(self.current_offset as u64))?;
+                    file.read(&mut buf[total_read..][..bytes_to_read])?
                 }
             };
 
@@ -120,84 +120,96 @@ mod tests {
         },
         solana_account::AccountSharedData,
         solana_pubkey::Pubkey,
+        std::iter,
         test_case::test_case,
     };
 
-    fn create_storage_for_storage_reader(slot: Slot) -> AccountStorageEntry {
+    fn create_storage_for_storage_reader(
+        slot: Slot,
+        provider: AccountsFileProvider,
+    ) -> (AccountStorageEntry, Vec<tempfile::TempDir>) {
         let id = 0;
-        let (_temp_dirs, paths) = get_temp_accounts_paths(1).unwrap();
+        let (temp_dirs, paths) = get_temp_accounts_paths(1).unwrap();
         let file_size = 1024 * 1024;
-        AccountStorageEntry::new(
-            &paths[0],
-            slot,
-            id,
-            file_size,
-            AccountsFileProvider::AppendVec,
+        (
+            AccountStorageEntry::new(&paths[0], slot, id, file_size, provider),
+            temp_dirs,
         )
     }
 
-    #[test]
-    fn test_account_storage_reader_no_dead_accounts() {
-        let storage = create_storage_for_storage_reader(0);
+    #[test_case(AccountsFileProvider::AppendVec)]
+    #[test_case(AccountsFileProvider::HotStorage)]
+    fn test_account_storage_reader_no_dead_accounts(provider: AccountsFileProvider) {
+        let (storage, _temp_dirs) = create_storage_for_storage_reader(0, provider);
 
         let account = AccountSharedData::new(1, 10, &Pubkey::new_unique());
         let account2 = AccountSharedData::new(1, 10, &Pubkey::new_unique());
         let shared_key = solana_pubkey::new_rand();
         let slot = 0;
 
-        storage
-            .accounts
-            .append_accounts(&(slot, &[(&shared_key, &account)][..]), 0);
+        let accounts = [(&shared_key, &account), (&shared_key, &account2)];
 
-        storage
-            .accounts
-            .append_accounts(&(slot, &[(&shared_key, &account2)][..]), 0);
+        storage.accounts.append_accounts(&(slot, &accounts[..]), 0);
 
         let reader = AccountStorageReader::new(&storage, None).unwrap();
         assert_eq!(reader.len(), storage.accounts.len());
     }
 
-    #[test_case(0, 0)]
-    #[test_case(1, 0)]
-    #[test_case(1, 1)]
-    #[test_case(100, 0)]
-    #[test_case(100, 10)]
-    #[test_case(100, 100)]
-    fn test_account_storage_read_with_dead_accounts(
+    #[test_case(0, 0, StorageAccess::File)]
+    #[test_case(1, 0, StorageAccess::File)]
+    #[test_case(1, 1, StorageAccess::File)]
+    #[test_case(100, 0, StorageAccess::File)]
+    #[test_case(100, 10, StorageAccess::File)]
+    #[test_case(100, 100, StorageAccess::File)]
+    #[test_case(0, 0, StorageAccess::Mmap)]
+    #[test_case(1, 0, StorageAccess::Mmap)]
+    #[test_case(1, 1, StorageAccess::Mmap)]
+    #[test_case(100, 0, StorageAccess::Mmap)]
+    #[test_case(100, 10, StorageAccess::Mmap)]
+    #[test_case(100, 100, StorageAccess::Mmap)]
+    fn test_account_storage_reader_with_dead_accounts(
         total_accounts: usize,
         number_of_accounts_to_remove: usize,
+        storage_access: StorageAccess,
     ) {
-        let storage = create_storage_for_storage_reader(0);
+        let (storage, _temp_dirs) =
+            create_storage_for_storage_reader(0, AccountsFileProvider::AppendVec);
 
         let shared_key = solana_pubkey::new_rand();
         let slot = 0;
 
         // Create a bunch of accounts and add them to the storage
-        let mut offsets = Vec::new();
-        for _ in 0..total_accounts {
-            // Get the current length of storage rounded up to the nearest multiple of 8 before adding each account
-            // This will be an offset that can be used later to mark the account as dead
-            let len = storage.accounts.len();
-            let rounded_len = (len + 7) & !7; // Round up to the nearest multiple of 8
-            offsets.push(rounded_len);
+        let accounts: Vec<_> =
+            iter::repeat_with(|| AccountSharedData::new(1, 10, &Pubkey::new_unique()))
+                .take(total_accounts)
+                .collect();
 
-            // Add a new account
-            let account = AccountSharedData::new(1, 10, &Pubkey::new_unique());
-            storage
-                .accounts
-                .append_accounts(&(slot, &[(&shared_key, &account)][..]), 0);
-        }
+        let accounts_to_append: Vec<_> = accounts
+            .iter()
+            .map(|account| (&shared_key, account))
+            .collect();
+
+        let offsets = storage
+            .accounts
+            .append_accounts(&(slot, &accounts_to_append[..]), 0);
 
         // Select some accounts to mark as dead.
         let mut dead_account_offset = Vec::new();
-        offsets.iter().enumerate().for_each(|(i, offset)| {
-            // Remove the specified percentage of accounts
-            if (number_of_accounts_to_remove != 0)
-                && (i % (total_accounts / number_of_accounts_to_remove)) == 0
-            {
-                dead_account_offset.push(*offset);
-            }
-        });
+
+        // Offsets may be None if the storage is empty
+        if let Some(offsets) = offsets {
+            offsets.offsets.iter().enumerate().for_each(|(i, offset)| {
+                // Remove the specified percentage of accounts
+                if (number_of_accounts_to_remove != 0)
+                    && (i % (total_accounts / number_of_accounts_to_remove)) == 0
+                {
+                    dead_account_offset.push(*offset);
+                }
+            })
+        };
+
+        // Reopen the storage as the specified access type
+        storage.reopen_as_readonly_test_hook(storage_access);
 
         assert_eq!(dead_account_offset.len(), number_of_accounts_to_remove);
 
@@ -210,7 +222,7 @@ mod tests {
         // Create the reader and check the length
         let mut reader = AccountStorageReader::new(&storage, None).unwrap();
         let current_len = storage.accounts.len() - storage.get_dead_account_bytes(None);
-        assert_eq!(reader.len() as usize, current_len as usize,);
+        assert_eq!(reader.len(), current_len);
 
         // Create a temporary directory and a file within it
         let temp_dir = tempfile::tempdir().unwrap();
@@ -246,36 +258,42 @@ mod tests {
     }
 
     #[test]
-    fn test_account_storage_read_filter_by_slot() {
-        let storage = create_storage_for_storage_reader(10);
+    fn test_account_storage_reader_filter_by_slot() {
+        let (storage, _temp_dirs) =
+            create_storage_for_storage_reader(10, AccountsFileProvider::AppendVec);
 
         let shared_key = solana_pubkey::new_rand();
         let slot = 10;
 
         // Create a bunch of accounts and add them to the storage
-        let mut offsets = Vec::new();
-        for _ in 0..30 {
-            // Get the current length of storage rounded up to the nearest multiple of 8 before adding each account
-            // This will be an offset that can be used later to mark the account as dead
-            let len = storage.accounts.len();
-            let rounded_len = (len + 7) & !7; // Round up to the nearest multiple of 8
-            offsets.push(rounded_len);
+        let accounts: Vec<_> =
+            iter::repeat_with(|| AccountSharedData::new(1, 10, &Pubkey::new_unique()))
+                .take(30)
+                .collect();
 
-            // Add a new account
-            let account = AccountSharedData::new(1, 10, &Pubkey::new_unique());
-            storage
-                .accounts
-                .append_accounts(&(slot, &[(&shared_key, &account)][..]), 0);
-        }
+        let accounts_to_append: Vec<_> = accounts
+            .iter()
+            .map(|account| (&shared_key, account))
+            .collect();
+
+        let offsets = storage
+            .accounts
+            .append_accounts(&(slot, &accounts_to_append[..]), 0);
 
         // Select some accounts to mark as dead. Need to find the starting offset of the account to mark them
         let mut dead_account_offset = Vec::new();
-        offsets.iter().enumerate().for_each(|(i, offset)| {
-            // Mark half the accounts as dead
-            if i % 2 == 0 {
-                dead_account_offset.push(*offset);
-            }
-        });
+
+        offsets
+            .unwrap()
+            .offsets
+            .iter()
+            .enumerate()
+            .for_each(|(i, offset)| {
+                // Mark half the accounts as dead
+                if i % 2 == 0 {
+                    dead_account_offset.push(*offset);
+                }
+            });
 
         // Mark the dead accounts in storage
         let mut slot = 0;
@@ -290,7 +308,7 @@ mod tests {
         for slot in 1..=10 {
             let mut reader = AccountStorageReader::new(&storage, Some(slot)).unwrap();
             let current_len = storage.accounts.len() - storage.get_dead_account_bytes(Some(slot));
-            assert_eq!(reader.len() as usize, current_len as usize);
+            assert_eq!(reader.len(), current_len);
 
             // Create a temporary directory and a file within it
             let temp_dir = tempfile::tempdir().unwrap();
