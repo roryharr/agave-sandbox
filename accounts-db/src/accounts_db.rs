@@ -1409,6 +1409,13 @@ impl AccountStorageEntry {
         self.alive_bytes.fetch_add(num_bytes, Ordering::Release);
     }
 
+    #[cfg(feature = "dev-context-only-utils")]
+    /// This is a test hook to allow us to reopen the storage as readonly
+    /// This is only used in tests, and should not be used in production code
+    pub fn reopen_as_readonly_test_hook(&self, storage_access: StorageAccess) -> Option<Self> {
+        self.reopen_as_readonly(storage_access)
+    }
+
     // This function is only called by `store_uncached()`, which is DCOU and only called by tests.
     // So also mark this function as DCOU to squelch an "unused function" clippy warning.
     #[cfg(feature = "dev-context-only-utils")]
