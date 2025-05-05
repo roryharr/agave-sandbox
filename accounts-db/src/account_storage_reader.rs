@@ -32,6 +32,10 @@ impl<'a> AccountStorageReader<'a> {
         sorted_dead_accounts
             .sort_unstable_by(|(a_offset, _), (b_offset, _)| b_offset.cmp(a_offset));
 
+        for entry in &mut sorted_dead_accounts {
+            entry.1 = storage.accounts.get_estimated_storage_size(&[entry.1]);
+        }
+
         let file = match internals {
             InternalsForArchive::Mmap(_internals) => None,
             InternalsForArchive::FileIo(path) => Some(File::open(path)?),
@@ -65,7 +69,7 @@ impl Read for AccountStorageReader<'_> {
             let next_dead_account = self.sorted_dead_accounts.last();
             if let Some(&(dead_start, dead_size)) = next_dead_account {
                 if self.current_offset == dead_start {
-                    self.current_offset += dead_size;
+                    self.current_offset += dead_size.min(self.num_total_bytes);
                     self.sorted_dead_accounts.pop();
                     continue;
                 }
@@ -215,7 +219,7 @@ mod tests {
 
         // Mark the dead accounts in storage
         dead_account_offset.into_iter().for_each(|offset| {
-            let mut size = storage.accounts.get_account_sizes(&[offset]);
+            let mut size = storage.accounts.get_account_data_lens(&[offset]);
             storage.add_dead_account(offset, size.pop().unwrap(), 0);
         });
 
@@ -298,7 +302,7 @@ mod tests {
         // Mark the dead accounts in storage
         let mut slot = 0;
         dead_account_offset.into_iter().for_each(|offset| {
-            let mut size = storage.accounts.get_account_sizes(&[offset]);
+            let mut size = storage.accounts.get_account_data_lens(&[offset]);
             storage.add_dead_account(offset, size.pop().unwrap(), slot);
             slot += 1;
         });

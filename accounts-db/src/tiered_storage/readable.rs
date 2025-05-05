@@ -171,13 +171,20 @@ impl TieredStorageReader {
         }
     }
 
-    /// for each offset in `sorted_offsets`, return the account size
-    pub(crate) fn get_account_sizes(
+    /// Estimate the amount of storage required for the passed in data lengths
+    pub(crate) fn get_estimated_storage_size(&self, data_len: &[usize]) -> usize {
+        match self {
+            Self::Hot(hot) => hot.get_estimated_storage_size(data_len),
+        }
+    }
+
+    /// for each offset in `sorted_offsets`, return the length of data stored in the account
+    pub(crate) fn get_account_data_lens(
         &self,
         sorted_offsets: &[usize],
     ) -> TieredStorageResult<Vec<usize>> {
         match self {
-            Self::Hot(hot) => hot.get_account_sizes(sorted_offsets),
+            Self::Hot(hot) => hot.get_account_data_lens(sorted_offsets),
         }
     }
 

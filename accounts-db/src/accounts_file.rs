@@ -325,14 +325,24 @@ impl AccountsFile {
         })
     }
 
-    /// for each offset in `sorted_offsets`, return the account size
-    pub(crate) fn get_account_sizes(&self, sorted_offsets: &[usize]) -> Vec<usize> {
+    /// for each offset in `sorted_offsets`, get the data size
+    pub(crate) fn get_account_data_lens(&self, sorted_offsets: &[usize]) -> Vec<usize> {
         match self {
-            Self::AppendVec(av) => av.get_account_sizes(sorted_offsets),
+            Self::AppendVec(av) => av.get_account_data_lens(sorted_offsets),
             Self::TieredStorage(ts) => ts
                 .reader()
-                .and_then(|reader| reader.get_account_sizes(sorted_offsets).ok())
+                .and_then(|reader| reader.get_account_data_lens(sorted_offsets).ok())
                 .unwrap_or_default(),
+        }
+    }
+
+    /// Estimate the amount of storage required for the passed in data lengeths
+    pub(crate) fn get_estimated_storage_size(&self, data_lens: &[usize]) -> usize {
+        match self {
+            Self::AppendVec(av) => av.get_estimated_storage_size(data_lens),
+            Self::TieredStorage(ts) => ts
+                .reader()
+                .map_or(0, |reader| reader.get_estimated_storage_size(data_lens)),
         }
     }
 
