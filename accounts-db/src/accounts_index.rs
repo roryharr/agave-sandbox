@@ -100,6 +100,11 @@ pub enum ScanFilter {
 
     /// Similar to `OnlyAbnormal but mark entries in memory as not found
     /// if they are normal
+    /// This removes the possibility of any race conditions with index
+    /// flushing and simulates the system running an uncached disk index
+    /// where nothing 'normal' is ever held in the in memory index as far as
+    /// callers are concerned. This could also be a  correct/ideal future api
+    /// to similarly provide consistency and remove race condition behavior.
     OnlyAbnormalTest,
 }
 
