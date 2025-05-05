@@ -6432,7 +6432,6 @@ impl AccountsDb {
         max_clean_root: Option<Slot>,
     ) -> FlushStats {
         let mut flush_stats = FlushStats::default();
-        let iter_items: Vec<_> = slot_cache.iter().collect();
         let mut pubkey_to_slot_set: Vec<(Pubkey, Slot)> = vec![];
         if should_flush_f.is_some() {
             if let Some(max_clean_root) = max_clean_root {
@@ -6445,10 +6444,10 @@ impl AccountsDb {
             }
         }
 
-        let accounts: Vec<(&Pubkey, &AccountSharedData)> = iter_items
+        let accounts: Vec<(&Pubkey, &AccountSharedData)> = slot_cache
             .iter()
             .filter_map(|iter_item| {
-                let key = iter_item.key();
+                let key = &iter_item.key();
                 let account = &iter_item.value().account;
                 let should_flush = should_flush_f
                     .as_mut()
@@ -6462,7 +6461,7 @@ impl AccountsDb {
                 } else {
                     // If we don't flush, we have to remove the entry from the
                     // index, since it's equivalent to purging
-                    pubkey_to_slot_set.push((*key, slot));
+                    pubkey_to_slot_set.push((**key, slot));
                     flush_stats.num_bytes_purged +=
                         aligned_stored_size(account.data().len()) as u64;
                     flush_stats.num_accounts_purged += 1;
@@ -6507,7 +6506,7 @@ impl AccountsDb {
         self.uncleaned_pubkeys
             .entry(slot)
             .or_default()
-            .extend(accounts.iter().map(|(pubkey, _account)| **pubkey));
+            .extend(accounts.iter().map(|(pubkey, _account)| pubkey.clone()));
 
         flush_stats
     }
