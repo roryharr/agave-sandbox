@@ -1095,7 +1095,7 @@ impl AppendVec {
         }
     }
 
-    /// Estimate the amount of storage required for the passed in data lengeths
+    /// Estimate the amount of storage required for the passed in data lengths
     pub(crate) fn get_estimated_storage_size(&self, data_len: &[usize]) -> usize {
         data_len.iter().map(|len| aligned_stored_size(*len)).sum()
     }

@@ -336,7 +336,7 @@ impl AccountsFile {
         }
     }
 
-    /// Estimate the amount of storage required for the passed in data lengeths
+    /// Estimate the amount of storage required for the passed in data lengths
     pub(crate) fn get_estimated_storage_size(&self, data_lens: &[usize]) -> usize {
         match self {
             Self::AppendVec(av) => av.get_estimated_storage_size(data_lens),
