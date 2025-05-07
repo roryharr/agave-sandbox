@@ -908,7 +908,7 @@ impl AppendVec {
                 .is_none());
             assert!(self.get_account_shared_data(offset).is_none());
             // it has different rules for checking len and returning None
-            assert!(sizes == 0);
+            assert_eq!(sizes, 0);
         }
         result.flatten()
     }
@@ -1707,7 +1707,7 @@ pub mod tests {
         let size = 1000;
         let mut indexes = vec![];
         let now = Instant::now();
-        let mut sizes: Vec<usize> = vec![];
+        let mut sizes = vec![];
         for sample in 0..size {
             // sample + 1 is so sample = 0 won't be used.
             // sample = 0 produces default account with default pubkey
