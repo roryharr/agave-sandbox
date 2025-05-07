@@ -888,7 +888,10 @@ impl AppendVec {
         offset: usize,
     ) -> Option<(StoredMeta, solana_account::AccountSharedData)> {
         let data_len = self.get_account_data_lens(&[offset]);
-        let sizes = self.calculate_storage_size(&data_len);
+        let sizes: usize = data_len
+            .iter()
+            .map(|len| self.calculate_stored_size(*len))
+            .sum();
         let result = self.get_stored_account_meta_callback(offset, |r_callback| {
             let r2 = self.get_account_shared_data(offset);
             assert!(solana_account::accounts_equal(
@@ -1095,9 +1098,10 @@ impl AppendVec {
         }
     }
 
-    /// Calculate the amount of storage required for the passed in data lengths
-    pub(crate) fn calculate_storage_size(&self, data_len: &[usize]) -> usize {
-        data_len.iter().map(|len| aligned_stored_size(*len)).sum()
+    /// Calculate the amount of storage required for an account with the passed
+    /// in data_len
+    pub(crate) fn calculate_stored_size(&self, data_len: usize) -> usize {
+        aligned_stored_size(data_len)
     }
 
     /// for each offset in `sorted_offsets`, get the the amount of data stored in the account.
@@ -1710,10 +1714,12 @@ pub mod tests {
             let pos = av.append_account_test(&account).unwrap();
             assert_eq!(av.get_account_test(pos).unwrap(), account);
             indexes.push(pos);
-            assert_eq!(
-                sizes.iter().sum::<usize>(),
-                av.calculate_storage_size(&av.get_account_data_lens(indexes.as_slice()))
-            );
+            let stored_size = av
+                .get_account_data_lens(indexes.as_slice())
+                .iter()
+                .map(|len| av.calculate_stored_size(*len))
+                .sum::<usize>();
+            assert_eq!(sizes.iter().sum::<usize>(), stored_size);
         }
         trace!("append time: {} ms", now.elapsed().as_millis());
 
@@ -2077,7 +2083,10 @@ pub mod tests {
             AppendVec::new_from_file(&temp_file.path, total_stored_size, storage_access).unwrap();
 
         let account_sizes = append_vec
-            .calculate_storage_size(&append_vec.get_account_data_lens(account_offsets.as_slice()));
+            .get_account_data_lens(account_offsets.as_slice())
+            .iter()
+            .map(|len| append_vec.calculate_stored_size(*len))
+            .sum::<usize>();
         assert_eq!(account_sizes, total_stored_size);
     }
 

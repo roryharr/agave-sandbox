@@ -7830,7 +7830,10 @@ impl AccountsDb {
                         // sort so offsets are in order. This improves efficiency of loading the accounts.
                         offsets.sort_unstable();
                         let data_lens = store.accounts.get_account_data_lens(&offsets);
-                        let dead_bytes = store.accounts.calculate_storage_size(&data_lens);
+                        let dead_bytes = data_lens
+                            .iter()
+                            .map(|len| store.accounts.calculate_stored_size(*len))
+                            .sum();
                         store.remove_accounts(dead_bytes, reset_accounts, offsets.len());
                         if Self::is_shrinking_productive(&store)
                             && self.is_candidate_for_shrink(&store)

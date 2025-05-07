@@ -171,12 +171,11 @@ impl TieredStorageReader {
         }
     }
 
-    /// Calculate the amount of storage required for the passed in data lengths
-    /// Only need data lengths, as the number of accounts can be inferred from
-    /// length of the vector, and the account size is static
-    pub(crate) fn calculate_storage_size(&self, data_len: &[usize]) -> usize {
+    /// Calculate the amount of storage required for an account with the passed
+    /// in data_len
+    pub(crate) fn calculate_stored_size(&self, data_len: usize) -> usize {
         match self {
-            Self::Hot(hot) => hot.calculate_storage_size(data_len),
+            Self::Hot(hot) => hot.calculate_stored_size(data_len),
         }
     }
 

@@ -613,11 +613,10 @@ impl HotStorageReader {
         Ok(())
     }
 
-    /// Calculate the amount of storage required for the passed in data lengths
-    /// Only need data lengths, as the number of accounts can be inferred from
-    /// length of the vector, and the account size is static
-    pub(crate) fn calculate_storage_size(&self, data_len: &[usize]) -> usize {
-        data_len.iter().map(|data_len| stored_size(*data_len)).sum()
+    /// Calculate the amount of storage required for an account with the passed
+    /// in data_len
+    pub(crate) fn calculate_stored_size(&self, data_len: usize) -> usize {
+        stored_size(data_len)
     }
 
     /// for each offset in `sorted_offsets`, return the length of data stored in the account
