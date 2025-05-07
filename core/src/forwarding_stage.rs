@@ -24,13 +24,16 @@ use {
     solana_sdk::{
         fee::{FeeBudgetLimits, FeeDetails},
         packet,
+        quic::NotifyKeyUpdate,
         signer::keypair::Keypair,
         transaction::MessageHash,
         transport::TransportError,
     },
     solana_streamer::sendmmsg::{batch_send, SendPktsError},
     solana_tpu_client_next::{
-        connection_workers_scheduler::{BindTarget, ConnectionWorkersSchedulerConfig, Fanout},
+        connection_workers_scheduler::{
+            BindTarget, ConnectionWorkersSchedulerConfig, Fanout, StakeIdentity,
+        },
         leader_updater::LeaderUpdater,
         transaction_batch::TransactionBatch,
         ConnectionWorkersScheduler,
@@ -41,7 +44,10 @@ use {
         thread::{Builder, JoinHandle},
         time::{Duration, Instant},
     },
-    tokio::{runtime::Handle as RuntimeHandle, sync::mpsc},
+    tokio::{
+        runtime::Handle as RuntimeHandle,
+        sync::{mpsc, watch},
+    },
     tokio_util::sync::CancellationToken,
 };
 
@@ -109,6 +115,14 @@ impl ForwardAddressGetter {
     }
 }
 
+/// [`SpawnForwardingStageResult`] contains the result of spawning the
+/// [`ForwardingStage`], including the background task handle and a shared
+/// notifier for client address updates.
+pub(crate) struct SpawnForwardingStageResult {
+    pub join_handle: JoinHandle<()>,
+    pub client_updater: Arc<dyn NotifyKeyUpdate + Send + Sync>,
+}
+
 pub(crate) fn spawn_forwarding_stage(
     receiver: Receiver<(BankingPacketBatch, bool)>,
     client: ForwardingClientOption<'_>,
@@ -116,12 +130,12 @@ pub(crate) fn spawn_forwarding_stage(
     root_bank_cache: RootBankCache,
     forward_address_getter: ForwardAddressGetter,
     data_budget: DataBudget,
-) -> JoinHandle<()> {
+) -> SpawnForwardingStageResult {
     let vote_client = VoteClient::new(vote_client_udp_socket, forward_address_getter.clone());
     match client {
         ForwardingClientOption::ConnectionCache(connection_cache) => {
             let non_vote_client =
-                ConnectionCacheClient::new(connection_cache, forward_address_getter);
+                ConnectionCacheClient::new(connection_cache.clone(), forward_address_getter);
             let forwarding_stage = ForwardingStage::new(
                 receiver,
                 vote_client,
@@ -129,10 +143,13 @@ pub(crate) fn spawn_forwarding_stage(
                 root_bank_cache,
                 data_budget,
             );
-            Builder::new()
-                .name("solFwdStage".to_string())
-                .spawn(move || forwarding_stage.run())
-                .unwrap()
+            SpawnForwardingStageResult {
+                join_handle: Builder::new()
+                    .name("solFwdStage".to_string())
+                    .spawn(move || forwarding_stage.run())
+                    .unwrap(),
+                client_updater: connection_cache as Arc<dyn NotifyKeyUpdate + Send + Sync>,
+            }
         }
         ForwardingClientOption::TpuClientNext((
             stake_identity,
@@ -148,14 +165,17 @@ pub(crate) fn spawn_forwarding_stage(
             let forwarding_stage = ForwardingStage::new(
                 receiver,
                 vote_client,
-                non_vote_client,
+                non_vote_client.clone(),
                 root_bank_cache,
                 data_budget,
             );
-            Builder::new()
-                .name("solFwdStage".to_string())
-                .spawn(move || forwarding_stage.run())
-                .unwrap()
+            SpawnForwardingStageResult {
+                join_handle: Builder::new()
+                    .name("solFwdStage".to_string())
+                    .spawn(move || forwarding_stage.run())
+                    .unwrap(),
+                client_updater: Arc::new(non_vote_client) as Arc<dyn NotifyKeyUpdate + Send + Sync>,
+            }
         }
     }
 }
@@ -520,8 +540,10 @@ impl LeaderUpdater for ForwardAddressGetter {
     async fn stop(&mut self) {}
 }
 
+#[derive(Clone)]
 struct TpuClientNextClient {
     sender: mpsc::Sender<TransactionBatch>,
+    update_certificate_sender: watch::Sender<Option<StakeIdentity>>,
 }
 
 const METRICS_REPORTING_INTERVAL: Duration = Duration::from_secs(3);
@@ -539,16 +561,24 @@ impl TpuClientNextClient {
         let leader_updater = forward_address_getter.clone();
 
         let config = Self::create_config(bind_socket, stake_identity);
-        let scheduler: ConnectionWorkersScheduler =
-            ConnectionWorkersScheduler::new(Box::new(leader_updater), receiver);
+        let (update_certificate_sender, update_certificate_receiver) = watch::channel(None);
+        let scheduler: ConnectionWorkersScheduler = ConnectionWorkersScheduler::new(
+            Box::new(leader_updater),
+            receiver,
+            update_certificate_receiver,
+            cancel.clone(),
+        );
         // leaking handle to this task, as it will run until the cancel signal is received
         runtime_handle.spawn(scheduler.get_stats().report_to_influxdb(
             "forwarding-stage-tpu-client",
             METRICS_REPORTING_INTERVAL,
             cancel.clone(),
         ));
-        let _handle = runtime_handle.spawn(scheduler.run(config, cancel.clone()));
-        Self { sender }
+        let _handle = runtime_handle.spawn(scheduler.run(config));
+        Self {
+            sender,
+            update_certificate_sender,
+        }
     }
 
     fn create_config(
@@ -557,7 +587,7 @@ impl TpuClientNextClient {
     ) -> ConnectionWorkersSchedulerConfig {
         ConnectionWorkersSchedulerConfig {
             bind: BindTarget::Socket(bind_socket),
-            stake_identity: stake_identity.map(Into::into),
+            stake_identity: stake_identity.map(StakeIdentity::new),
             // Cache size of 128 covers all nodes above the P90 slot count threshold,
             // which together account for ~75% of total slots in the epoch.
             num_connections: 128,
@@ -582,6 +612,15 @@ impl ForwardingClient for TpuClientNextClient {
         self.sender
             .try_send(TransactionBatch::new(wire_transactions))
             .map_err(|_e| ForwardingClientError::Failed)
+    }
+}
+
+impl NotifyKeyUpdate for TpuClientNextClient {
+    fn update_key(&self, identity: &Keypair) -> Result<(), Box<dyn std::error::Error>> {
+        let stake_identity = StakeIdentity::new(identity);
+        self.update_certificate_sender
+            .send(Some(stake_identity))
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
     }
 }
 

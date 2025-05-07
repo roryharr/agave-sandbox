@@ -96,10 +96,7 @@ use {
     solana_builtins::{prototype::BuiltinPrototype, BUILTINS, STATELESS_BUILTINS},
     solana_compute_budget::compute_budget::ComputeBudget,
     solana_compute_budget_instruction::instructions_processor::process_compute_budget_instructions,
-    solana_cost_model::{
-        block_cost_limits::{simd_0207_block_limits, simd_0256_block_limits},
-        cost_tracker::CostTracker,
-    },
+    solana_cost_model::{block_cost_limits::simd_0256_block_limits, cost_tracker::CostTracker},
     solana_fee::FeeFeatures,
     solana_lattice_hash::lt_hash::LtHash,
     solana_measure::{meas_dur, measure::Measure, measure_time, measure_us},
@@ -158,6 +155,7 @@ use {
         account_loader::{collect_rent_from_account, LoadedTransaction},
         account_overrides::AccountOverrides,
         program_loader::load_program_with_pubkey,
+        transaction_balances::BalanceCollector,
         transaction_commit_result::{CommittedTransaction, TransactionCommitResult},
         transaction_error_metrics::TransactionErrorMetrics,
         transaction_execution_result::{
@@ -248,7 +246,7 @@ struct RentMetrics {
 pub type BankStatusCache = StatusCache<Result<()>>;
 #[cfg_attr(
     feature = "frozen-abi",
-    frozen_abi(digest = "4e7a7AAsQrM5Lp5bhREdVZ5QGZfyETbBthhWjYMYb6zS")
+    frozen_abi(digest = "5dfDCRGWPV7thfoZtLpTJAV8cC93vQUXgTm6BnrfeUsN")
 )]
 pub type BankSlotDelta = SlotDelta<Result<()>>;
 
@@ -330,6 +328,9 @@ pub struct LoadAndExecuteTransactionsOutput {
     // Processed transaction counts used to update bank transaction counts and
     // for metrics reporting.
     pub processed_counts: ProcessedTransactionCounts,
+    // Balances accumulated for TransactionStatusSender when transaction
+    // balance recording is enabled.
+    pub balance_collector: Option<BalanceCollector>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -3293,52 +3294,48 @@ impl Bank {
                     enable_cpi_recording,
                     enable_log_recording: true,
                     enable_return_data_recording: true,
+                    enable_transaction_balance_recording: false,
                 },
             },
         );
-
-        let units_consumed =
-            timings
-                .details
-                .per_program_timings
-                .iter()
-                .fold(0, |acc: u64, (_, program_timing)| {
-                    (std::num::Saturating(acc)
-                        + program_timing.accumulated_units
-                        + program_timing.total_errored_units)
-                        .0
-                });
 
         debug!("simulate_transaction: {:?}", timings);
 
         let processing_result = processing_results
             .pop()
             .unwrap_or(Err(TransactionError::InvalidProgramForExecution));
-        let (post_simulation_accounts, result, logs, return_data, inner_instructions) =
-            match processing_result {
-                Ok(processed_tx) => match processed_tx {
-                    ProcessedTransaction::Executed(executed_tx) => {
-                        let details = executed_tx.execution_details;
-                        let post_simulation_accounts = executed_tx
-                            .loaded_transaction
-                            .accounts
-                            .into_iter()
-                            .take(number_of_accounts)
-                            .collect::<Vec<_>>();
-                        (
-                            post_simulation_accounts,
-                            details.status,
-                            details.log_messages,
-                            details.return_data,
-                            details.inner_instructions,
-                        )
-                    }
-                    ProcessedTransaction::FeesOnly(fees_only_tx) => {
-                        (vec![], Err(fees_only_tx.load_error), None, None, None)
-                    }
-                },
-                Err(error) => (vec![], Err(error), None, None, None),
-            };
+        let (
+            post_simulation_accounts,
+            result,
+            logs,
+            return_data,
+            inner_instructions,
+            units_consumed,
+        ) = match processing_result {
+            Ok(processed_tx) => match processed_tx {
+                ProcessedTransaction::Executed(executed_tx) => {
+                    let details = executed_tx.execution_details;
+                    let post_simulation_accounts = executed_tx
+                        .loaded_transaction
+                        .accounts
+                        .into_iter()
+                        .take(number_of_accounts)
+                        .collect::<Vec<_>>();
+                    (
+                        post_simulation_accounts,
+                        details.status,
+                        details.log_messages,
+                        details.return_data,
+                        details.inner_instructions,
+                        details.executed_units,
+                    )
+                }
+                ProcessedTransaction::FeesOnly(fees_only_tx) => {
+                    (vec![], Err(fees_only_tx.load_error), None, None, None, 0)
+                }
+            },
+            Err(error) => (vec![], Err(error), None, None, None, 0),
+        };
         let logs = logs.unwrap_or_default();
 
         TransactionSimulationResult {
@@ -3506,6 +3503,7 @@ impl Bank {
         LoadAndExecuteTransactionsOutput {
             processing_results: sanitized_output.processing_results,
             processed_counts,
+            balance_collector: sanitized_output.balance_collector,
         }
     }
 
@@ -4561,15 +4559,13 @@ impl Bank {
         &self,
         batch: &TransactionBatch<impl TransactionWithMeta>,
         max_age: usize,
-        collect_balances: bool,
         recording_config: ExecutionRecordingConfig,
         timings: &mut ExecuteTimings,
         log_messages_bytes_limit: Option<usize>,
-    ) -> (Vec<TransactionCommitResult>, TransactionBalancesSet) {
+    ) -> (Vec<TransactionCommitResult>, Option<BalanceCollector>) {
         self.do_load_execute_and_commit_transactions_with_pre_commit_callback(
             batch,
             max_age,
-            collect_balances,
             recording_config,
             timings,
             log_messages_bytes_limit,
@@ -4582,7 +4578,6 @@ impl Bank {
         &'a self,
         batch: &TransactionBatch<impl TransactionWithMeta>,
         max_age: usize,
-        collect_balances: bool,
         recording_config: ExecutionRecordingConfig,
         timings: &mut ExecuteTimings,
         log_messages_bytes_limit: Option<usize>,
@@ -4590,11 +4585,10 @@ impl Bank {
             &mut ExecuteTimings,
             &[TransactionProcessingResult],
         ) -> PreCommitResult<'a>,
-    ) -> Result<(Vec<TransactionCommitResult>, TransactionBalancesSet)> {
+    ) -> Result<(Vec<TransactionCommitResult>, Option<BalanceCollector>)> {
         self.do_load_execute_and_commit_transactions_with_pre_commit_callback(
             batch,
             max_age,
-            collect_balances,
             recording_config,
             timings,
             log_messages_bytes_limit,
@@ -4606,23 +4600,17 @@ impl Bank {
         &'a self,
         batch: &TransactionBatch<impl TransactionWithMeta>,
         max_age: usize,
-        collect_balances: bool,
         recording_config: ExecutionRecordingConfig,
         timings: &mut ExecuteTimings,
         log_messages_bytes_limit: Option<usize>,
         pre_commit_callback: Option<
             impl FnOnce(&mut ExecuteTimings, &[TransactionProcessingResult]) -> PreCommitResult<'a>,
         >,
-    ) -> Result<(Vec<TransactionCommitResult>, TransactionBalancesSet)> {
-        let pre_balances = if collect_balances {
-            self.collect_balances(batch)
-        } else {
-            vec![]
-        };
-
+    ) -> Result<(Vec<TransactionCommitResult>, Option<BalanceCollector>)> {
         let LoadAndExecuteTransactionsOutput {
             processing_results,
             processed_counts,
+            balance_collector,
         } = self.load_and_execute_transactions(
             batch,
             max_age,
@@ -4653,15 +4641,7 @@ impl Bank {
             timings,
         );
         drop(freeze_lock);
-        let post_balances = if collect_balances {
-            self.collect_balances(batch)
-        } else {
-            vec![]
-        };
-        Ok((
-            commit_results,
-            TransactionBalancesSet::new(pre_balances, post_balances),
-        ))
+        Ok((commit_results, balance_collector))
     }
 
     /// Process a Transaction. This is used for unit tests and simply calls the vector
@@ -4685,11 +4665,11 @@ impl Bank {
         let (mut commit_results, ..) = self.load_execute_and_commit_transactions(
             &batch,
             MAX_PROCESSING_AGE,
-            false, // collect_balances
             ExecutionRecordingConfig {
                 enable_cpi_recording: false,
                 enable_log_recording: true,
                 enable_return_data_recording: true,
+                enable_transaction_balance_recording: false,
             },
             &mut ExecuteTimings::default(),
             Some(1000 * 1000),
@@ -4728,7 +4708,6 @@ impl Bank {
         self.load_execute_and_commit_transactions(
             batch,
             MAX_PROCESSING_AGE,
-            false,
             ExecutionRecordingConfig::new_single_setting(false),
             &mut ExecuteTimings::default(),
             None,
@@ -4898,18 +4877,6 @@ impl Bank {
         // We must apply previously activated features related to limits here
         // so that the initial bank state is consistent with the feature set.
         // Cost-tracker limits are propagated through children banks.
-        if self
-            .feature_set
-            .is_active(&feature_set::raise_block_limits_to_50m::id())
-        {
-            let (account_cost_limit, block_cost_limit, vote_cost_limit) = simd_0207_block_limits();
-            self.write_cost_tracker().unwrap().set_limits(
-                account_cost_limit,
-                block_cost_limit,
-                vote_cost_limit,
-            );
-        }
-
         if self
             .feature_set
             .is_active(&feature_set::raise_block_limits_to_60m::id())
@@ -6618,19 +6585,6 @@ impl Bank {
                     self.accounts_lt_hash.get_mut().unwrap().0.checksum(),
                 );
             }
-        }
-
-        if new_feature_activations.contains(&feature_set::raise_block_limits_to_50m::id())
-            && !self
-                .feature_set
-                .is_active(&feature_set::raise_block_limits_to_60m::id())
-        {
-            let (account_cost_limit, block_cost_limit, vote_cost_limit) = simd_0207_block_limits();
-            self.write_cost_tracker().unwrap().set_limits(
-                account_cost_limit,
-                block_cost_limit,
-                vote_cost_limit,
-            );
         }
 
         if new_feature_activations.contains(&feature_set::raise_block_limits_to_60m::id()) {

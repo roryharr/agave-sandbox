@@ -2129,7 +2129,7 @@ impl ClusterInfo {
                     return None;
                 }
             }
-            protocol.par_verify().then(|| {
+            protocol.verify().then(|| {
                 stats.packets_received_verified_count.add_relaxed(1);
                 (packet.meta().socket_addr(), protocol)
             })
@@ -2363,10 +2363,10 @@ pub struct Sockets {
     pub tpu_forwards_quic: Vec<UdpSocket>,
     pub tpu_vote_quic: Vec<UdpSocket>,
 
-    /// Client-side socket for ForwardingStage
-    pub tpu_vote_forwards_client: UdpSocket,
-    /// Connection cache endpoint for Forwarding
-    pub quic_forwards_client: UdpSocket,
+    /// Client-side socket for ForwardingStage vote transactions
+    pub tpu_vote_forwarding_client: UdpSocket,
+    /// Client-side socket for ForwardingStage non-vote transactions
+    pub tpu_transaction_forwarding_client: UdpSocket,
     /// Connection cache endpoint for QUIC-based Vote
     pub quic_vote_client: UdpSocket,
     /// Client-side socket for RPC/SendTransactionService.
@@ -2458,8 +2458,8 @@ impl Node {
         let ancestor_hashes_requests = bind_to_unspecified().unwrap();
         let ancestor_hashes_requests_quic = bind_to_unspecified().unwrap();
 
-        let tpu_vote_forwards_client = bind_to_localhost().unwrap();
-        let quic_forwards_client = bind_to_localhost().unwrap();
+        let tpu_vote_forwarding_client = bind_to_localhost().unwrap();
+        let tpu_transaction_forwarding_client = bind_to_localhost().unwrap();
         let quic_vote_client = bind_to_localhost().unwrap();
         let rpc_sts_client = bind_to_localhost().unwrap();
 
@@ -2539,8 +2539,8 @@ impl Node {
                 tpu_quic,
                 tpu_forwards_quic,
                 tpu_vote_quic,
-                tpu_vote_forwards_client,
-                quic_forwards_client,
+                tpu_vote_forwarding_client,
+                tpu_transaction_forwarding_client,
                 quic_vote_client,
                 rpc_sts_client,
                 vortexor_receivers: None,
@@ -2628,8 +2628,10 @@ impl Node {
             find_available_ports_in_range(bind_ip_addr, port_range).unwrap();
 
         // These are client sockets, so the port is set to be 0 because it must be ephimeral.
-        let tpu_vote_forwards_client = bind_to_with_config(bind_ip_addr, 0, socket_config).unwrap();
-        let quic_forwards_client = bind_to_with_config(bind_ip_addr, 0, socket_config).unwrap();
+        let tpu_vote_forwarding_client =
+            bind_to_with_config(bind_ip_addr, 0, socket_config).unwrap();
+        let tpu_transaction_forwarding_client =
+            bind_to_with_config(bind_ip_addr, 0, socket_config).unwrap();
         let quic_vote_client = bind_to_with_config(bind_ip_addr, 0, socket_config).unwrap();
         let rpc_sts_client = bind_to_with_config(bind_ip_addr, 0, socket_config).unwrap();
 
@@ -2694,9 +2696,9 @@ impl Node {
                 tpu_quic,
                 tpu_forwards_quic,
                 tpu_vote_quic,
-                tpu_vote_forwards_client,
+                tpu_vote_forwarding_client,
                 quic_vote_client,
-                quic_forwards_client,
+                tpu_transaction_forwarding_client,
                 rpc_sts_client,
                 vortexor_receivers: None,
             },
@@ -2805,8 +2807,10 @@ impl Node {
             Self::bind_with_config(bind_ip_addr, port_range, socket_config);
 
         // These are client sockets, so the port is set to be 0 because it must be ephimeral.
-        let tpu_vote_forwards_client = bind_to_with_config(bind_ip_addr, 0, socket_config).unwrap();
-        let quic_forwards_client = bind_to_with_config(bind_ip_addr, 0, socket_config).unwrap();
+        let tpu_vote_forwarding_client =
+            bind_to_with_config(bind_ip_addr, 0, socket_config).unwrap();
+        let tpu_transaction_forwarding_client =
+            bind_to_with_config(bind_ip_addr, 0, socket_config).unwrap();
         let quic_vote_client = bind_to_with_config(bind_ip_addr, 0, socket_config).unwrap();
         let rpc_sts_client = bind_to_with_config(bind_ip_addr, 0, socket_config).unwrap();
 
@@ -2870,9 +2874,9 @@ impl Node {
             tpu_quic,
             tpu_forwards_quic,
             tpu_vote_quic,
-            tpu_vote_forwards_client,
+            tpu_vote_forwarding_client,
             quic_vote_client,
-            quic_forwards_client,
+            tpu_transaction_forwarding_client,
             rpc_sts_client,
             vortexor_receivers,
         };
@@ -2910,8 +2914,7 @@ fn check_pull_request_shred_version(self_shred_version: u16, caller: &CrdsValue)
         CrdsData::LegacyContactInfo(node) => node.shred_version(),
         _ => return false,
     };
-    // Allow spy nodes with shred-verion == 0 to pull from other nodes.
-    shred_version == 0u16 || shred_version == self_shred_version
+    shred_version == self_shred_version
 }
 
 // Discards CrdsValues in PushMessages and PullResponses from nodes with

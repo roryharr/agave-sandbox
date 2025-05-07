@@ -13,10 +13,11 @@ use {
                 Shred as ShredTrait, ShredCode as ShredCodeTrait, ShredData as ShredDataTrait,
             },
             CodingShredHeader, DataShredHeader, Error, ProcessShredsStats, ShredCommonHeader,
-            ShredFlags, ShredVariant, DATA_SHREDS_PER_FEC_BLOCK, SHREDS_PER_FEC_BLOCK,
-            SIZE_OF_CODING_SHRED_HEADERS, SIZE_OF_DATA_SHRED_HEADERS, SIZE_OF_SIGNATURE,
+            ShredFlags, ShredVariant, CODING_SHREDS_PER_FEC_BLOCK, DATA_SHREDS_PER_FEC_BLOCK,
+            SHREDS_PER_FEC_BLOCK, SIZE_OF_CODING_SHRED_HEADERS, SIZE_OF_DATA_SHRED_HEADERS,
+            SIZE_OF_SIGNATURE,
         },
-        shredder::{self, ReedSolomonCache},
+        shredder::ReedSolomonCache,
     },
     assert_matches::debug_assert_matches,
     itertools::{Either, Itertools},
@@ -208,6 +209,25 @@ impl ShredData {
         let proof = get_merkle_proof(shred, proof_offset, proof_size).ok()?;
         let node = get_merkle_node(shred, SIZE_OF_SIGNATURE..proof_offset).ok()?;
         get_merkle_root(index, node, proof).ok()
+    }
+
+    pub(crate) const fn const_capacity(
+        proof_size: u8,
+        chained: bool,
+        resigned: bool,
+    ) -> Result<usize, u8> {
+        debug_assert!(chained || !resigned);
+        // Merkle proof is generated and signed after coding shreds are
+        // generated. Coding shred headers cannot be erasure coded either.
+        match Self::SIZE_OF_PAYLOAD.checked_sub(
+            Self::SIZE_OF_HEADERS
+                + if chained { SIZE_OF_MERKLE_ROOT } else { 0 }
+                + (proof_size as usize) * SIZE_OF_MERKLE_PROOF_ENTRY
+                + if resigned { SIZE_OF_SIGNATURE } else { 0 },
+        ) {
+            Some(v) => Ok(v),
+            None => Err(proof_size),
+        }
     }
 }
 
@@ -437,7 +457,7 @@ macro_rules! impl_merkle_shred {
         }
 
         // Returns the offsets into the payload which are erasure coded.
-        fn erausre_shard_offsets(&self) -> Result<Range<usize>, Error> {
+        fn erasure_shard_offsets(&self) -> Result<Range<usize>, Error> {
             if self.payload.len() != Self::SIZE_OF_PAYLOAD {
                 return Err(Error::InvalidPayloadSize(self.payload.len()));
             }
@@ -456,13 +476,13 @@ macro_rules! impl_merkle_shred {
         // Returns the erasure coded slice as an immutable reference.
         fn erasure_shard(&self) -> Result<&[u8], Error> {
             self.payload
-                .get(self.erausre_shard_offsets()?)
+                .get(self.erasure_shard_offsets()?)
                 .ok_or(Error::InvalidPayloadSize(self.payload.len()))
         }
 
         // Returns the erasure coded slice as a mutable reference.
         fn erasure_shard_mut(&mut self) -> Result<&mut [u8], Error> {
-            let offsets = self.erausre_shard_offsets()?;
+            let offsets = self.erasure_shard_offsets()?;
             let payload_size = self.payload.len();
             self.payload
                 .get_mut(offsets)
@@ -973,19 +993,16 @@ fn make_shreds_data<'a>(
         shred
     })
 }
-// Generates coding shreds for the current erasure batch.
+// Generates coding shred blanks for the current erasure batch.
 // Updates ShredCommonHeader.index for coding shreds of the next batch.
-fn make_shreds_code(
+// These have the correct headers, but none of the payloads and signatures.
+fn make_shreds_code_header_only(
     common_header: &mut ShredCommonHeader,
-    num_data_shreds: usize,
-    is_last_in_slot: bool,
 ) -> impl Iterator<Item = ShredCode> + '_ {
     debug_assert_matches!(common_header.shred_variant, ShredVariant::MerkleCode { .. });
-    let erasure_batch_size = shredder::get_erasure_batch_size(num_data_shreds, is_last_in_slot);
-    let num_coding_shreds = erasure_batch_size - num_data_shreds;
     let mut coding_header = CodingShredHeader {
-        num_data_shreds: num_data_shreds as u16,
-        num_coding_shreds: num_coding_shreds as u16,
+        num_data_shreds: DATA_SHREDS_PER_FEC_BLOCK as u16,
+        num_coding_shreds: CODING_SHREDS_PER_FEC_BLOCK as u16,
         position: 0,
     };
     std::iter::repeat_with(move || {
@@ -998,7 +1015,7 @@ fn make_shreds_code(
         coding_header.position += 1;
         shred
     })
-    .take(num_coding_shreds)
+    .take(CODING_SHREDS_PER_FEC_BLOCK)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1090,14 +1107,7 @@ pub(super) fn make_shreds_from_data(
             )
             .map(Shred::ShredData),
         );
-        shreds.extend(
-            make_shreds_code(
-                &mut common_header_code,
-                DATA_SHREDS_PER_FEC_BLOCK,          // num_data_shreds
-                is_last_in_slot && rest.is_empty(), // is_last_in_slot
-            )
-            .map(Shred::ShredCode),
-        );
+        shreds.extend(make_shreds_code_header_only(&mut common_header_code).map(Shred::ShredCode));
         data = rest;
     }
 
@@ -1130,14 +1140,7 @@ pub(super) fn make_shreds_from_data(
                 .take(DATA_SHREDS_PER_FEC_BLOCK);
             make_shreds_data(&mut common_header_data, data_header, chunks).map(Shred::ShredData)
         });
-        shreds.extend(
-            make_shreds_code(
-                &mut common_header_code,
-                DATA_SHREDS_PER_FEC_BLOCK,
-                is_last_in_slot,
-            )
-            .map(Shred::ShredCode),
-        );
+        shreds.extend(make_shreds_code_header_only(&mut common_header_code).map(Shred::ShredCode));
     }
 
     // Adjust flags for the very last data shred.
@@ -1308,7 +1311,7 @@ fn finish_erasure_batch(
 mod test {
     use {
         super::*,
-        crate::shred::{ShredFlags, ShredId, SignedData},
+        crate::shred::{merkle_tree::get_proof_size, ShredFlags, ShredId, SignedData},
         assert_matches::assert_matches,
         itertools::Itertools,
         rand::{seq::SliceRandom, CryptoRng, Rng},
@@ -1450,17 +1453,6 @@ mod test {
                 &reed_solomon_cache,
             );
         }
-    }
-
-    // Maps number of (code + data) shreds to merkle_proof.len().
-    fn get_proof_size(num_shreds: usize) -> u8 {
-        let bits = usize::BITS - num_shreds.leading_zeros();
-        let proof_size = if num_shreds.is_power_of_two() {
-            bits.checked_sub(1).unwrap()
-        } else {
-            bits
-        };
-        u8::try_from(proof_size).unwrap()
     }
 
     fn run_recover_merkle_shreds<R: Rng + CryptoRng>(
@@ -1628,28 +1620,6 @@ mod test {
                     ShredType::Code => assert_matches!(shred.payload(), Payload::Unique(_)),
                     ShredType::Data => assert_matches!(shred.payload(), Payload::Shared(_)),
                 }
-            }
-        }
-    }
-
-    #[test]
-    fn test_get_proof_size() {
-        assert_eq!(get_proof_size(0), 0);
-        assert_eq!(get_proof_size(1), 0);
-        assert_eq!(get_proof_size(2), 1);
-        assert_eq!(get_proof_size(3), 2);
-        assert_eq!(get_proof_size(4), 2);
-        assert_eq!(get_proof_size(5), 3);
-        assert_eq!(get_proof_size(63), 6);
-        assert_eq!(get_proof_size(64), 6);
-        assert_eq!(get_proof_size(65), 7);
-        assert_eq!(get_proof_size(usize::MAX - 1), 64);
-        assert_eq!(get_proof_size(usize::MAX), 64);
-        for proof_size in 1u8..9 {
-            let max_num_shreds = 1usize << u32::from(proof_size);
-            let min_num_shreds = (max_num_shreds >> 1) + 1;
-            for num_shreds in min_num_shreds..=max_num_shreds {
-                assert_eq!(get_proof_size(num_shreds), proof_size);
             }
         }
     }

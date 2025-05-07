@@ -6,7 +6,7 @@ use {
         accounts_file::AccountsFileProvider,
         accounts_hash::MERKLE_FANOUT,
         accounts_index::{tests::*, AccountIndex, AccountSecondaryIndexesIncludeExclude},
-        ancient_append_vecs,
+        ancient_append_vecs::{self, is_ancient},
         append_vec::{
             aligned_stored_size, test_utils::TempFile, AccountMeta, AppendVec, StoredAccountMeta,
             StoredMeta,
@@ -3266,17 +3266,16 @@ fn test_delete_dependencies() {
     accounts_index.add_root(2);
     accounts_index.add_root(3);
     let num_bins = accounts_index.bins();
-    let candidates: Box<_> =
-        std::iter::repeat_with(|| RwLock::new(HashMap::<Pubkey, CleaningInfo>::new()))
-            .take(num_bins)
-            .collect();
+    let mut candidates: Box<_> = std::iter::repeat_with(HashMap::<Pubkey, CleaningInfo>::new)
+        .take(num_bins)
+        .collect();
     for key in [&key0, &key1, &key2] {
         let index_entry = accounts_index.get_cloned(key).unwrap();
         let rooted_entries = accounts_index
             .get_rooted_entries(index_entry.slot_list.read().unwrap().as_slice(), None);
         let ref_count = index_entry.ref_count();
         let index = accounts_index.bin_calculator.bin_from_pubkey(key);
-        let mut candidates_bin = candidates[index].write().unwrap();
+        let candidates_bin = &mut candidates[index];
         candidates_bin.insert(
             *key,
             CleaningInfo {
@@ -3287,7 +3286,6 @@ fn test_delete_dependencies() {
         );
     }
     for candidates_bin in candidates.iter() {
-        let candidates_bin = candidates_bin.read().unwrap();
         for (
             key,
             CleaningInfo {
@@ -5751,8 +5749,8 @@ fn test_filter_zero_lamport_clean_for_incremental_snapshots() {
         let store_count = 0;
         let mut store_counts = HashMap::default();
         store_counts.insert(slot, (store_count, key_set));
-        let candidates = [RwLock::new(HashMap::new())];
-        candidates[0].write().unwrap().insert(
+        let mut candidates = [HashMap::new()];
+        candidates[0].insert(
             pubkey,
             CleaningInfo {
                 slot_list: vec![(slot, account_info)],
@@ -5767,11 +5765,11 @@ fn test_filter_zero_lamport_clean_for_incremental_snapshots() {
         accounts_db.filter_zero_lamport_clean_for_incremental_snapshots(
             test_params.max_clean_root,
             &store_counts,
-            &candidates,
+            &mut candidates,
         );
 
         assert_eq!(
-            candidates[0].read().unwrap().contains_key(&pubkey),
+            candidates[0].contains_key(&pubkey),
             test_params.should_contain
         );
     };
@@ -6058,49 +6056,6 @@ define_accounts_db_test!(test_many_unrefs, |db| {
     );
     assert_eq!(db.accounts_index.ref_count_from_storage(&pk1), 0);
 });
-
-#[test_case(CreateAncientStorage::Append; "append")]
-#[test_case(CreateAncientStorage::Pack; "pack")]
-fn test_get_oldest_non_ancient_slot_for_hash_calc_scan(
-    create_ancient_storage: CreateAncientStorage,
-) {
-    let expected = |v| {
-        if create_ancient_storage == CreateAncientStorage::Append {
-            Some(v)
-        } else {
-            None
-        }
-    };
-
-    let mut db = AccountsDb::new_single_for_tests();
-    db.create_ancient_storage = create_ancient_storage;
-
-    let config = CalcAccountsHashConfig::default();
-    let slot = config.epoch_schedule.slots_per_epoch;
-    let slots_per_epoch = config.epoch_schedule.slots_per_epoch;
-    assert_ne!(slot, 0);
-    let offset = 10;
-    assert_eq!(
-        db.get_oldest_non_ancient_slot_for_hash_calc_scan(slots_per_epoch + offset, &config),
-        expected(db.ancient_append_vec_offset.unwrap() as u64 + offset + 1)
-    );
-    // ancient append vecs enabled (but at 0 offset), so can be non-zero
-    db.ancient_append_vec_offset = Some(0);
-    // 0..=(slots_per_epoch - 1) are all non-ancient
-    assert_eq!(
-        db.get_oldest_non_ancient_slot_for_hash_calc_scan(slots_per_epoch - 1, &config),
-        expected(0)
-    );
-    // 1..=slots_per_epoch are all non-ancient, so 1 is oldest non ancient
-    assert_eq!(
-        db.get_oldest_non_ancient_slot_for_hash_calc_scan(slots_per_epoch, &config),
-        expected(1)
-    );
-    assert_eq!(
-        db.get_oldest_non_ancient_slot_for_hash_calc_scan(slots_per_epoch + offset, &config),
-        expected(offset + 1)
-    );
-}
 
 define_accounts_db_test!(test_mark_dirty_dead_stores_empty, |db| {
     let slot = 0;

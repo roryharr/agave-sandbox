@@ -31,7 +31,6 @@ use {
     },
     anyhow::{anyhow, Context, Result},
     crossbeam_channel::{bounded, unbounded, Receiver},
-    lazy_static::lazy_static,
     quinn::Endpoint,
     solana_accounts_db::{
         accounts_db::{AccountsDbConfig, ACCOUNTS_DB_CONFIG_FOR_TESTING},
@@ -174,14 +173,7 @@ impl BlockVerificationMethod {
     }
 
     pub fn cli_message() -> &'static str {
-        lazy_static! {
-            static ref MESSAGE: String = format!(
-                "Switch transaction scheduling method for verifying ledger entries [default: {}]",
-                BlockVerificationMethod::default()
-            );
-        };
-
-        &MESSAGE
+        "Switch transaction scheduling method for verifying ledger entries"
     }
 }
 
@@ -199,14 +191,7 @@ impl BlockProductionMethod {
     }
 
     pub fn cli_message() -> &'static str {
-        lazy_static! {
-            static ref MESSAGE: String = format!(
-                "Switch transaction scheduling method for producing ledger entries [default: {}]",
-                BlockProductionMethod::default()
-            );
-        };
-
-        &MESSAGE
+        "Switch transaction scheduling method for producing ledger entries"
     }
 }
 
@@ -224,14 +209,7 @@ impl TransactionStructure {
     }
 
     pub fn cli_message() -> &'static str {
-        lazy_static! {
-            static ref MESSAGE: String = format!(
-                "Switch internal transaction structure/representation [default: {}]",
-                TransactionStructure::default()
-            );
-        };
-
-        &MESSAGE
+        "Switch internal transaction structure/representation"
     }
 }
 
@@ -589,6 +567,10 @@ pub struct Validator {
     repair_quic_endpoints: Option<[Endpoint; 3]>,
     repair_quic_endpoints_runtime: Option<TokioRuntime>,
     repair_quic_endpoints_join_handle: Option<repair::quic_endpoint::AsyncTryJoinHandle>,
+    // This runtime is used to run the client owned by SendTransactionService.
+    // We don't wait for its JoinHandle here because ownership and shutdown
+    // are managed elsewhere. This variable is intentionally unused.
+    _tpu_client_next_runtime: Option<TokioRuntime>,
 }
 
 impl Validator {
@@ -895,11 +877,13 @@ impl Validator {
             .snapshot_config()
             .should_generate_snapshots()
         {
+            let exit_backpressure = None;
             let enable_gossip_push = true;
             let snapshot_packager_service = SnapshotPackagerService::new(
                 pending_snapshot_packages.clone(),
                 starting_snapshot_hashes,
                 exit.clone(),
+                exit_backpressure,
                 cluster_info.clone(),
                 snapshot_controller.clone(),
                 enable_gossip_push,
@@ -1093,7 +1077,7 @@ impl Validator {
             let connection_cache = ConnectionCache::new_with_client_options(
                 "connection_cache_tpu_quic",
                 tpu_connection_pool_size,
-                Some(node.sockets.quic_forwards_client),
+                Some(node.sockets.tpu_transaction_forwarding_client),
                 Some((
                     &identity_keypair,
                     node.info
@@ -1137,6 +1121,22 @@ impl Validator {
             ))
         };
 
+        // test-validator crate may start the validator in a tokio runtime
+        // context which forces us to use the same runtime because a nested
+        // runtime will cause panic at drop. Outside test-validator crate, we
+        // always need a tokio runtime (and the respective handle) to initialize
+        // the turbine QUIC endpoint.
+        let current_runtime_handle = tokio::runtime::Handle::try_current();
+        let tpu_client_next_runtime =
+            (current_runtime_handle.is_err() && config.use_tpu_client_next).then(|| {
+                tokio::runtime::Builder::new_multi_thread()
+                    .enable_all()
+                    .worker_threads(2)
+                    .thread_name("solTpuClientRt")
+                    .build()
+                    .unwrap()
+            });
+
         let rpc_override_health_check =
             Arc::new(AtomicBool::new(config.rpc_config.disable_health_check));
         let (
@@ -1161,6 +1161,19 @@ impl Validator {
                 None
             };
 
+            let client_option = if config.use_tpu_client_next {
+                let runtime_handle = tpu_client_next_runtime
+                    .as_ref()
+                    .map(TokioRuntime::handle)
+                    .unwrap_or_else(|| current_runtime_handle.as_ref().unwrap());
+                ClientOption::TpuClientNext(
+                    Arc::as_ref(&identity_keypair),
+                    node.sockets.rpc_sts_client,
+                    runtime_handle.clone(),
+                )
+            } else {
+                ClientOption::ConnectionCache(connection_cache.clone())
+            };
             let rpc_svc_config = JsonRpcServiceConfig {
                 rpc_addr,
                 rpc_config: config.rpc_config.clone(),
@@ -1183,14 +1196,7 @@ impl Validator {
                 max_complete_transaction_status_slot,
                 max_complete_rewards_slot,
                 prioritization_fee_cache: prioritization_fee_cache.clone(),
-                client_option: if config.use_tpu_client_next {
-                    ClientOption::TpuClientNext(
-                        Arc::as_ref(&identity_keypair),
-                        node.sockets.rpc_sts_client,
-                    )
-                } else {
-                    ClientOption::ConnectionCache(connection_cache.clone())
-                },
+                client_option,
             };
             let json_rpc_service =
                 JsonRpcService::new_with_config(rpc_svc_config).map_err(ValidatorError::Other)?;
@@ -1361,12 +1367,6 @@ impl Validator {
             .as_ref()
             .map(|service| service.sender_cloned());
 
-        // test-validator crate may start the validator in a tokio runtime
-        // context which forces us to use the same runtime because a nested
-        // runtime will cause panic at drop.
-        // Outside test-validator crate, we always need a tokio runtime (and
-        // the respective handle) to initialize the turbine QUIC endpoint.
-        let current_runtime_handle = tokio::runtime::Handle::try_current();
         let turbine_quic_endpoint_runtime = (current_runtime_handle.is_err()
             && genesis_config.cluster_type != ClusterType::MainnetBeta)
             .then(|| {
@@ -1582,7 +1582,7 @@ impl Validator {
                 transactions_quic: node.sockets.tpu_quic,
                 transactions_forwards_quic: node.sockets.tpu_forwards_quic,
                 vote_quic: node.sockets.tpu_vote_quic,
-                vote_forwards_client: node.sockets.tpu_vote_forwards_client,
+                vote_forwarding_client: node.sockets.tpu_vote_forwarding_client,
                 vortexor_receivers: node.sockets.vortexor_receivers,
             },
             &rpc_subscriptions,
@@ -1635,9 +1635,9 @@ impl Validator {
             if let Some(json_rpc_service) = &json_rpc_service {
                 key_notifies.push(json_rpc_service.get_client_key_updater())
             }
+            // note, that we don't need to add ConnectionClient to key_notifiers
+            // because it is added inside Tpu.
         }
-        // add connection_cache because it is still used in Forwarder.
-        key_notifies.push(connection_cache);
 
         *admin_rpc_service_post_init.write().unwrap() = Some(AdminRpcRequestMetadataPostInit {
             bank_forks: bank_forks.clone(),
@@ -1684,6 +1684,7 @@ impl Validator {
             repair_quic_endpoints,
             repair_quic_endpoints_runtime,
             repair_quic_endpoints_join_handle,
+            _tpu_client_next_runtime: tpu_client_next_runtime,
         })
     }
 

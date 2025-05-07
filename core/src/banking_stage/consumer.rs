@@ -1,13 +1,12 @@
 use {
     super::{
-        committer::{CommitTransactionDetails, Committer, PreBalanceInfo},
+        committer::{CommitTransactionDetails, Committer},
         leader_slot_timing_metrics::LeaderExecuteAndCommitTimings,
         qos_service::QosService,
         scheduler_messages::MaxAge,
     },
     itertools::Itertools,
     solana_fee::FeeFeatures,
-    solana_ledger::token_balances::collect_token_balances,
     solana_measure::measure_us,
     solana_poh::{
         poh_recorder::PohRecorderError,
@@ -27,7 +26,6 @@ use {
         transaction_processing_result::TransactionProcessingResultExtensions,
         transaction_processor::{ExecutionRecordingConfig, TransactionProcessingConfig},
     },
-    solana_timings::ExecuteTimings,
     std::{num::Saturating, sync::Arc},
 };
 
@@ -193,7 +191,6 @@ impl Consumer {
         let (_, unlock_us) = measure_us!(drop(batch));
 
         let ExecuteAndCommitTransactionsOutput {
-            ref execute_and_commit_timings,
             ref commit_transactions_result,
             ..
         } = execute_and_commit_transactions_output;
@@ -207,11 +204,6 @@ impl Consumer {
             commit_transactions_result.as_ref().ok(),
             bank,
         );
-
-        let (cu, us) =
-            Self::accumulate_execute_units_and_time(&execute_and_commit_timings.execute_timings);
-        self.qos_service.accumulate_actual_execute_cu(cu);
-        self.qos_service.accumulate_actual_execute_time(us);
 
         // reports qos service stats for this batch
         self.qos_service.report_metrics(bank.slot());
@@ -238,18 +230,6 @@ impl Consumer {
     ) -> ExecuteAndCommitTransactionsOutput {
         let transaction_status_sender_enabled = self.committer.transaction_status_sender_enabled();
         let mut execute_and_commit_timings = LeaderExecuteAndCommitTimings::default();
-
-        let mut pre_balance_info = PreBalanceInfo::default();
-        let (_, collect_balances_us) = measure_us!({
-            // If the extra meta-data services are enabled for RPC, collect the
-            // pre-balances for native and token programs.
-            if transaction_status_sender_enabled {
-                pre_balance_info.native = bank.collect_balances(batch);
-                pre_balance_info.token =
-                    collect_token_balances(bank, batch, &mut pre_balance_info.mint_decimals)
-            }
-        });
-        execute_and_commit_timings.collect_balances_us = collect_balances_us;
 
         let min_max = batch
             .sanitized_transactions()
@@ -323,7 +303,27 @@ impl Consumer {
         let LoadAndExecuteTransactionsOutput {
             processing_results,
             processed_counts,
+            balance_collector,
         } = load_and_execute_transactions_output;
+
+        let actual_execute_time = execute_and_commit_timings
+            .execute_timings
+            .execute_accessories
+            .process_instructions
+            .total_us
+            .0;
+        let actual_executed_cu = processing_results
+            .iter()
+            .map(|processing_result| {
+                processing_result
+                    .as_ref()
+                    .map_or(0, |pr| pr.executed_units())
+            })
+            .sum();
+        self.qos_service
+            .accumulate_actual_execute_cu(actual_executed_cu);
+        self.qos_service
+            .accumulate_actual_execute_time(actual_execute_time);
 
         let transaction_counts = LeaderProcessedTransactionCounts {
             processed_count: processed_counts.processed_transactions_count,
@@ -392,7 +392,7 @@ impl Consumer {
                     processing_results,
                     starting_transaction_index,
                     bank,
-                    &mut pre_balance_info,
+                    balance_collector,
                     &mut execute_and_commit_timings,
                     &processed_counts,
                 )
@@ -469,21 +469,6 @@ impl Consumer {
             fee,
         )
     }
-
-    fn accumulate_execute_units_and_time(execute_timings: &ExecuteTimings) -> (u64, u64) {
-        execute_timings.details.per_program_timings.values().fold(
-            (0, 0),
-            |(units, times), program_timings| {
-                (
-                    (Saturating(units)
-                        + program_timings.accumulated_units
-                        + program_timings.total_errored_units)
-                        .0,
-                    (Saturating(times) + program_timings.accumulated_us).0,
-                )
-            },
-        )
-    }
 }
 
 #[cfg(test)]
@@ -534,7 +519,6 @@ mod tests {
             system_program, system_transaction,
             transaction::{MessageHash, Transaction, VersionedTransaction},
         },
-        solana_timings::ProgramTiming,
         solana_transaction_status::{TransactionStatusMeta, VersionedTransactionWithStatusMeta},
         std::{
             borrow::Cow,
@@ -1754,32 +1738,5 @@ mod tests {
             .is_exited
             .store(true, Ordering::Relaxed);
         let _ = poh_simulator.join();
-    }
-
-    #[test]
-    fn test_accumulate_execute_units_and_time() {
-        let mut execute_timings = ExecuteTimings::default();
-        let mut expected_units = 0;
-        let mut expected_us = 0;
-
-        for n in 0..10 {
-            execute_timings.details.per_program_timings.insert(
-                Pubkey::new_unique(),
-                ProgramTiming {
-                    accumulated_us: Saturating(n * 100),
-                    accumulated_units: Saturating(n * 1000),
-                    count: Saturating(n as u32),
-                    errored_txs_compute_consumed: vec![],
-                    total_errored_units: Saturating(0),
-                },
-            );
-            expected_us += n * 100;
-            expected_units += n * 1000;
-        }
-
-        let (units, us) = Consumer::accumulate_execute_units_and_time(&execute_timings);
-
-        assert_eq!(expected_units, units);
-        assert_eq!(expected_us, us);
     }
 }
