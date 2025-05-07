@@ -613,8 +613,15 @@ impl HotStorageReader {
         Ok(())
     }
 
-    /// for each offset in `sorted_offsets`, return the account size
-    pub(crate) fn get_account_sizes(
+    /// Calculate the amount of storage required for the passed in data lengths
+    /// Only need data lengths, as the number of accounts can be inferred from
+    /// length of the vector, and the account size is static
+    pub(crate) fn calculate_storage_size(&self, data_len: &[usize]) -> usize {
+        data_len.iter().map(|data_len| stored_size(*data_len)).sum()
+    }
+
+    /// for each offset in `sorted_offsets`, return the length of data stored in the account
+    pub(crate) fn get_account_data_lens(
         &self,
         sorted_offsets: &[usize],
     ) -> TieredStorageResult<Vec<usize>> {
@@ -625,7 +632,7 @@ impl HotStorageReader {
             let meta = self.get_account_meta_from_offset(account_offset)?;
             let account_block = self.get_account_block(account_offset, index_offset)?;
             let data_len = meta.account_data_size(account_block);
-            result.push(stored_size(data_len));
+            result.push(data_len);
         }
         Ok(result)
     }

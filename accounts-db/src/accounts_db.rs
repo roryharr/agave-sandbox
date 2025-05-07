@@ -7829,7 +7829,8 @@ impl AccountsDb {
                         let mut offsets = offsets.iter().cloned().collect::<Vec<_>>();
                         // sort so offsets are in order. This improves efficiency of loading the accounts.
                         offsets.sort_unstable();
-                        let dead_bytes = store.accounts.get_account_sizes(&offsets).iter().sum();
+                        let data_lens = store.accounts.get_account_data_lens(&offsets);
+                        let dead_bytes = store.accounts.calculate_storage_size(&data_lens);
                         store.remove_accounts(dead_bytes, reset_accounts, offsets.len());
                         if Self::is_shrinking_productive(&store)
                             && self.is_candidate_for_shrink(&store)
@@ -8502,7 +8503,7 @@ impl AccountsDb {
         rent_collector: &RentCollector,
         storage_info: &StorageSizeAndCountMap,
     ) -> SlotIndexGenerationInfo {
-        if storage.accounts.get_account_sizes(&[0]).is_empty() {
+        if storage.accounts.get_account_data_lens(&[0]).is_empty() {
             return SlotIndexGenerationInfo::default();
         }
         let secondary = !self.account_indexes.is_empty();
