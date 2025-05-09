@@ -1175,12 +1175,11 @@ impl AccountStorageEntry {
     }
 
     /// Adds passed in offset to the dead account vector
-    pub fn add_dead_account(&self, offset: Offset, size: usize, slot: Slot) {
-        let size = std::cmp::min(self.accounts.len() - offset, size);
+    pub fn add_dead_account(&self, offset: Offset, data_len: usize, slot: Slot) {
         self.dead_account_offsets
             .write()
             .unwrap()
-            .push((offset, size, slot));
+            .push((offset, data_len, slot));
     }
 
     /// Returns the dead accounts that were dead as of Slot or older
@@ -1192,7 +1191,7 @@ impl AccountStorageEntry {
             .unwrap()
             .iter()
             .filter(|(_, _, dead_slot)| slot.is_none_or(|s| *dead_slot <= s))
-            .map(|(offset, size, _)| (*offset, *size))
+            .map(|(offset, data_len, _)| (*offset, *data_len))
             .collect()
     }
 
@@ -1204,7 +1203,11 @@ impl AccountStorageEntry {
         let dead_bytes = dead_accounts
             .iter()
             .filter(|(_, _, dead_slot)| slot.is_none_or(|s| *dead_slot <= s))
-            .map(|(_, size, _)| *size)
+            .map(|(offset, data_len, _)| {
+                self.accounts
+                    .calculate_stored_size(*data_len)
+                    .min(self.accounts.len() - offset)
+            })
             .sum();
         dead_bytes
     }
