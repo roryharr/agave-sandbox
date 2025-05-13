@@ -5062,25 +5062,12 @@ impl AccountsDb {
 
     pub fn load_account_hash(
         &self,
-        ancestors: &Ancestors,
-        pubkey: &Pubkey,
-        max_root: Option<Slot>,
-        load_hint: LoadHint,
+        _ancestors: &Ancestors,
+        _pubkey: &Pubkey,
+        _max_root: Option<Slot>,
+        _load_hint: LoadHint,
     ) -> Option<AccountHash> {
-        let (slot, storage_location, _maybe_account_accesor) =
-            self.read_index_for_accessor_or_load_slow(ancestors, pubkey, max_root, false)?;
-        // Notice the subtle `?` at previous line, we bail out pretty early if missing.
-
-        let (mut account_accessor, _) = self.retry_to_get_account_accessor(
-            slot,
-            storage_location,
-            ancestors,
-            pubkey,
-            max_root,
-            load_hint,
-        )?;
-        account_accessor
-            .check_and_get_loaded_account(|loaded_account| Some(loaded_account.loaded_hash()))
+        panic!();
     }
 
     fn get_account_accessor<'a>(
