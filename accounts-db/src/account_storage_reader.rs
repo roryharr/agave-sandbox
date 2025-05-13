@@ -58,7 +58,7 @@ impl<'a> AccountStorageReader<'a> {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.num_alive_bytes == 0
+        self.len() == 0
     }
 }
 
@@ -81,7 +81,7 @@ impl Read for AccountStorageReader<'_> {
             let bytes_left_in_buffer = buf_len.saturating_sub(total_read);
 
             // Cannot read beyond the next dead account or the end of the file
-            let bytes_to_read_from_file = if let Some(&(dead_start, _)) = next_dead_account {
+            let bytes_to_read_from_file = if let Some((dead_start, _)) = next_dead_account {
                 dead_start.saturating_sub(self.current_offset)
             } else {
                 self.num_total_bytes.saturating_sub(self.current_offset)
@@ -214,9 +214,9 @@ mod tests {
             })
         };
 
-        // Reopen the storage as the specified access type
-        storage.reopen_as_readonly_test_hook(storage_access);
-
+        let storage = storage
+            .reopen_as_readonly(storage_access)
+            .unwrap_or(storage);
         assert_eq!(dead_account_offset.len(), number_of_accounts_to_remove);
 
         // Mark the dead accounts in storage

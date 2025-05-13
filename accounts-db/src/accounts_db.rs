@@ -1079,6 +1079,10 @@ pub struct AccountStorageEntry {
     /// from the accounts index, so they will not be picked up by scan.
     /// Slot is the slot that the account was rewritten to a newer
     /// Slot and invalidated from this storage.
+    /// Two scenarios cause an account entry to be marked dead
+    /// 1. The account was rewritten to a newer slot
+    /// 2. The account was set to zero lamports and is older than the last
+    ///    full snapshot
     dead_account_offsets: RwLock<Vec<(Offset, usize, Slot)>>,
 }
 
@@ -1106,6 +1110,7 @@ impl AccountStorageEntry {
     }
 
     /// open a new instance of the storage that is readonly
+    #[cfg_attr(feature = "dev-context-only-utils", qualifiers(pub))]
     fn reopen_as_readonly(&self, storage_access: StorageAccess) -> Option<Self> {
         if storage_access != StorageAccess::File {
             // if we are only using mmap, then no reason to re-open
@@ -1261,13 +1266,6 @@ impl AccountStorageEntry {
         let mut count_and_status = self.count_and_status.lock_write();
         *count_and_status = (count_and_status.0 + num_accounts, count_and_status.1);
         self.alive_bytes.fetch_add(num_bytes, Ordering::Release);
-    }
-
-    #[cfg(feature = "dev-context-only-utils")]
-    /// This is a test hook to allow us to reopen the storage as readonly
-    /// This is only used in tests, and should not be used in production code
-    pub fn reopen_as_readonly_test_hook(&self, storage_access: StorageAccess) -> Option<Self> {
-        self.reopen_as_readonly(storage_access)
     }
 
     // This function is only called by `store_uncached()`, which is DCOU and only called by tests.
