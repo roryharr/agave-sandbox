@@ -205,7 +205,7 @@ mod tests {
         // Offsets may be None if the storage is empty
         if let Some(offsets) = offsets {
             offsets.offsets.iter().enumerate().for_each(|(i, offset)| {
-                // Remove the specified percentage of accounts
+                // Remove the specified number of accounts
                 if (number_of_accounts_to_remove != 0)
                     && (i % (total_accounts / number_of_accounts_to_remove)) == 0
                 {
@@ -217,6 +217,19 @@ mod tests {
         let storage = storage
             .reopen_as_readonly(storage_access)
             .unwrap_or(storage);
+
+        // Assert that storage.accounts was reopened with the specified access type
+        match storage_access {
+            StorageAccess::File => assert!(matches!(
+                storage.accounts.internals_for_archive(),
+                InternalsForArchive::FileIo(_)
+            )),
+            StorageAccess::Mmap => assert!(matches!(
+                storage.accounts.internals_for_archive(),
+                InternalsForArchive::Mmap(_)
+            )),
+        }
+
         assert_eq!(dead_account_offset.len(), number_of_accounts_to_remove);
 
         // Mark the dead accounts in storage
