@@ -12,9 +12,9 @@ use {
 };
 
 /// A wrapper type around `AccountStorageEntry` that implements the `Read` trait.
-/// This type skips over the data in the sorted dead accounts structure.
+/// This type skips over the data in accounts contained in the obsolete accounts structure
 pub struct AccountStorageReader<'a> {
-    sorted_dead_accounts: Vec<(Offset, usize)>,
+    sorted_obsolete_accounts: Vec<(Offset, usize)>,
     current_offset: usize,
     file: Option<File>,
     internals: InternalsForArchive<'a>,
@@ -24,27 +24,28 @@ pub struct AccountStorageReader<'a> {
 
 impl<'a> AccountStorageReader<'a> {
     /// Creates a new `AccountStorageReader` from an `AccountStorageEntry`.
-    /// The dead accounts structure is sorted during initialization.
+    /// The obsolete accounts structure is sorted during initialization.
     pub fn new(storage: &'a AccountStorageEntry, snapshot_slot: Option<Slot>) -> io::Result<Self> {
         let internals = storage.accounts.internals_for_archive();
         let num_total_bytes = storage.accounts.len();
-        let num_alive_bytes = num_total_bytes - storage.get_dead_account_bytes(snapshot_slot);
+        let num_alive_bytes = num_total_bytes - storage.get_obsolete_bytes(snapshot_slot);
 
-        let mut sorted_dead_accounts = storage.get_dead_accounts(snapshot_slot);
+        let mut sorted_obsolete_accounts = storage.get_obsolete_accounts(snapshot_slot);
 
+        // Tiered storage is not compatible with obsolete acocunts at this time
         if matches!(storage.accounts, AccountsFile::TieredStorage(_)) {
             assert!(
-                sorted_dead_accounts.is_empty(),
-                "Dead accounts should be empty for TieredStorage"
+                sorted_obsolete_accounts.is_empty(),
+                "Obsolete accounts should be empty for TieredStorage"
             );
         }
 
-        // Conver the length to the size
-        sorted_dead_accounts.iter_mut().for_each(|(_offset, len)| {
+        // Convert the length to the size
+        sorted_obsolete_accounts.iter_mut().for_each(|(_offset, len)| {
             *len = storage.accounts.calculate_stored_size(*len);
         });
 
-        sorted_dead_accounts
+        sorted_obsolete_accounts
             .sort_unstable_by(|(a_offset, _), (b_offset, _)| b_offset.cmp(a_offset));
 
         let file = match internals {
@@ -53,7 +54,7 @@ impl<'a> AccountStorageReader<'a> {
         };
 
         Ok(Self {
-            sorted_dead_accounts,
+            sorted_obsolete_accounts,
             current_offset: 0,
             file,
             internals,
@@ -77,11 +78,11 @@ impl Read for AccountStorageReader<'_> {
         let buf_len = buf.len();
 
         while total_read < buf_len {
-            let next_dead_account = self.sorted_dead_accounts.last();
-            if let Some(&(dead_start, dead_size)) = next_dead_account {
-                if self.current_offset == dead_start {
-                    self.current_offset += dead_size.min(self.num_total_bytes - dead_start);
-                    self.sorted_dead_accounts.pop();
+            let next_obsolete_account = self.sorted_obsolete_accounts.last();
+            if let Some(&(obsolete_start, obsolete_size)) = next_obsolete_account {
+                if self.current_offset == obsolete_start {
+                    self.current_offset += obsolete_size.min(self.num_total_bytes - obsolete_start);
+                    self.sorted_obsolete_accounts.pop();
                     continue;
                 }
             }
@@ -89,9 +90,9 @@ impl Read for AccountStorageReader<'_> {
             // Cannot read beyond the end of the buffer
             let bytes_left_in_buffer = buf_len.saturating_sub(total_read);
 
-            // Cannot read beyond the next dead account or the end of the file
-            let bytes_to_read_from_file = if let Some((dead_start, _)) = next_dead_account {
-                dead_start.saturating_sub(self.current_offset)
+            // Cannot read beyond the next obsolete account or the end of the file
+            let bytes_to_read_from_file = if let Some((obsolete_start, _)) = next_obsolete_account {
+                obsolete_start.saturating_sub(self.current_offset)
             } else {
                 self.num_total_bytes.saturating_sub(self.current_offset)
             };
@@ -153,8 +154,8 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Dead accounts should be empty for TieredStorage")]
-    fn test_account_storage_reader_tiered_storage_one_dead_account_should_panic() {
+    #[should_panic(expected = "Obsolete accounts should be empty for TieredStorage")]
+    fn test_account_storage_reader_tiered_storage_one_obsolete_account_should_panic() {
         let (storage, _temp_dirs) =
             create_storage_for_storage_reader(0, AccountsFileProvider::HotStorage);
 
@@ -168,9 +169,9 @@ mod tests {
         storage.accounts.append_accounts(&(slot, &accounts[..]), 0);
 
         let offset = 0;
-        // Mark the dead accounts in storage
+        // Mark the obsolete accounts in storage
         let mut size = storage.accounts.get_account_data_lens(&[0]);
-        storage.add_dead_account(offset, size.pop().unwrap(), 0);
+        storage.mark_account_obsolete(offset, size.pop().unwrap(), 0);
 
         let reader = AccountStorageReader::new(&storage, None).unwrap();
         assert_eq!(reader.len(), storage.accounts.len());
@@ -178,7 +179,7 @@ mod tests {
 
     #[test_case(AccountsFileProvider::AppendVec)]
     #[test_case(AccountsFileProvider::HotStorage)]
-    fn test_account_storage_reader_no_dead_accounts(provider: AccountsFileProvider) {
+    fn test_account_storage_reader_no_obsolete_accounts(provider: AccountsFileProvider) {
         let (storage, _temp_dirs) = create_storage_for_storage_reader(0, provider);
 
         let account = AccountSharedData::new(1, 10, &Pubkey::new_unique());
@@ -206,7 +207,7 @@ mod tests {
     #[test_case(100, 0, StorageAccess::Mmap)]
     #[test_case(100, 10, StorageAccess::Mmap)]
     #[test_case(100, 100, StorageAccess::Mmap)]
-    fn test_account_storage_reader_with_dead_accounts(
+    fn test_account_storage_reader_with_obsolete_accounts(
         total_accounts: usize,
         number_of_accounts_to_remove: usize,
         storage_access: StorageAccess,
@@ -232,8 +233,8 @@ mod tests {
             .accounts
             .append_accounts(&(slot, &accounts_to_append[..]), 0);
 
-        // Select some accounts to mark as dead.
-        let mut dead_account_offset = Vec::new();
+        // Select some accounts to mark as obsolete.
+        let mut obsolete_account_offset = Vec::new();
 
         // Offsets may be None if the storage is empty
         if let Some(offsets) = offsets {
@@ -242,17 +243,17 @@ mod tests {
                 if (number_of_accounts_to_remove != 0)
                     && (i % (total_accounts / number_of_accounts_to_remove)) == 0
                 {
-                    dead_account_offset.push(*offset);
+                    obsolete_account_offset.push(*offset);
                 }
             })
         };
 
-        assert_eq!(dead_account_offset.len(), number_of_accounts_to_remove);
+        assert_eq!(obsolete_account_offset.len(), number_of_accounts_to_remove);
 
-        // Mark the dead accounts in storage
-        dead_account_offset.into_iter().for_each(|offset| {
+        // Mark the obsolete accounts in storage
+        obsolete_account_offset.into_iter().for_each(|offset| {
             let mut size = storage.accounts.get_account_data_lens(&[offset]);
-            storage.add_dead_account(offset, size.pop().unwrap(), 0);
+            storage.mark_account_obsolete(offset, size.pop().unwrap(), 0);
         });
 
         let storage = storage
@@ -273,7 +274,7 @@ mod tests {
 
         // Create the reader and check the length
         let mut reader = AccountStorageReader::new(&storage, None).unwrap();
-        let current_len = storage.accounts.len() - storage.get_dead_account_bytes(None);
+        let current_len = storage.accounts.len() - storage.get_obsolete_bytes(None);
         assert_eq!(reader.len(), current_len);
 
         // Create a temporary directory and a file within it
@@ -332,8 +333,8 @@ mod tests {
             .accounts
             .append_accounts(&(slot, &accounts_to_append[..]), 0);
 
-        // Select some accounts to mark as dead. Need to find the starting offset of the account to mark them
-        let mut dead_account_offset = Vec::new();
+        // Select some accounts to mark as obsolete. Need to find the starting offset of the account to mark them
+        let mut obsolete_account_offset = Vec::new();
 
         offsets
             .unwrap()
@@ -341,17 +342,17 @@ mod tests {
             .iter()
             .enumerate()
             .for_each(|(i, offset)| {
-                // Mark half the accounts as dead
+                // Mark half the accounts as obsolete
                 if i % 2 == 0 {
-                    dead_account_offset.push(*offset);
+                    obsolete_account_offset.push(*offset);
                 }
             });
 
-        // Mark the dead accounts in storage
+        // Mark the obsolete accounts in storage
         let mut slot = 0;
-        dead_account_offset.into_iter().for_each(|offset| {
+        obsolete_account_offset.into_iter().for_each(|offset| {
             let mut size = storage.accounts.get_account_data_lens(&[offset]);
-            storage.add_dead_account(offset, size.pop().unwrap(), slot);
+            storage.mark_account_obsolete(offset, size.pop().unwrap(), slot);
             slot += 1;
         });
 
@@ -359,7 +360,7 @@ mod tests {
         // Now iterate through all the slots and verify correctness
         for slot in 1..=10 {
             let mut reader = AccountStorageReader::new(&storage, Some(slot)).unwrap();
-            let current_len = storage.accounts.len() - storage.get_dead_account_bytes(Some(slot));
+            let current_len = storage.accounts.len() - storage.get_obsolete_bytes(Some(slot));
             assert_eq!(reader.len(), current_len);
 
             // Create a temporary directory and a file within it
