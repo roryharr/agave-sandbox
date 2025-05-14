@@ -41,9 +41,11 @@ impl<'a> AccountStorageReader<'a> {
         }
 
         // Convert the length to the size
-        sorted_obsolete_accounts.iter_mut().for_each(|(_offset, len)| {
-            *len = storage.accounts.calculate_stored_size(*len);
-        });
+        sorted_obsolete_accounts
+            .iter_mut()
+            .for_each(|(_offset, len)| {
+                *len = storage.accounts.calculate_stored_size(*len);
+            });
 
         sorted_obsolete_accounts
             .sort_unstable_by(|(a_offset, _), (b_offset, _)| b_offset.cmp(a_offset));
