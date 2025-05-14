@@ -1,6 +1,8 @@
 use {
     crate::{
-        account_info::Offset, accounts_db::AccountStorageEntry, accounts_file::InternalsForArchive,
+        account_info::Offset,
+        accounts_db::AccountStorageEntry,
+        accounts_file::{AccountsFile, InternalsForArchive},
     },
     solana_clock::Slot,
     std::{
@@ -29,6 +31,13 @@ impl<'a> AccountStorageReader<'a> {
         let num_alive_bytes = num_total_bytes - storage.get_dead_account_bytes(snapshot_slot);
 
         let mut sorted_dead_accounts = storage.get_dead_accounts(snapshot_slot);
+
+        if matches!(storage.accounts, AccountsFile::TieredStorage(_)) {
+            assert!(
+                sorted_dead_accounts.is_empty(),
+                "Dead accounts should be empty for TieredStorage"
+            );
+        }
 
         // Conver the length to the size
         sorted_dead_accounts.iter_mut().for_each(|(_offset, len)| {
@@ -143,6 +152,30 @@ mod tests {
         )
     }
 
+    #[test]
+    #[should_panic(expected = "Dead accounts should be empty for TieredStorage")]
+    fn test_account_storage_reader_tiered_storage_one_dead_account_should_panic() {
+        let (storage, _temp_dirs) =
+            create_storage_for_storage_reader(0, AccountsFileProvider::HotStorage);
+
+        let account = AccountSharedData::new(1, 10, &Pubkey::new_unique());
+        let account2 = AccountSharedData::new(1, 10, &Pubkey::new_unique());
+        let shared_key = solana_pubkey::new_rand();
+        let slot = 0;
+
+        let accounts = [(&shared_key, &account), (&shared_key, &account2)];
+
+        storage.accounts.append_accounts(&(slot, &accounts[..]), 0);
+
+        let offset = 0;
+        // Mark the dead accounts in storage
+        let mut size = storage.accounts.get_account_data_lens(&[0]);
+        storage.add_dead_account(offset, size.pop().unwrap(), 0);
+
+        let reader = AccountStorageReader::new(&storage, None).unwrap();
+        assert_eq!(reader.len(), storage.accounts.len());
+    }
+
     #[test_case(AccountsFileProvider::AppendVec)]
     #[test_case(AccountsFileProvider::HotStorage)]
     fn test_account_storage_reader_no_dead_accounts(provider: AccountsFileProvider) {
@@ -214,6 +247,14 @@ mod tests {
             })
         };
 
+        assert_eq!(dead_account_offset.len(), number_of_accounts_to_remove);
+
+        // Mark the dead accounts in storage
+        dead_account_offset.into_iter().for_each(|offset| {
+            let mut size = storage.accounts.get_account_data_lens(&[offset]);
+            storage.add_dead_account(offset, size.pop().unwrap(), 0);
+        });
+
         let storage = storage
             .reopen_as_readonly(storage_access)
             .unwrap_or(storage);
@@ -229,14 +270,6 @@ mod tests {
                 InternalsForArchive::Mmap(_)
             )),
         }
-
-        assert_eq!(dead_account_offset.len(), number_of_accounts_to_remove);
-
-        // Mark the dead accounts in storage
-        dead_account_offset.into_iter().for_each(|offset| {
-            let mut size = storage.accounts.get_account_data_lens(&[offset]);
-            storage.add_dead_account(offset, size.pop().unwrap(), 0);
-        });
 
         // Create the reader and check the length
         let mut reader = AccountStorageReader::new(&storage, None).unwrap();
@@ -261,7 +294,7 @@ mod tests {
                 AccountsFile::new_from_file(temp_file_path, current_len, StorageAccess::File)
                     .unwrap();
 
-            // Verify that the correct numbe rof accounts were found in the file
+            // Verify that the correct number of accounts were found in the file
             assert_eq!(
                 num_accounts,
                 (total_accounts - number_of_accounts_to_remove)

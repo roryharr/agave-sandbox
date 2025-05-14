@@ -1125,7 +1125,7 @@ impl AccountStorageEntry {
             alive_bytes: AtomicUsize::new(self.alive_bytes()),
             accounts,
             zero_lamport_single_ref_offsets: RwLock::default(),
-            dead_account_offsets: RwLock::default(),
+            dead_account_offsets: RwLock::new(self.dead_account_offsets.read().unwrap().clone()),
         })
     }
 
