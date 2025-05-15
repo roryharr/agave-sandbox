@@ -1646,6 +1646,37 @@ mod tests {
         assert!(bucket.storage.is_disk_index_enabled());
         bucket
     }
+    #[test]
+    fn test_remove_if_slot_list_empty_entry_vacant_with_disk_entry() {
+        let key = solana_pubkey::new_rand();
+        let test = new_for_test::<u64>();
+
+        // Simulate a disk entry for the key
+        let one_element_slot_list = (0 as u64, 0 as u64);
+
+        if let Some(bucket) = &test.bucket {
+            bucket.try_write(&key, (&[one_element_slot_list], 1)).unwrap();
+        }
+
+        let mut map = test.map_internal.write().unwrap();
+        let entry = map.entry(key);
+
+        // Test the branch where the entry is vacant but exists on disk
+        assert!(!test.remove_if_slot_list_empty_entry(entry));
+        assert!(test.bucket.as_ref().unwrap().read_value(&key).is_some());
+
+        // Now simulate an empty slot list on disk
+        let empty_disk_entry = (vec![], 1); // Empty slot list
+        if let Some(bucket) = &test.bucket {
+            bucket.try_write(&key, (&empty_disk_entry.0[..], empty_disk_entry.1)).unwrap();
+        }
+
+        let entry = map.entry(key);
+
+        // Test the branch where the entry is vacant and has an empty slot list on disk
+        assert!(test.remove_if_slot_list_empty_entry(entry));
+        assert!(test.bucket.as_ref().unwrap().read_value(&key).is_none());
+    }
 
     #[test]
     fn test_should_evict_from_mem_ref_count() {
