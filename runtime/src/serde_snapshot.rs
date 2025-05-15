@@ -72,7 +72,7 @@ const MAX_STREAM_SIZE: u64 = 32 * 1024 * 1024 * 1024;
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct AccountsDbFields<T>(
     HashMap<Slot, Vec<T>>,
-    u64,
+    u64, // obsolete, formerly write_version
     Slot,
     BankHashInfo,
     /// all slots that were roots within the last epoch
