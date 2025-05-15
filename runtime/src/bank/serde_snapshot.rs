@@ -584,7 +584,7 @@ mod tests {
                     versioned_epoch_stakes,
                     accounts_lt_hash: Some(AccountsLtHash(LtHash::identity()).into()),
                 },
-                u64::default(),
+                u64::default(), // obsolete, formerly write_version
             )
         }
     }
