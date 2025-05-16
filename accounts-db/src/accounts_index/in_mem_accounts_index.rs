@@ -1652,10 +1652,12 @@ mod tests {
         let test = new_for_test::<u64>();
 
         // Simulate a disk entry for the key
-        let one_element_slot_list = (0 as u64, 0 as u64);
+        let one_element_slot_list = (0_u64, 0_u64);
 
         if let Some(bucket) = &test.bucket {
-            bucket.try_write(&key, (&[one_element_slot_list], 1)).unwrap();
+            bucket
+                .try_write(&key, (&[one_element_slot_list], 1))
+                .unwrap();
         }
 
         let mut map = test.map_internal.write().unwrap();
@@ -1668,7 +1670,9 @@ mod tests {
         // Now simulate an empty slot list on disk
         let empty_disk_entry = (vec![], 1); // Empty slot list
         if let Some(bucket) = &test.bucket {
-            bucket.try_write(&key, (&empty_disk_entry.0[..], empty_disk_entry.1)).unwrap();
+            bucket
+                .try_write(&key, (&empty_disk_entry.0[..], empty_disk_entry.1))
+                .unwrap();
         }
 
         let entry = map.entry(key);
