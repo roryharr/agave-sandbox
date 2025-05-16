@@ -283,7 +283,7 @@ mod tests {
         let temp_file_path = temp_dir.path().join("output_file");
         let mut output_file = File::create(&temp_file_path).unwrap();
 
-        let bytes_written = std::io::copy(&mut reader, &mut output_file).unwrap();
+        let bytes_written = io::copy(&mut reader, &mut output_file).unwrap();
         assert_eq!(bytes_written as usize, reader.len());
 
         // Close the file
@@ -369,7 +369,7 @@ mod tests {
             let temp_file_path = temp_dir.path().join("output_file");
             let mut output_file = File::create(&temp_file_path).unwrap();
 
-            let bytes_written = std::io::copy(&mut reader, &mut output_file).unwrap();
+            let bytes_written = io::copy(&mut reader, &mut output_file).unwrap();
             assert_eq!(bytes_written as usize, reader.len());
 
             // Close the file
