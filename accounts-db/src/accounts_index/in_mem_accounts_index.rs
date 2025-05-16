@@ -1712,6 +1712,58 @@ mod tests {
     }
 
     #[test]
+    fn test_upsert_entry_vacant_on_disk() {
+        let bucket = new_for_test::<u64>();
+        let pubkey = solana_pubkey::new_rand();
+        let slot = 0;
+        let value = 5;
+        let other_slot = None;
+
+        // Use startup to ensure flusehs occur
+        bucket.storage.set_startup(true);
+
+        // Prepopulate the map with an entry
+        let preallocated_entry =
+            PreAllocatedAccountMapEntry::new(slot, value, &bucket.storage, true);
+        bucket.insert_new_entry_if_missing_with_lock(pubkey, preallocated_entry);
+
+        // Flush the entry to disk
+        if let Some(flush_guard) = FlushGuard::lock(&bucket.flushing_active) {
+            bucket.set_has_aged(bucket.storage.current_age(), true); // Mark the bucket as aged
+            bucket.flush_internal(&flush_guard, true);
+        }
+
+        // Ensure the entry is not in the cache
+        bucket.get_only_in_mem(&pubkey, false, |entry| {
+            assert!(entry.is_none(), "Entry should not be in the cache");
+        });
+
+        // Prepare a new value to upsert
+        let new_slot = 1;
+        let new_value = 10;
+        let new_preallocated_entry =
+            PreAllocatedAccountMapEntry::new(new_slot, new_value, &bucket.storage, true);
+
+        let mut reclaims = Vec::new();
+        bucket.upsert(
+            &pubkey,
+            new_preallocated_entry,
+            other_slot,
+            &mut reclaims,
+            UpsertReclaim::IgnoreReclaims,
+        );
+
+        // Verify the entry was updated
+        bucket.get_only_in_mem(&pubkey, false, |entry| {
+            let entry = entry.expect("Entry should exist");
+            let slot_list = entry.slot_list.read().unwrap();
+            assert_eq!(slot_list.len(), 2);
+            assert!(slot_list.contains(&(slot, value)));
+            assert!(slot_list.contains(&(new_slot, new_value)));
+        });
+    }
+
+    #[test]
     fn test_gather_possible_evictions() {
         solana_logger::setup();
         let startup = false;
