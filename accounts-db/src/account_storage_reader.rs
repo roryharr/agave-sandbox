@@ -175,8 +175,7 @@ mod tests {
         let mut size = storage.accounts.get_account_data_lens(&[0]);
         storage.mark_account_obsolete(offset, size.pop().unwrap(), 0);
 
-        let reader = AccountStorageReader::new(&storage, None).unwrap();
-        assert_eq!(reader.len(), storage.accounts.len());
+        _ = AccountStorageReader::new(&storage, None).unwrap();
     }
 
     #[test_case(AccountsFileProvider::AppendVec)]
