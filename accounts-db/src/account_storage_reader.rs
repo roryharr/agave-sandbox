@@ -136,6 +136,8 @@ mod tests {
             accounts_db::{get_temp_accounts_paths, AccountStorageEntry},
             accounts_file::{AccountsFile, AccountsFileProvider, StorageAccess},
         },
+        log::*,
+        rand::{rngs::StdRng, seq::SliceRandom, SeedableRng},
         solana_account::AccountSharedData,
         solana_pubkey::Pubkey,
         std::iter,
@@ -163,10 +165,12 @@ mod tests {
 
         let account = AccountSharedData::new(1, 10, &Pubkey::new_unique());
         let account2 = AccountSharedData::new(1, 10, &Pubkey::new_unique());
-        let shared_key = solana_pubkey::new_rand();
         let slot = 0;
 
-        let accounts = [(&shared_key, &account), (&shared_key, &account2)];
+        let accounts = [
+            (&Pubkey::new_unique(), &account),
+            (&Pubkey::new_unique(), &account2),
+        ];
 
         storage.accounts.append_accounts(&(slot, &accounts[..]), 0);
 
@@ -183,12 +187,14 @@ mod tests {
     fn test_account_storage_reader_no_obsolete_accounts(provider: AccountsFileProvider) {
         let (storage, _temp_dirs) = create_storage_for_storage_reader(0, provider);
 
-        let account = AccountSharedData::new(1, 10, &Pubkey::new_unique());
-        let account2 = AccountSharedData::new(1, 10, &Pubkey::new_unique());
-        let shared_key = solana_pubkey::new_rand();
+        let account = AccountSharedData::new(1, 10, &Pubkey::default());
+        let account2 = AccountSharedData::new(1, 10, &Pubkey::default());
         let slot = 0;
 
-        let accounts = [(&shared_key, &account), (&shared_key, &account2)];
+        let accounts = [
+            (&Pubkey::new_unique(), &account),
+            (&Pubkey::new_unique(), &account2),
+        ];
 
         storage.accounts.append_accounts(&(slot, &accounts[..]), 0);
 
@@ -213,41 +219,43 @@ mod tests {
         number_of_accounts_to_remove: usize,
         storage_access: StorageAccess,
     ) {
+        solana_logger::setup();
         let (storage, _temp_dirs) =
             create_storage_for_storage_reader(0, AccountsFileProvider::AppendVec);
 
-        let shared_key = solana_pubkey::new_rand();
         let slot = 0;
 
         // Create a bunch of accounts and add them to the storage
         let accounts: Vec<_> =
-            iter::repeat_with(|| AccountSharedData::new(1, 10, &Pubkey::new_unique()))
+            iter::repeat_with(|| AccountSharedData::new(1, 10, &Pubkey::default()))
                 .take(total_accounts)
                 .collect();
 
         let accounts_to_append: Vec<_> = accounts
             .iter()
-            .map(|account| (&shared_key, account))
+            .map(|account| (Pubkey::new_unique(), (*account).clone()))
             .collect();
 
         let offsets = storage
             .accounts
             .append_accounts(&(slot, &accounts_to_append[..]), 0);
 
-        // Select some accounts to mark as obsolete.
-        let mut obsolete_account_offset = Vec::new();
+        // Generate a seed from entropy and log the original seed
+        let seed: u64 = rand::random();
+        info!("Generated seed: {}", seed);
 
-        // Offsets may be None if the storage is empty
-        if let Some(offsets) = offsets {
-            offsets.offsets.iter().enumerate().for_each(|(i, offset)| {
-                // Remove the specified number of accounts
-                if (number_of_accounts_to_remove != 0)
-                    && (i % (total_accounts / number_of_accounts_to_remove)) == 0
-                {
-                    obsolete_account_offset.push(*offset);
-                }
+        // Use a seedable RNG with the generated seed for reproducibility
+        let mut rng = StdRng::seed_from_u64(seed);
+
+        let obsolete_account_offset = offsets
+            .map(|offsets| {
+                offsets
+                    .offsets
+                    .choose_multiple(&mut rng, number_of_accounts_to_remove)
+                    .cloned()
+                    .collect::<Vec<_>>()
             })
-        };
+            .unwrap_or_default();
 
         assert_eq!(obsolete_account_offset.len(), number_of_accounts_to_remove);
 
@@ -315,57 +323,75 @@ mod tests {
     fn test_account_storage_reader_filter_by_slot() {
         let (storage, _temp_dirs) =
             create_storage_for_storage_reader(10, AccountsFileProvider::AppendVec);
+        let total_accounts = 30;
 
-        let shared_key = solana_pubkey::new_rand();
-        let slot = 10;
+        let slot = 0;
 
         // Create a bunch of accounts and add them to the storage
         let accounts: Vec<_> =
-            iter::repeat_with(|| AccountSharedData::new(1, 10, &Pubkey::new_unique()))
-                .take(30)
+            iter::repeat_with(|| AccountSharedData::new(1, 10, &Pubkey::default()))
+                .take(total_accounts)
                 .collect();
 
         let accounts_to_append: Vec<_> = accounts
             .iter()
-            .map(|account| (&shared_key, account))
+            .map(|account| (Pubkey::new_unique(), (*account).clone()))
             .collect();
 
         let offsets = storage
             .accounts
             .append_accounts(&(slot, &accounts_to_append[..]), 0);
 
-        // Select some accounts to mark as obsolete. Need to find the starting offset of the account to mark them
-        let mut obsolete_account_offset = Vec::new();
+        // Generate a seed from entropy and log the original seed
+        let seed: u64 = rand::random();
+        info!("Generated seed: {}", seed);
 
-        offsets
-            .unwrap()
-            .offsets
-            .iter()
-            .enumerate()
-            .for_each(|(i, offset)| {
-                // Mark half the accounts as obsolete
-                if i % 2 == 0 {
-                    obsolete_account_offset.push(*offset);
-                }
-            });
+        // Use a seedable RNG with the generated seed for reproducibility
+        let mut rng = StdRng::seed_from_u64(seed);
 
-        // Mark the obsolete accounts in storage
-        let mut slot = 0;
+        let max_offset = offsets
+            .as_ref()
+            .and_then(|offsets| offsets.offsets.iter().max().cloned())
+            .unwrap();
+
+        let mut obsolete_account_offset = offsets
+            .map(|offsets| {
+                offsets
+                    .offsets
+                    .choose_multiple(&mut rng, total_accounts - 1)
+                    .cloned()
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
+        // Ensure that the last entry will be marked obsolete at some point
+        if !obsolete_account_offset.contains(&max_offset) {
+            // Replace a random obsolete account with the max offset
+            if let Some(random_index) = obsolete_account_offset.choose_mut(&mut rng) {
+                *random_index = max_offset;
+            }
+        }
+
+        // Mark the obsolete accounts in storage at different slots
+        let mut slot_marked_dead = 0;
         obsolete_account_offset.into_iter().for_each(|offset| {
             let mut size = storage.accounts.get_account_data_lens(&[offset]);
-            storage.mark_account_obsolete(offset, size.pop().unwrap(), slot);
-            slot += 1;
+            storage.mark_account_obsolete(offset, size.pop().unwrap(), slot_marked_dead);
+            slot_marked_dead += 1;
         });
 
-        // Create the reader and check the length
-        // Now iterate through all the slots and verify correctness
-        for slot in 1..=10 {
-            let mut reader = AccountStorageReader::new(&storage, Some(slot)).unwrap();
-            let current_len = storage.accounts.len() - storage.get_obsolete_bytes(Some(slot));
+        // Create a temporary directory
+        let temp_dir = tempfile::tempdir().unwrap();
+
+        // Now iterate through all the possible snapshot slots and verify correctness
+        for snapshot_slot in 0..slot_marked_dead {
+            let mut reader = AccountStorageReader::new(&storage, Some(snapshot_slot)).unwrap();
+            let current_len =
+                storage.accounts.len() - storage.get_obsolete_bytes(Some(snapshot_slot));
             assert_eq!(reader.len(), current_len);
 
-            // Create a temporary directory and a file within it
-            let temp_dir = tempfile::tempdir().unwrap();
+            // Create a temporary file to write the reader's output. It will get dropped and deleted every
+            // iteration so it does not need a unique name
             let temp_file_path = temp_dir.path().join("output_file");
             let mut output_file = File::create(&temp_file_path).unwrap();
 
