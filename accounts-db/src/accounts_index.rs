@@ -444,7 +444,7 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> AccountsIndex<T, U> {
     }
 
     fn min_ongoing_scan_root_from_btree(ongoing_scan_roots: &BTreeMap<Slot, u64>) -> Option<Slot> {
-        ongoing_scan_roots.keys().next().cloned()
+        ongoing_scan_roots.keys().next().copied()
     }
 
     fn do_checked_scan_accounts<F, R>(
@@ -982,7 +982,7 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> AccountsIndex<T, U> {
         slot_list
             .iter()
             .filter(|(slot, _)| *slot <= max_inclusive && lock.contains(slot))
-            .cloned()
+            .copied()
             .collect()
     }
 

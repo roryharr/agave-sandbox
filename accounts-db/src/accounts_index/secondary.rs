@@ -136,7 +136,7 @@ impl SecondaryIndexEntry for RwLockSecondaryIndexEntry {
     }
 
     fn keys(&self) -> Vec<Pubkey> {
-        self.account_keys.read().unwrap().iter().cloned().collect()
+        self.account_keys.read().unwrap().iter().copied().collect()
     }
 
     fn len(&self) -> usize {

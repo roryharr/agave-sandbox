@@ -290,7 +290,7 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
         // easiest implementation is to load everything from disk into cache and return the keys
         let evictions_guard = EvictionsGuard::lock(self);
         self.put_range_in_cache(&None::<&RangeInclusive<Pubkey>>, &evictions_guard);
-        let keys = self.map_internal.read().unwrap().keys().cloned().collect();
+        let keys = self.map_internal.read().unwrap().keys().copied().collect();
         keys
     }
 

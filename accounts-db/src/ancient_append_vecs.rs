@@ -498,7 +498,7 @@ impl AccountsDb {
             .iter()
             .for_each(|combine| {
                 self.unref_shrunk_dead_accounts(
-                    combine.pubkeys_to_unref.iter().cloned(),
+                    combine.pubkeys_to_unref.iter().copied(),
                     combine.slot,
                 );
             });
@@ -573,7 +573,7 @@ impl AccountsDb {
             ..AncientSlotInfos::default()
         };
         let mut randoms = 0;
-        let max_slot = slots.iter().max().cloned().unwrap_or_default();
+        let max_slot = slots.iter().max().copied().unwrap_or_default();
         // heuristic to include some # of newly eligible ancient slots so that the pack algorithm always makes progress
         let high_slot_boundary = max_slot.saturating_sub(HIGH_SLOT_OFFSET);
         let is_high_slot = |slot| slot >= high_slot_boundary;

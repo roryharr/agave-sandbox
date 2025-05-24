@@ -2126,7 +2126,7 @@ impl AccountsDb {
                     }
                 }
                 while !pending_stores.is_empty() {
-                    let slot = pending_stores.iter().next().cloned().unwrap();
+                    let slot = pending_stores.iter().next().copied().unwrap();
                     if Some(slot) == min_slot {
                         if let Some(failed_slot) = failed_slot.take() {
                             info!(
@@ -3584,7 +3584,7 @@ impl AccountsDb {
         // reviving this index entry and then we'd unref the revived version, which is a refcount bug.
 
         self.accounts_index.scan(
-            zero_lamport_single_ref_pubkeys.iter().cloned(),
+            zero_lamport_single_ref_pubkeys.iter().copied(),
             |_pubkey, _slots_refs, _entry| AccountsIndexScanResult::Unref,
             if do_assert {
                 Some(AccountsIndexScanResult::UnrefAssert0)
@@ -3637,7 +3637,7 @@ impl AccountsDb {
         if !shrink_collect.all_are_zero_lamports {
             self.add_uncleaned_pubkeys_after_shrink(
                 shrink_collect.slot,
-                shrink_collect.pubkeys_to_unref.iter().cloned().cloned(),
+                shrink_collect.pubkeys_to_unref.iter().copied().copied(),
             );
         }
 
@@ -3799,7 +3799,7 @@ impl AccountsDb {
             return;
         }
 
-        self.unref_shrunk_dead_accounts(shrink_collect.pubkeys_to_unref.iter().cloned(), slot);
+        self.unref_shrunk_dead_accounts(shrink_collect.pubkeys_to_unref.iter().copied(), slot);
 
         let total_accounts_after_shrink = shrink_collect.alive_accounts.len();
         debug!(
@@ -5497,7 +5497,7 @@ impl AccountsDb {
                     // If the cache is currently flushing this slot, add it to the list
                     is_being_flushed.then_some(remove_slot)
                 })
-                .cloned()
+                .copied()
                 .collect();
 
             // Wait for cache flushes to finish
@@ -6607,7 +6607,7 @@ impl AccountsDb {
 
     /// Get the accounts hash for `slot`
     pub fn get_accounts_hash(&self, slot: Slot) -> Option<(AccountsHash, /*capitalization*/ u64)> {
-        self.accounts_hashes.lock().unwrap().get(&slot).cloned()
+        self.accounts_hashes.lock().unwrap().get(&slot).copied()
     }
 
     /// Get all accounts hashes
@@ -6648,7 +6648,7 @@ impl AccountsDb {
             .lock()
             .unwrap()
             .get(&slot)
-            .cloned()
+            .copied()
     }
 
     /// Get all incremental accounts hashes
@@ -7152,7 +7152,7 @@ impl AccountsDb {
             .lock()
             .unwrap()
             .get(&slot)
-            .cloned()
+            .copied()
     }
 
     fn update_index<'a>(
@@ -7304,7 +7304,7 @@ impl AccountsDb {
                 } else {
                     // not all accounts are being removed, so figure out sizes of accounts we are removing and update the alive bytes and alive account count
                     let (_, us) = measure_us!({
-                        let mut offsets = offsets.iter().cloned().collect::<Vec<_>>();
+                        let mut offsets = offsets.iter().copied().collect::<Vec<_>>();
                         // sort so offsets are in order. This improves efficiency of loading the accounts.
                         offsets.sort_unstable();
                         let data_lens = store.accounts.get_account_data_lens(&offsets);
@@ -8110,7 +8110,7 @@ impl AccountsDb {
         if let Some(limit) = limit_load_slot_count_from_snapshot {
             slots.truncate(limit); // get rid of the newer slots and keep just the older
         }
-        let max_slot = slots.last().cloned().unwrap_or_default();
+        let max_slot = slots.last().copied().unwrap_or_default();
         let schedule = &genesis_config.epoch_schedule;
         let rent_collector = RentCollector::new(
             schedule.get_epoch(max_slot),
