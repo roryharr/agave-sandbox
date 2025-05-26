@@ -232,8 +232,8 @@ mod tests {
                 .collect();
 
         let accounts_to_append: Vec<_> = accounts
-            .iter()
-            .map(|account| (Pubkey::new_unique(), (*account).clone()))
+            .into_iter()
+            .map(|account| (Pubkey::new_unique(), account))
             .collect();
 
         let offsets = storage
@@ -333,9 +333,11 @@ mod tests {
                 .take(total_accounts)
                 .collect();
 
+
+
         let accounts_to_append: Vec<_> = accounts
-            .iter()
-            .map(|account| (Pubkey::new_unique(), (*account).clone()))
+            .into_iter()
+            .map(|account| (Pubkey::new_unique(), account))
             .collect();
 
         let offsets = storage
