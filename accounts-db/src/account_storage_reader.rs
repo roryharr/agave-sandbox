@@ -333,8 +333,6 @@ mod tests {
                 .take(total_accounts)
                 .collect();
 
-
-
         let accounts_to_append: Vec<_> = accounts
             .into_iter()
             .map(|account| (Pubkey::new_unique(), account))
