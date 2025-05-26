@@ -390,7 +390,7 @@ mod tests {
                 storage.accounts.len() - storage.get_obsolete_bytes(Some(snapshot_slot));
             assert_eq!(reader.len(), current_len);
 
-            // Create a temporary file to write the reader's output. It will get dropped and deleted every
+            // Create a file to write the reader's output. It will get deleted by AccountsFile::drop() every
             // iteration so it does not need a unique name
             let temp_file_path = temp_dir.path().join("output_file");
             let mut output_file = File::create(&temp_file_path).unwrap();
