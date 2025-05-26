@@ -2275,7 +2275,7 @@ mod tests {
         let temp: Vec<_> = hashes.iter().map(|h| (Pubkey::default(), *h)).collect();
         let result = AccountsHasher::compute_merkle_root(temp, fanout);
         let len = hashes.len();
-        let reduced: Vec<_> = hashes;
+        let reduced = hashes;
         let result2 = AccountsHasher::compute_merkle_root_from_slices(
             len,
             fanout,
