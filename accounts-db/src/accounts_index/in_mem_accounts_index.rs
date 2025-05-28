@@ -1647,7 +1647,7 @@ mod tests {
         bucket
     }
     #[test]
-    fn test_remove_if_slot_list_empty_entry_vacant_with_disk_entry() {
+    fn test_remove_uncached_slot_list_from_disk() {
         let key = solana_pubkey::new_rand();
         let test = new_for_test::<u64>();
 
@@ -1663,7 +1663,7 @@ mod tests {
         let mut map = test.map_internal.write().unwrap();
         let entry = map.entry(key);
 
-        // Test the branch where the entry is vacant but exists on disk
+        // Ensure that entry is kept if the slot list is not empty
         assert!(!test.remove_if_slot_list_empty_entry(entry));
         assert!(test.bucket.as_ref().unwrap().read_value(&key).is_some());
 
@@ -1677,7 +1677,7 @@ mod tests {
 
         let entry = map.entry(key);
 
-        // Test the branch where the entry is vacant and has an empty slot list on disk
+        // Ensure that the entry is removed if the slot list is empty
         assert!(test.remove_if_slot_list_empty_entry(entry));
         assert!(test.bucket.as_ref().unwrap().read_value(&key).is_none());
     }
