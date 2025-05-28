@@ -1712,14 +1712,14 @@ mod tests {
     }
 
     #[test]
-    fn test_upsert_entry_vacant_on_disk() {
+    fn test_upsert_entry_on_disk_not_in_mem() {
         let bucket = new_for_test::<u64>();
         let pubkey = solana_pubkey::new_rand();
         let slot = 0;
         let value = 5;
         let other_slot = None;
 
-        // Use startup to ensure flusehs occur
+        // Use startup to ensure flushes occur
         bucket.storage.set_startup(true);
 
         // Prepopulate the map with an entry
