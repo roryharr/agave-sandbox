@@ -1319,16 +1319,15 @@ mod tests {
 
         let (_tmp_dir, accounts_dir) = create_tmp_accounts_dir_for_tests();
         let bank_snapshots_dir = tempfile::TempDir::new().unwrap();
-        let full_snapshot_archives_dir = tempfile::TempDir::new().unwrap();
-        let incremental_snapshot_archives_dir = tempfile::TempDir::new().unwrap();
+        let snapshot_archives_dir = tempfile::TempDir::new().unwrap();
         let snapshot_archive_format = SnapshotConfig::default().archive_format;
 
         let full_snapshot_archive_info = bank_to_full_snapshot_archive(
             bank_snapshots_dir.path(),
             &bank1,
             None,
-            full_snapshot_archives_dir.path(),
-            incremental_snapshot_archives_dir.path(),
+            snapshot_archives_dir.path(),
+            snapshot_archives_dir.path(),
             snapshot_archive_format,
         )
         .unwrap();

@@ -19,18 +19,9 @@ pub(super) trait SerializableStorage {
     fn current_len(&self) -> usize;
 }
 
-impl SerializableStorage for SerializableAccountStorageEntry {
-    fn id(&self) -> SerializedAccountsFileId {
-        self.id
-    }
-    fn current_len(&self) -> usize {
-        self.accounts_current_len
-    }
-}
-
 impl SerializableAccountStorageEntry {
-    /// Creates a new `SerializableAccountStorageEntry` from the current
-    /// `AccountStorageEntry` and a given snapshot slot. When obsolete accounts
+    /// Creates a new SerializableAccountStorageEntry from the current
+    /// AccountStorageEntry and a given snapshot slot. When obsolete accounts
     /// are enabled, the saved size is decreased by the amount of obsolete bytes
     /// in the storage. The number of obsolete bytes is determined by the snapshot
     /// slot, as an entry's obsolescence is dependent on the slot that marked it
@@ -44,6 +35,15 @@ impl SerializableAccountStorageEntry {
             accounts_current_len: accounts.accounts.len()
                 - accounts.get_obsolete_bytes(Some(snapshot_slot)),
         }
+    }
+}
+
+impl SerializableStorage for SerializableAccountStorageEntry {
+    fn id(&self) -> SerializedAccountsFileId {
+        self.id
+    }
+    fn current_len(&self) -> usize {
+        self.accounts_current_len
     }
 }
 
