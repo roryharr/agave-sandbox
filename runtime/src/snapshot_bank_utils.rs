@@ -1275,9 +1275,7 @@ mod tests {
         bank0
             .transfer(sol_to_lamports(3.), &mint_keypair, &key3.pubkey())
             .unwrap();
-        while !bank0.is_complete() {
-            bank0.register_unique_tick();
-        }
+        bank0.fill_bank_with_ticks_for_tests();
 
         // Force flush the bank to create the account storage entry
         bank0.squash();
