@@ -1311,18 +1311,11 @@ mod tests {
         bank1
             .transfer(sol_to_lamports(1.), &key3, &key1.pubkey())
             .unwrap();
-        while !bank1.is_complete() {
-            bank1.register_unique_tick();
-        }
+
+        bank1.fill_bank_with_ticks_for_tests();
 
         // Mark the entry for pubkey1 as obsolete in slot0
-        bank1
-            .accounts()
-            .accounts_db
-            .storage
-            .get_slot_storage_entry(target_slot)
-            .unwrap()
-            .mark_account_obsolete(offset, 0, slot);
+        account_storage_entry.mark_account_obsolete(offset, 0, slot);
 
         let (_tmp_dir, accounts_dir) = create_tmp_accounts_dir_for_tests();
         let bank_snapshots_dir = tempfile::TempDir::new().unwrap();
