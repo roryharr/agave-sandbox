@@ -14,11 +14,6 @@ pub struct SerializableAccountStorageEntry {
     accounts_current_len: usize,
 }
 
-pub(super) trait SerializableStorage {
-    fn id(&self) -> SerializedAccountsFileId;
-    fn current_len(&self) -> usize;
-}
-
 impl SerializableAccountStorageEntry {
     /// Creates a new SerializableAccountStorageEntry from the current
     /// AccountStorageEntry and a given snapshot slot. When obsolete accounts
@@ -36,6 +31,11 @@ impl SerializableAccountStorageEntry {
                 - accounts.get_obsolete_bytes(Some(snapshot_slot)),
         }
     }
+}
+
+pub(super) trait SerializableStorage {
+    fn id(&self) -> SerializedAccountsFileId;
+    fn current_len(&self) -> usize;
 }
 
 impl SerializableStorage for SerializableAccountStorageEntry {
