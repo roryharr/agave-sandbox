@@ -230,11 +230,6 @@ impl AccountsDb {
                         self.update_old_slot_stats(stats, storage);
                     }
 
-                    if self.mark_obsolete_accounts {
-                        load_from_cache = false;
-                        break;
-                    }
-
                     if let Some(storage) = storage {
                         let ok = Self::hash_storage_info(&mut hasher, storage, slot);
                         if !ok {
