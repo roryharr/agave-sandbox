@@ -988,6 +988,28 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> AccountsIndex<T, U> {
 
     /// Remove all entries from the slot list that are older than `slots_to_purge`
     /// Return the keys that were purged along with the slots they were purged from
+    pub(crate) fn purge_startup(&self, pubkey: &Pubkey, reclaims: &mut SlotList<T>) -> Vec<Pubkey> {
+        let mut purged_keys: Vec<Pubkey> = Vec::new();
+        self.slot_list_mut(pubkey, |slot_list| {
+            let max_slot = slot_list.iter().map(|(slot, _)| *slot).max().unwrap_or(0);
+            slot_list.retain(|(slot, item)| {
+                let should_purge = max_slot > *slot;
+                let is_cached = item.is_cached();
+                if should_purge && !is_cached {
+                    purged_keys.push(*pubkey);
+                    reclaims.push((*slot, *item));
+                    false
+                } else {
+                    true
+                }
+            });
+            slot_list.is_empty()
+        });
+        purged_keys
+    }
+
+    /// Remove all entries from the slot list that are older than `slots_to_purge`
+    /// Return the keys that were purged along with the slots they were purged from
     pub(crate) fn purge_older(
         &self,
         pubkey: &Pubkey,
