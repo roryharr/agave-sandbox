@@ -8864,9 +8864,10 @@ impl AccountsDb {
                     assert_eq!(count_and_status.0, 0);
                     count_and_status.0 = entry.count - store.get_obsolete_accounts(None).len();
                 }
-                store
-                    .alive_bytes
-                    .store(entry.stored_size - store.get_obsolete_bytes(None), Ordering::Release);
+                store.alive_bytes.store(
+                    entry.stored_size - store.get_obsolete_bytes(None),
+                    Ordering::Release,
+                );
             } else {
                 trace!("id: {} clearing count", id);
                 store.count_and_status.lock_write().0 = 0;

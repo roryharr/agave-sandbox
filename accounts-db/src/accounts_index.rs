@@ -868,6 +868,15 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> AccountsIndex<T, U> {
         read_lock.slot_list_mut(pubkey, user_fn)
     }
 
+    fn slot_list_mut_set_ref_one<RT>(
+        &self,
+        pubkey: &Pubkey,
+        user_fn: impl FnOnce(&mut SlotList<T>) -> RT,
+    ) -> Option<RT> {
+        let read_lock = self.get_bin(pubkey);
+        read_lock.slot_list_mut_set_ref_one(pubkey, user_fn)
+    }
+
     /// Remove keys from the account index if the key's slot list is empty.
     /// Returns the keys that were removed from the index. These keys should not be accessed again in the current code path.
     #[must_use]
@@ -990,7 +999,7 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> AccountsIndex<T, U> {
     /// Return the keys that were purged along with the slots they were purged from
     pub(crate) fn purge_startup(&self, pubkey: &Pubkey, reclaims: &mut SlotList<T>) -> Vec<Pubkey> {
         let mut purged_keys: Vec<Pubkey> = Vec::new();
-        self.slot_list_mut(pubkey, |slot_list| {
+        self.slot_list_mut_set_ref_one(pubkey, |slot_list| {
             let max_slot = slot_list.iter().map(|(slot, _)| *slot).max().unwrap_or(0);
             slot_list.retain(|(slot, item)| {
                 let should_purge = max_slot > *slot;
