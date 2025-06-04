@@ -8866,7 +8866,7 @@ impl AccountsDb {
                 }
                 store
                     .alive_bytes
-                    .store(entry.stored_size, Ordering::Release);
+                    .store(entry.stored_size - store.get_obsolete_bytes(None), Ordering::Release);
             } else {
                 trace!("id: {} clearing count", id);
                 store.count_and_status.lock_write().0 = 0;
