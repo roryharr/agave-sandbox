@@ -3921,6 +3921,19 @@ impl AccountsDb {
         // mutating rooted slots; There should be no writers to them.
         let accounts = [(slot, &shrink_collect.alive_accounts.alive_accounts()[..])];
         let storable_accounts = StorableAccountsBySlot::new(slot, &accounts, self);
+        if storable_accounts.is_empty() {
+            error!(
+                "shrink_storage: slot {} has no accounts to write back, alive_total_bytes: {}, capacity: {}",
+                slot,
+                shrink_collect.alive_total_bytes,
+                shrink_collect.capacity
+            );
+            error!(
+                "There are {} obsolete accounts and {} zero lamport accounts",
+                store.get_obsolete_accounts(None).len(),
+                store.num_zero_lamport_single_ref_accounts()
+            );
+        }
         stats_sub.store_accounts_timing =
             self.store_accounts_frozen(storable_accounts, shrink_in_progress.new_storage());
 
@@ -7960,6 +7973,12 @@ impl AccountsDb {
         // stores on a frozen slot should not reset
         // the append vec so that hashing could happen on the store
         // and accounts in the append_vec can be unrefed correctly
+        if accounts.is_empty() {
+            warn!(
+                "Storing zero accounts to frozen storage: {}",
+                storage.slot()
+            );
+        }
         let reset_accounts = false;
         self.store_accounts_custom(
             accounts,
