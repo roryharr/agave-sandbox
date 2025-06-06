@@ -38,7 +38,6 @@ trait AppendVecScan: Send + Sync + Clone {
     fn scanning_complete(self) -> BinnedHashData;
     /// initialize accumulator
     fn init_accum(&mut self, count: usize);
-    fn max_slot(&self) -> Slot;
 }
 
 #[derive(Clone)]
@@ -88,9 +87,6 @@ impl AppendVecScan for ScanState<'_> {
         if self.accum.is_empty() {
             self.accum.append(&mut vec![Vec::new(); count]);
         }
-    }
-    fn max_slot(&self) -> Slot {
-        self.max_slot
     }
     fn found_account(&mut self, loaded_account: &LoadedAccount) {
         let pubkey = loaded_account.pubkey();
@@ -372,17 +368,9 @@ impl AccountsDb {
     where
         S: AppendVecScan,
     {
-        storage.accounts.scan_index(|index_info| {
-            if scanner.filter(&index_info.index_info.pubkey)
-                && !storage
-                    .is_account_obsolete(index_info.index_info.offset, Some(scanner.max_slot()))
-            {
-                storage.accounts.get_stored_account_callback(
-                    index_info.index_info.offset,
-                    |account| {
-                        scanner.found_account(&LoadedAccount::Stored(account));
-                    },
-                );
+        storage.accounts.scan_accounts(|account| {
+            if scanner.filter(account.pubkey()) {
+                scanner.found_account(&LoadedAccount::Stored(account))
             }
         });
     }
@@ -453,9 +441,6 @@ mod tests {
         fn set_slot(&mut self, slot: Slot, _is_ancient: bool, _storage: &AccountStorageEntry) {
             self.current_slot = slot;
         }
-        fn max_slot(&self) -> Slot {
-            self.current_slot
-        }
         fn init_accum(&mut self, _count: usize) {}
         fn found_account(&mut self, loaded_account: &LoadedAccount) {
             self.calls.fetch_add(1, Ordering::Relaxed);
@@ -488,9 +473,6 @@ mod tests {
         }
         fn filter(&mut self, _pubkey: &Pubkey) -> bool {
             true
-        }
-        fn max_slot(&self) -> Slot {
-            self.current_slot
         }
         fn init_accum(&mut self, _count: usize) {}
         fn found_account(&mut self, loaded_account: &LoadedAccount) {
