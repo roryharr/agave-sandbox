@@ -180,7 +180,7 @@ fn do_search(
         )
     })?;
     files.par_iter().for_each(|file| {
-        let file_size = std::fs::metadata(&file).unwrap().len() as usize;
+        let file_size = std::fs::metadata(file).unwrap().len() as usize;
         let Ok(storage) = AccountsFile::new_from_file(file, file_size, StorageAccess::default()).inspect_err(|err| {
             eprintln!(
                 "failed to open account storage file '{}': {err}",
