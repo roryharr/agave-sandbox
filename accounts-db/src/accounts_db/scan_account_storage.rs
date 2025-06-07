@@ -57,12 +57,11 @@ struct ScanState<'a> {
     pubkey_to_bin_index: usize,
     is_ancient: bool,
     stats_num_zero_lamport_accounts_ancient: Arc<AtomicU64>,
-    /// The maximum slot included in the scan. Any updates to accounts from a
-    /// slot newer than this slot will not be included in the data returned
-    /// This includes obsolete account data
+    /// The maximum slot included in the scan. Any updates to accounts due to
+    /// slots newer than scan_slot will be filtered out. 
     scan_slot: Slot,
     /// When current_slot is set, this hashset gets updated with a list of
-    /// pubkeys to skip when scanning
+    /// pubkeys to skip when scanning current_slot
     pub_keys_to_skip: HashSet<Pubkey>,
 }
 
