@@ -7299,6 +7299,7 @@ impl AccountsDb {
                                 offsets.into_iter().zip(data_lens),
                                 slot_marked_obsolete,
                             );
+
                         }
 
                         if Self::is_shrinking_productive(&store)
