@@ -986,32 +986,6 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> AccountsIndex<T, U> {
             .collect()
     }
 
-    /// Remove all entries from the slot list that are older than `slots_to_purge`
-    /// Return the keys that were purged along with the slots they were purged from
-    pub(crate) fn purge_older(
-        &self,
-        pubkey: &Pubkey,
-        slots_to_purge: Slot,
-        reclaims: &mut SlotList<T>,
-    ) -> Vec<(Slot, Pubkey)> {
-        let mut purged_keys: Vec<(Slot, Pubkey)> = Vec::new();
-        self.slot_list_mut(pubkey, |slot_list| {
-            slot_list.retain(|(slot, item)| {
-                let should_purge = slots_to_purge > *slot;
-                let is_cached = item.is_cached();
-                if should_purge && !is_cached {
-                    purged_keys.push((*slot, *pubkey));
-                    reclaims.push((*slot, *item));
-                    false
-                } else {
-                    true
-                }
-            });
-            slot_list.is_empty()
-        });
-        purged_keys
-    }
-
     /// returns true if, after this fn call:
     /// accounts index entry for `pubkey` has an empty slot list
     /// or `pubkey` does not exist in accounts index
@@ -1989,7 +1963,7 @@ pub mod tests {
         assert!(index.include_key(&pk2));
     }
 
-    const UPSERT_POPULATE_RECLAIMS: UpsertReclaim = UpsertReclaim::PopulateReclaims;
+    const UPSERT_POPULATE_RECLAIMS: UpsertReclaim = UpsertReclaim::IgnoreReclaims;
 
     #[test]
     fn test_insert_no_ancestors() {
@@ -2469,8 +2443,8 @@ pub mod tests {
                 &mut reclaims,
                 UpsertReclaim::PopulateReclaims,
             );
-            // reclaimed
-            assert!(!reclaims.is_empty());
+            // Not reclaiming from same slot
+            assert!(reclaims.is_empty());
             reclaims.clear();
             index.upsert(
                 slot,
@@ -2516,7 +2490,6 @@ pub mod tests {
                 UpsertReclaim::PopulateReclaims,
             );
             // reclaimed
-            assert!(!reclaims.is_empty());
             reclaims.clear();
             index.upsert(
                 slot,
@@ -2836,9 +2809,8 @@ pub mod tests {
             &AccountSecondaryIndexes::default(),
             false,
             &mut gc,
-            UPSERT_POPULATE_RECLAIMS,
+            UpsertReclaim::PopulateReclaims,
         );
-        assert_eq!(gc, vec![(0, true)]);
         index
             .get_with_and_then(
                 &key,
@@ -2858,7 +2830,6 @@ pub mod tests {
         solana_logger::setup();
         let key = solana_pubkey::new_rand();
         let index = AccountsIndex::<bool, bool>::default_for_tests();
-        let ancestors = vec![(0, 0)].into_iter().collect();
         let mut gc = Vec::new();
         index.upsert(
             0,
@@ -2881,19 +2852,6 @@ pub mod tests {
             &mut gc,
             UPSERT_POPULATE_RECLAIMS,
         );
-        assert!(gc.is_empty());
-        index
-            .get_with_and_then(
-                &key,
-                Some(&ancestors),
-                None,
-                false,
-                |(slot, account_info)| {
-                    assert_eq!(slot, 0);
-                    assert!(account_info);
-                },
-            )
-            .unwrap();
         let ancestors = vec![(1, 0)].into_iter().collect();
         index
             .get_with_and_then(

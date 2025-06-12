@@ -1124,7 +1124,9 @@ impl AccountStorageEntry {
             count_and_status: SeqLock::new(*count_and_status),
             alive_bytes: AtomicUsize::new(self.alive_bytes()),
             accounts,
-            zero_lamport_single_ref_offsets: RwLock::default(),
+            zero_lamport_single_ref_offsets: RwLock::new(
+                self.zero_lamport_single_ref_offsets.read().unwrap().clone(),
+            ),
             obsolete_accounts: RwLock::new(self.obsolete_accounts.read().unwrap().clone()),
         })
     }
@@ -1135,6 +1137,7 @@ impl AccountStorageEntry {
         accounts: AccountsFile,
         _num_accounts: usize,
     ) -> Self {
+        println!("New entry from existing");
         Self {
             id,
             slot,
@@ -1232,12 +1235,17 @@ impl AccountStorageEntry {
     fn insert_zero_lamport_single_ref_account_offset(&self, offset: usize) -> bool {
         let mut zero_lamport_single_ref_offsets =
             self.zero_lamport_single_ref_offsets.write().unwrap();
-        zero_lamport_single_ref_offsets.insert(offset)
+        let inserted = zero_lamport_single_ref_offsets.insert(offset);
+        println!("map is now {:?}", zero_lamport_single_ref_offsets);
+        inserted
+
     }
 
     /// Return the number of zero_lamport_single_ref accounts in the storage.
     fn num_zero_lamport_single_ref_accounts(&self) -> usize {
-        self.zero_lamport_single_ref_offsets.read().unwrap().len()
+        let var = self.zero_lamport_single_ref_offsets.read().unwrap().len();
+        println!("var is {}, map is {:?}", var, self.zero_lamport_single_ref_offsets.read().unwrap());
+        var
     }
 
     /// Return the "alive_bytes" minus "zero_lamport_single_ref_accounts bytes".
@@ -3181,23 +3189,21 @@ impl AccountsDb {
             );
             reclaim_result.1 = reclaimed_offsets;
 
-            if let HandleReclaims::ProcessDeadSlots(purge_stats) = handle_reclaims {
-                if let Some(expected_single_dead_slot) = expected_single_dead_slot {
-                    assert!(dead_slots.len() <= 1);
-                    if dead_slots.len() == 1 {
-                        assert!(dead_slots.contains(&expected_single_dead_slot));
-                    }
-                }
+            let HandleReclaims::ProcessDeadSlots(purge_stats) = handle_reclaims;
 
-                self.process_dead_slots(
-                    &dead_slots,
-                    Some(&mut reclaim_result.0),
-                    purge_stats,
-                    pubkeys_removed_from_accounts_index,
-                );
-            } else {
-                assert!(dead_slots.is_empty());
+            if let Some(expected_single_dead_slot) = expected_single_dead_slot {
+                assert!(dead_slots.len() <= 1);
+                if dead_slots.len() == 1 {
+                    assert!(dead_slots.contains(&expected_single_dead_slot));
+                }
             }
+
+            self.process_dead_slots(
+                &dead_slots,
+                Some(&mut reclaim_result.0),
+                purge_stats,
+                pubkeys_removed_from_accounts_index,
+            );
         }
         reclaim_result
     }
@@ -5665,10 +5671,15 @@ impl AccountsDb {
 
             let store_id = storage.id();
             for (i, offset) in stored_accounts_info.offsets.iter().enumerate() {
+                let zero_lamport = accounts_and_meta_to_store.is_zero_lamport(i);
                 infos.push(AccountInfo::new(
                     StorageLocation::AppendVec(store_id, *offset),
-                    accounts_and_meta_to_store.is_zero_lamport(i),
+                    zero_lamport,
                 ));
+                if zero_lamport
+                {
+                    storage.insert_zero_lamport_single_ref_account_offset(*offset);
+                }
             }
             storage.add_accounts(
                 stored_accounts_info.offsets.len(),
@@ -5917,8 +5928,6 @@ impl AccountsDb {
         let mut flush_stats = FlushStats::default();
         let iter_items: Vec<_> = slot_cache.iter().collect();
         let mut pubkey_to_slot_set: Vec<(Pubkey, Slot)> = vec![];
-        let mut purged_older_pubkeys = HashSet::with_capacity(iter_items.len());
-        let mut reclaims = Vec::new();
 
         if should_flush_f.is_some() {
             if let Some(max_clean_root) = max_clean_root {
@@ -5940,14 +5949,6 @@ impl AccountsDb {
                     .as_mut()
                     .map(|should_flush_f| should_flush_f(key))
                     .unwrap_or(true);
-
-                if should_flush_f.is_some() && self.mark_obsolete_accounts {
-                    purged_older_pubkeys.extend(self.accounts_index.purge_older(
-                        key,
-                        slot,
-                        &mut reclaims,
-                    ));
-                }
 
                 if should_flush {
                     flush_stats.num_bytes_flushed +=
@@ -5981,7 +5982,7 @@ impl AccountsDb {
                 "flush_slot_cache",
             );
             let (store_accounts_timing_inner, store_accounts_total_inner_us) =
-                measure_us!(self.store_accounts_frozen((slot, &accounts[..]), &flushed_store,));
+                measure_us!(self.store_accounts_flush((slot, &accounts[..]), &flushed_store,));
             flush_stats.store_accounts_timing = store_accounts_timing_inner;
             flush_stats.store_accounts_total_us = Saturating(store_accounts_total_inner_us);
 
@@ -5990,27 +5991,6 @@ impl AccountsDb {
             self.reopen_storage_as_readonly_shrinking_in_progress_ok(slot);
             let storage = self.storage.get_slot_storage_entry(slot);
             assert!(storage.is_some());
-        }
-
-        if self.mark_obsolete_accounts {
-            let pubkeys_removed_from_accounts_index = HashSet::new();
-            let purge_stats = PurgeStats::default();
-
-            self.unref_pubkeys(
-                purged_older_pubkeys.iter().map(|(_slot, pubkey)| pubkey),
-                purged_older_pubkeys.len(),
-                &pubkeys_removed_from_accounts_index,
-            );
-
-            flush_stats.num_accounts_reclaimed += reclaims.len();
-            self.handle_reclaims(
-                (!reclaims.is_empty()).then(|| reclaims.iter()),
-                None,
-                false,
-                &pubkeys_removed_from_accounts_index,
-                HandleReclaims::ProcessDeadSlots(&purge_stats),
-                MarkAccountsObsolete::Yes(slot),
-            );
         }
 
         // Remove this slot from the cache, which will to AccountsDb's new readers should look like an
@@ -7617,9 +7597,7 @@ impl AccountsDb {
     ) {
         self.store(
             accounts,
-            &StoreTo::Cache,
             transactions,
-            StoreReclaims::Default,
             UpdateIndexThreadSelection::PoolWithThreshold,
         );
     }
@@ -7635,9 +7613,7 @@ impl AccountsDb {
     fn store<'a>(
         &self,
         accounts: impl StorableAccounts<'a>,
-        store_to: &StoreTo,
         transactions: Option<&'a [&'a SanitizedTransaction]>,
-        reclaim: StoreReclaims,
         update_index_thread_selection: UpdateIndexThreadSelection,
     ) {
         // If all transactions in a batch are errored,
@@ -7803,17 +7779,14 @@ impl AccountsDb {
     fn store_accounts_unfrozen<'a>(
         &self,
         accounts: impl StorableAccounts<'a>,
-        store_to: &StoreTo,
         transactions: Option<&'a [&'a SanitizedTransaction]>,
-        reclaim: StoreReclaims,
         update_index_thread_selection: UpdateIndexThreadSelection,
     ) {
         self.store_accounts_custom(
             accounts,
-            store_to,
-            reset_accounts,
+            &StoreTo::Cache,
             transactions,
-            reclaim,
+            StoreReclaims::Ignore,
             update_index_thread_selection,
             &self.thread_pool,
         );
@@ -7827,9 +7800,23 @@ impl AccountsDb {
         self.store_accounts_custom(
             accounts,
             &StoreTo::Storage(storage),
-            reset_accounts,
             None,
             StoreReclaims::Ignore,
+            UpdateIndexThreadSelection::PoolWithThreshold,
+            &self.thread_pool_clean,
+        )
+    }
+
+    pub fn store_accounts_flush<'a>(
+        &self,
+        accounts: impl StorableAccounts<'a>,
+        storage: &Arc<AccountStorageEntry>,
+    ) -> StoreAccountsTiming {
+        self.store_accounts_custom(
+            accounts,
+            &StoreTo::Storage(storage),
+            None,
+            StoreReclaims::Default,
             UpdateIndexThreadSelection::PoolWithThreshold,
             &self.thread_pool_clean,
         )
@@ -7839,7 +7826,6 @@ impl AccountsDb {
         &self,
         accounts: impl StorableAccounts<'a>,
         store_to: &StoreTo,
-        reset_accounts: bool,
         transactions: Option<&'a [&'a SanitizedTransaction]>,
         reclaim: StoreReclaims,
         update_index_thread_selection: UpdateIndexThreadSelection,
@@ -7861,12 +7847,9 @@ impl AccountsDb {
         } else if store_to.is_cached() {
             UpsertReclaim::PreviousSlotEntryWasCached
         } else {
+            println!("Storing accounts for slot: {}", accounts.target_slot());
             UpsertReclaim::PopulateReclaims
         };
-
-        // if we are squashing a single slot, then we can expect a single dead slot
-        let expected_single_dead_slot =
-            (!accounts.contains_multiple_slots()).then(|| accounts.target_slot());
 
         // If the cache was flushed, then because `update_index` occurs
         // after the account are stored by the above `store_accounts_to`
@@ -7908,13 +7891,19 @@ impl AccountsDb {
         let mut handle_reclaims_elapsed = 0;
         if reclaim == UpsertReclaim::PopulateReclaims {
             let mut handle_reclaims_time = Measure::start("handle_reclaims");
+            let slot = if let StoreTo::Storage(storage) = store_to {
+                storage.slot()
+            } else {
+                unreachable!("reclaim should only be UpsertReclaim if store_to is Storage");
+            };
             self.handle_reclaims(
                 (!reclaims.is_empty()).then(|| reclaims.iter()),
-                expected_single_dead_slot,
-                reset_accounts,
+                None,
+                false,
                 &HashSet::default(),
                 // this callsite does NOT process dead slots
-                HandleReclaims::DoNotProcessDeadSlots,
+                HandleReclaims::ProcessDeadSlots(&PurgeStats::default()),
+                MarkAccountsObsolete::Yes(slot),
             );
             handle_reclaims_time.stop();
             handle_reclaims_elapsed = handle_reclaims_time.as_us();
@@ -8776,17 +8765,7 @@ pub enum CalcAccountsHashDataSource {
 #[derive(Debug, Copy, Clone)]
 enum HandleReclaims<'a> {
     ProcessDeadSlots(&'a PurgeStats),
-    DoNotProcessDeadSlots,
 }
-/// Specify whether obsolete accounts should be marked or not during reclaims
-/// They should only be marked if they are also getting unreffed in the index
-/// Temporariliy allow dead code until the feature is implemented
-#[derive(Debug, Copy, Clone)]
-enum MarkAccountsObsolete {
-    Yes(Slot),
-    No,
-}
-
 /// Specify whether obsolete accounts should be marked or not during reclaims
 /// They should only be marked if they are also getting unreffed in the index
 /// Temporariliy allow dead code until the feature is implemented
@@ -8909,9 +8888,7 @@ impl AccountsDb {
     pub fn store_for_tests(&self, slot: Slot, accounts: &[(&Pubkey, &AccountSharedData)]) {
         self.store(
             (slot, accounts),
-            &StoreTo::Cache,
             None,
-            StoreReclaims::Default,
             UpdateIndexThreadSelection::PoolWithThreshold,
         );
     }
