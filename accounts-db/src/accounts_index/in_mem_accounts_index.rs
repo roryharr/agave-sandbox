@@ -651,7 +651,6 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
         );
         if reclaim == UpsertReclaim::PopulateReclaims {
             // if we are populating reclaims, then we need to set the ref count to 1
-            println!("Setting ref to one for {current:?}\n");
             current.set_ref_one();
         } else if reclaim == UpsertReclaim::PreviousSlotEntryWasCached {
             // if we are updating a cached entry, then we should not addref as cached entries do not have a ref

@@ -1137,7 +1137,6 @@ impl AccountStorageEntry {
         accounts: AccountsFile,
         _num_accounts: usize,
     ) -> Self {
-        println!("New entry from existing");
         Self {
             id,
             slot,
@@ -1235,17 +1234,12 @@ impl AccountStorageEntry {
     fn insert_zero_lamport_single_ref_account_offset(&self, offset: usize) -> bool {
         let mut zero_lamport_single_ref_offsets =
             self.zero_lamport_single_ref_offsets.write().unwrap();
-        let inserted = zero_lamport_single_ref_offsets.insert(offset);
-        println!("map is now {:?}", zero_lamport_single_ref_offsets);
-        inserted
-
+        zero_lamport_single_ref_offsets.insert(offset)
     }
 
     /// Return the number of zero_lamport_single_ref accounts in the storage.
     fn num_zero_lamport_single_ref_accounts(&self) -> usize {
-        let var = self.zero_lamport_single_ref_offsets.read().unwrap().len();
-        println!("var is {}, map is {:?}", var, self.zero_lamport_single_ref_offsets.read().unwrap());
-        var
+        self.zero_lamport_single_ref_offsets.read().unwrap().len()
     }
 
     /// Return the "alive_bytes" minus "zero_lamport_single_ref_accounts bytes".
@@ -7847,7 +7841,6 @@ impl AccountsDb {
         } else if store_to.is_cached() {
             UpsertReclaim::PreviousSlotEntryWasCached
         } else {
-            println!("Storing accounts for slot: {}", accounts.target_slot());
             UpsertReclaim::PopulateReclaims
         };
 
