@@ -76,6 +76,7 @@ use {
         utils,
         verify_accounts_hash_in_background::VerifyAccountsHashInBackground,
     },
+    ahash::AHashSet,
     crossbeam_channel::{unbounded, Receiver, Sender, TryRecvError},
     dashmap::{DashMap, DashSet},
     log::*,
@@ -95,7 +96,6 @@ use {
     solana_rayon_threadlimit::get_thread_count,
     solana_rent_collector::RentCollector,
     solana_transaction::sanitized::SanitizedTransaction,
-    ahash::AHashSet,
     std::{
         borrow::Cow,
         boxed::Box,
@@ -3335,6 +3335,7 @@ impl AccountsDb {
         let mut index = 0;
         let mut index_scan_returned_some_count = 0;
         let mut index_scan_returned_none_count = 0;
+        let mut obsolete_accounts_filtered = 0;
         let mut all_are_zero_lamports = true;
         let latest_full_snapshot_slot = self.latest_full_snapshot_slot();
 
@@ -3346,10 +3347,11 @@ impl AccountsDb {
             .collect();
 
         let accounts = accounts
-            .into_iter()
+            .iter()
             .filter(|account| {
                 if obsolete_offsets.contains(&account.index_info.offset()) {
                     // If the account is obsolete, it is dead
+                    obsolete_accounts_filtered += 1;
                     dead += 1;
                     false
                 } else {
@@ -3420,6 +3422,10 @@ impl AccountsDb {
             self.scan_filter_for_shrinking,
         );
         assert_eq!(index, std::cmp::min(accounts.len(), count));
+
+        stats
+            .obsolete_accounts_filtered
+            .fetch_add(obsolete_accounts_filtered as u64, Ordering::Relaxed);
         stats
             .index_scan_returned_some
             .fetch_add(index_scan_returned_some_count, Ordering::Relaxed);
