@@ -188,10 +188,6 @@ pub(crate) struct AliveAccounts<'a> {
 pub(crate) struct ShrinkCollectAliveSeparatedByRefs<'a> {
     /// accounts where ref_count = 1
     pub(crate) one_ref: AliveAccounts<'a>,
-    /// account where ref_count > 1, but this slot contains the alive entry with the highest slot
-    pub(crate) many_refs_this_is_newest_alive: AliveAccounts<'a>,
-    /// account where ref_count > 1, and this slot is NOT the highest alive entry in the index for the pubkey
-    pub(crate) many_refs_old_alive: AliveAccounts<'a>,
 }
 
 /// Configuration Parameters for running accounts hash and total lamports verification
@@ -218,9 +214,7 @@ pub(crate) trait ShrinkCollectRefs<'a>: Sync + Send {
     fn collect(&mut self, other: Self);
     fn add(
         &mut self,
-        ref_count: u64,
         account: &'a AccountFromStorage,
-        slot_list: &[(Slot, AccountInfo)],
     );
     fn len(&self) -> usize;
     fn alive_bytes(&self) -> usize;
@@ -241,9 +235,7 @@ impl<'a> ShrinkCollectRefs<'a> for AliveAccounts<'a> {
     }
     fn add(
         &mut self,
-        _ref_count: u64,
         account: &'a AccountFromStorage,
-        _slot_list: &[(Slot, AccountInfo)],
     ) {
         self.accounts.push(account);
         self.bytes = self.bytes.saturating_add(account.stored_size());
@@ -262,50 +254,25 @@ impl<'a> ShrinkCollectRefs<'a> for AliveAccounts<'a> {
 impl<'a> ShrinkCollectRefs<'a> for ShrinkCollectAliveSeparatedByRefs<'a> {
     fn collect(&mut self, other: Self) {
         self.one_ref.collect(other.one_ref);
-        self.many_refs_this_is_newest_alive
-            .collect(other.many_refs_this_is_newest_alive);
-        self.many_refs_old_alive.collect(other.many_refs_old_alive);
     }
     fn with_capacity(capacity: usize, slot: Slot) -> Self {
         Self {
             one_ref: AliveAccounts::with_capacity(capacity, slot),
-            many_refs_this_is_newest_alive: AliveAccounts::with_capacity(0, slot),
-            many_refs_old_alive: AliveAccounts::with_capacity(0, slot),
         }
     }
     fn add(
         &mut self,
-        ref_count: u64,
         account: &'a AccountFromStorage,
-        slot_list: &[(Slot, AccountInfo)],
     ) {
-        let other = if ref_count == 1 {
-            &mut self.one_ref
-        } else if slot_list.len() == 1
-            || !slot_list
-                .iter()
-                .any(|(slot_list_slot, _info)| slot_list_slot > &self.many_refs_old_alive.slot)
-        {
-            // this entry is alive but is newer than any other slot in the index
-            &mut self.many_refs_this_is_newest_alive
-        } else {
-            // This entry is alive but is older than at least one other slot in the index.
-            // We would expect clean to get rid of the entry for THIS slot at some point, but clean hasn't done that yet.
-            &mut self.many_refs_old_alive
-        };
-        other.add(ref_count, account, slot_list);
+        let other = &mut self.one_ref;
+
+        other.add(account);
     }
     fn len(&self) -> usize {
-        self.one_ref
-            .len()
-            .saturating_add(self.many_refs_old_alive.len())
-            .saturating_add(self.many_refs_this_is_newest_alive.len())
+        self.one_ref.len()
     }
     fn alive_bytes(&self) -> usize {
-        self.one_ref
-            .alive_bytes()
-            .saturating_add(self.many_refs_old_alive.alive_bytes())
-            .saturating_add(self.many_refs_this_is_newest_alive.alive_bytes())
+        self.one_ref.alive_bytes()
     }
     fn alive_accounts(&self) -> &Vec<&'a AccountFromStorage> {
         unimplemented!("illegal use");
@@ -3327,14 +3294,11 @@ impl AccountsDb {
         let count = accounts.len();
         let slot_to_shrink = store.slot;
         let mut alive_accounts = T::with_capacity(count, slot_to_shrink);
-        let mut pubkeys_to_unref = Vec::with_capacity(count);
+        let pubkeys_to_unref = Vec::new();
         let mut zero_lamport_single_ref_pubkeys = Vec::with_capacity(count);
 
         let mut alive = 0;
         let mut dead = 0;
-        let mut index = 0;
-        let mut index_scan_returned_some_count = 0;
-        let mut index_scan_returned_none_count = 0;
         let mut obsolete_accounts_filtered = 0;
         let mut all_are_zero_lamports = true;
         let latest_full_snapshot_slot = self.latest_full_snapshot_slot();
@@ -3360,78 +3324,31 @@ impl AccountsDb {
             })
             .collect::<Vec<_>>();
 
-        self.accounts_index.scan(
-            accounts.iter().map(|account| account.pubkey()),
-            |pubkey, slots_refs, _entry| {
-                let stored_account = &accounts[index];
-                let mut do_populate_accounts_for_shrink = |ref_count, slot_list| {
-                    if stored_account.is_zero_lamport()
-                        && ref_count == 1
-                        && latest_full_snapshot_slot
-                            .map(|latest_full_snapshot_slot| {
-                                latest_full_snapshot_slot >= slot_to_shrink
-                            })
-                            .unwrap_or(true)
-                    {
-                        // only do this if our slot is prior to the latest full snapshot
-                        // we found a zero lamport account that is the only instance of this account. We can delete it completely.
-                        zero_lamport_single_ref_pubkeys.push(pubkey);
-                        self.add_uncleaned_pubkeys_after_shrink(
-                            slot_to_shrink,
-                            [*pubkey].into_iter(),
-                        );
-                    } else {
-                        all_are_zero_lamports &= stored_account.is_zero_lamport();
-                        alive_accounts.add(ref_count, stored_account, slot_list);
-                        alive += 1;
-                    }
-                };
-                if let Some((slot_list, ref_count)) = slots_refs {
-                    index_scan_returned_some_count += 1;
-                    let is_alive = slot_list.iter().any(|(slot, _acct_info)| {
-                        // if the accounts index contains an entry at this slot, then the append vec we're asking about contains this item and thus, it is alive at this slot
-                        *slot == slot_to_shrink
-                    });
-
-                    if !is_alive {
-                        // This pubkey was found in the storage, but no longer exists in the index.
-                        // It would have had a ref to the storage from the initial store, but it will
-                        // not exist in the re-written slot. Unref it to keep the index consistent with
-                        // rewriting the storage entries.
-                        pubkeys_to_unref.push(pubkey);
-                        dead += 1;
-                    } else {
-                        do_populate_accounts_for_shrink(ref_count, slot_list);
-                    }
-                } else {
-                    index_scan_returned_none_count += 1;
-                    // getting None here means the account is 'normal' and was written to disk. This means it must have ref_count=1 and
-                    // slot_list.len() = 1. This means it must be alive in this slot. This is by far the most common case.
-                    // Note that we could get Some(...) here if the account is in the in mem index because it is hot.
-                    // Note this could also mean the account isn't on disk either. That would indicate a bug in accounts db.
-                    // Account is alive.
-                    let ref_count = 1;
-                    let slot_list = [(slot_to_shrink, AccountInfo::default())];
-                    do_populate_accounts_for_shrink(ref_count, &slot_list);
-                }
-                index += 1;
-                AccountsIndexScanResult::OnlyKeepInMemoryIfDirty
-            },
-            None,
-            false,
-            self.scan_filter_for_shrinking,
-        );
-        assert_eq!(index, std::cmp::min(accounts.len(), count));
+        accounts.iter().for_each(|account| {
+            if account.is_zero_lamport()
+                && latest_full_snapshot_slot
+                    .map(|latest_full_snapshot_slot| {
+                        latest_full_snapshot_slot >= slot_to_shrink
+                    })
+                    .unwrap_or(true)
+            {
+                // only do this if our slot is prior to the latest full snapshot
+                // we found a zero lamport account that is the only instance of this account. We can delete it completely.
+                zero_lamport_single_ref_pubkeys.push(&account.pubkey);
+                self.add_uncleaned_pubkeys_after_shrink(
+                    slot_to_shrink,
+                    [account.pubkey].into_iter(),
+                );
+            } else {
+                all_are_zero_lamports &= account.is_zero_lamport();
+                alive_accounts.add(account);
+                alive += 1;
+            }
+        });
 
         stats
             .obsolete_accounts_filtered
             .fetch_add(obsolete_accounts_filtered as u64, Ordering::Relaxed);
-        stats
-            .index_scan_returned_some
-            .fetch_add(index_scan_returned_some_count, Ordering::Relaxed);
-        stats
-            .index_scan_returned_none
-            .fetch_add(index_scan_returned_none_count, Ordering::Relaxed);
         stats.alive_accounts.fetch_add(alive, Ordering::Relaxed);
         stats.dead_accounts.fetch_add(dead, Ordering::Relaxed);
 
