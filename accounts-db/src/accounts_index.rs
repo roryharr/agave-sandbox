@@ -2441,7 +2441,7 @@ pub mod tests {
                 &AccountSecondaryIndexes::default(),
                 value,
                 &mut reclaims,
-                UpsertReclaim::PopulateReclaims,
+                UpsertReclaim::IgnoreReclaims,
             );
             // Not reclaiming from same slot
             assert!(reclaims.is_empty());
@@ -2784,7 +2784,7 @@ pub mod tests {
             &AccountSecondaryIndexes::default(),
             true,
             &mut gc,
-            UPSERT_POPULATE_RECLAIMS,
+            UpsertReclaim::IgnoreReclaims,
         );
         assert!(gc.is_empty());
         index
@@ -2809,7 +2809,7 @@ pub mod tests {
             &AccountSecondaryIndexes::default(),
             false,
             &mut gc,
-            UpsertReclaim::PopulateReclaims,
+            UpsertReclaim::IgnoreReclaims,
         );
         index
             .get_with_and_then(

@@ -639,25 +639,33 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
         reclaims: &mut SlotList<T>,
         reclaim: UpsertReclaim,
     ) -> usize {
+        println!("Starting update");
         let mut slot_list = current.slot_list.write().unwrap();
         let (slot, new_entry) = new_value;
-        let addref = Self::update_slot_list(
+        let mut new_reclaims = SlotList::<T>::default();
+        let ref_change = Self::update_slot_list(
             &mut slot_list,
             slot,
             new_entry,
             other_slot,
-            reclaims,
+            &mut new_reclaims,
             reclaim,
         );
         if reclaim == UpsertReclaim::PopulateReclaims {
-            // if we are populating reclaims, then we need to set the ref count to 1
-            current.set_ref_one();
+            // Add ref first
+            current.addref();
+
+            // Now decrement until we have reclaimed all the entries
+            for _ in 0..new_reclaims.len() {
+                current.unref();
+            }
+            reclaims.extend(new_reclaims);
+            assert_ne!(current.ref_count(), 0, "ref count should not be zero after reclaiming entries");
         } else if reclaim == UpsertReclaim::PreviousSlotEntryWasCached {
             // if we are updating a cached entry, then we should not addref as cached entries do not have a ref
         } else if reclaim == UpsertReclaim::IgnoreReclaims {
             // If we are ignoring reclaims, then we do not need to change the ref count.
-            if addref
-            {
+            if ref_change {
                 current.addref();
             }
         }
@@ -697,7 +705,7 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
         (0..slot_list.len())
             .rev() // rev since we delete from the list in some cases
             .for_each(|slot_list_index| {
-                let (cur_slot, cur_account_info) = &slot_list[slot_list_index];
+                let (cur_slot, cur_account_info) = &slot_list[slot_list_index].clone();
                 let matched_slot = *cur_slot == slot;
                 if matched_slot || Some(*cur_slot) == other_slot {
                     // make sure neither 'slot' nor 'other_slot' are in the slot list more than once
@@ -719,8 +727,9 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
                     };
                     match reclaim {
                         UpsertReclaim::PopulateReclaims => {
-                            if reclaim_item.0 != slot
+                            if !is_cur_account_cached
                             {
+                                println!("Populating reclaims for slot {slot}, cur_slot: {cur_slot}, cur_account_info: {cur_account_info:?}, reclaim_item: {reclaim_item:?}");
                                 reclaims.push(reclaim_item);
                             }
                         }
@@ -741,18 +750,13 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
                         // current info at 'slot' is NOT cached, so we should NOT addref. This slot already has a ref count for this pubkey.
                         addref = false;
                     }
-                }
-                else {
-                    match reclaim {
-                        UpsertReclaim::PopulateReclaims => {
-                            let is_cur_account_cached = cur_account_info.is_cached();
-                            if !is_cur_account_cached  && *cur_slot < slot {
-                                let reclaim_item = slot_list[slot_list_index];
-                                slot_list.remove(slot_list_index);
-                                reclaims.push(reclaim_item);
-                            }
-                        }
-                        _ => {}
+                } else if reclaim == UpsertReclaim::PopulateReclaims {
+                    let is_cur_account_cached = cur_account_info.is_cached();
+                    if !is_cur_account_cached && *cur_slot < slot {
+                        println!("Older populated reclaim found for slot {slot}, cur_slot: {cur_slot}, cur_account_info: {cur_account_info:?}");
+                        let reclaim_item = slot_list[slot_list_index];
+                        slot_list.remove(slot_list_index);
+                        reclaims.push(reclaim_item);
                     }
                 }
             });
@@ -813,6 +817,7 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
         new_entry: PreAllocatedAccountMapEntry<T>,
     ) -> InsertNewEntryResults {
         let mut m = Measure::start("entry");
+        println!("New Entry Time");
         let mut map = self.map_internal.write().unwrap();
         let entry = map.entry(pubkey);
         m.stop();
@@ -1975,6 +1980,7 @@ mod tests {
         let at_new_slot = (new_slot, info);
         let unique_other_slot = new_slot + 1;
         for other_slot in [Some(new_slot), Some(unique_other_slot), None] {
+            println!("First ITeration: other_slot: {other_slot:?}");
             let mut reclaims = Vec::default();
             let mut slot_list = Vec::default();
             // upserting into empty slot_list, so always addref
@@ -2032,7 +2038,7 @@ mod tests {
             ),
             "other_slot: {other_slot:?}"
         );
-        //assert_eq!(slot_list, vec![at_new_slot]);
+        assert_eq!(slot_list, vec![at_new_slot]);
         assert_eq!(
             reclaims,
             expected_reclaims.into_iter().rev().collect::<Vec<_>>()

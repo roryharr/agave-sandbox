@@ -2540,7 +2540,7 @@ fn do_full_clean_refcount(mut accounts: AccountsDb, store1_first: bool, store_si
     accounts.calculate_accounts_delta_hash(current_slot);
     accounts.add_root_and_flush_write_cache(current_slot);
 
-    info!("post A");
+    println!("post A");
     accounts.print_accounts_stats("Post-A");
 
     // B: Test multiple updates to pubkey1 in a single slot/storage
@@ -2553,6 +2553,7 @@ fn do_full_clean_refcount(mut accounts: AccountsDb, store1_first: bool, store_si
     );
     accounts.store_for_tests(current_slot, &[(&pubkey1, &account2)]);
     accounts.store_for_tests(current_slot, &[(&pubkey1, &account2)]);
+    println!("Flushing now");
     accounts.add_root_and_flush_write_cache(current_slot);
     assert_eq!(1, accounts.alive_account_count_in_slot(current_slot));
     // Stores to same pubkey, same slot only count once towards the
@@ -2563,13 +2564,14 @@ fn do_full_clean_refcount(mut accounts: AccountsDb, store1_first: bool, store_si
         accounts.ref_count_for_pubkey(&pubkey1),
     );
     accounts.calculate_accounts_delta_hash(current_slot);
+    println!("Haven't we already flushed this");
     accounts.add_root_and_flush_write_cache(current_slot);
 
     accounts.print_accounts_stats("Post-B pre-clean");
 
     accounts.clean_accounts_for_tests();
 
-    info!("post B");
+    println!("post B");
     accounts.print_accounts_stats("Post-B");
 
     // C: more updates to trigger clean of previous updates
@@ -2579,10 +2581,14 @@ fn do_full_clean_refcount(mut accounts: AccountsDb, store1_first: bool, store_si
         2,
         accounts.ref_count_for_pubkey(&pubkey1),
     );
+
+    println!("Starting Step C\n");
     accounts.store_for_tests(current_slot, &[(&pubkey1, &account3)]);
     accounts.store_for_tests(current_slot, &[(&pubkey2, &account3)]);
     accounts.store_for_tests(current_slot, &[(&pubkey3, &account4)]);
+    println!("Flushing now");
     accounts.add_root_and_flush_write_cache(current_slot);
+    // Something is going on here!
     assert_ref_count(
         accounts.mark_obsolete_accounts,
         3,
@@ -3123,7 +3129,7 @@ fn test_delete_dependencies() {
     let mut stores: Vec<_> = store_counts.keys().cloned().collect();
     stores.sort_unstable();
     for store in &stores {
-        info!(
+        println!(
             "store: {:?} : {:?}",
             store,
             store_counts.get(store).unwrap()
@@ -3131,6 +3137,7 @@ fn test_delete_dependencies() {
     }
     for x in 0..3 {
         // if the store count doesn't exist for this id, then it is implied to be > 0
+        println!("store_counts[{}]: {:?}", x, store_counts.get(&x));
         assert!(store_counts
             .get(&x)
             .map(|entry| entry.0 >= 1)

@@ -3390,8 +3390,7 @@ impl AccountsDb {
                         // If this slot was unrefed by clean, then it would have a reference from the
                         // initial store.
                         // However if this was dereferenced during flush, no reference exists.
-                        if !store.is_account_obsolete(stored_account.index_info.offset(), None)
-                        {
+                        if !store.is_account_obsolete(stored_account.index_info.offset(), None) {
                             pubkeys_to_unref.push(pubkey);
                         }
                         dead += 1;
@@ -5666,8 +5665,7 @@ impl AccountsDb {
                     StorageLocation::AppendVec(store_id, *offset),
                     zero_lamport,
                 ));
-                if zero_lamport
-                {
+                if zero_lamport {
                     storage.insert_zero_lamport_single_ref_account_offset(*offset);
                 }
             }
@@ -7773,7 +7771,6 @@ impl AccountsDb {
         // store in the slot. Thus it is safe to reset the store and
         // re-use it for a future store op. The pubkey ref counts should still
         // hold just 1 ref from this slot.
-        let reset_accounts = true;
 
         // We are storing accounts unfrozen accounts which
         // will always be stored in the cache
@@ -7785,9 +7782,8 @@ impl AccountsDb {
         self.store_accounts_custom(
             accounts,
             &store_to,
-            reset_accounts,
             transactions,
-            StoreReclaims::Ignore,
+            reclaim,
             update_index_thread_selection,
             &self.thread_pool,
         );
@@ -7829,7 +7825,7 @@ impl AccountsDb {
         store_to: &StoreTo,
         transactions: Option<&'a [&'a SanitizedTransaction]>,
         reclaim: StoreReclaims,
-        update_index_thread_selection: UpdateIndexThreadSelection,
+        _update_index_thread_selection: UpdateIndexThreadSelection,
         thread_pool: &ThreadPool,
     ) -> StoreAccountsTiming {
         self.stats
@@ -7850,6 +7846,7 @@ impl AccountsDb {
         } else {
             UpsertReclaim::PopulateReclaims
         };
+        let update_index_thread_selection= UpdateIndexThreadSelection::Inline;
 
         // If the cache was flushed, then because `update_index` occurs
         // after the account are stored by the above `store_accounts_to`
@@ -8765,7 +8762,6 @@ pub enum CalcAccountsHashDataSource {
 #[derive(Debug, Copy, Clone)]
 enum HandleReclaims<'a> {
     ProcessDeadSlots(&'a PurgeStats),
-    DoNotProcessDeadSlots,
 }
 
 /// Specify whether obsolete accounts should be marked or not during reclaims
