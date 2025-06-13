@@ -145,6 +145,8 @@ impl StoreAccountsTiming {
 pub struct FlushStats {
     pub num_accounts_flushed: Saturating<usize>,
     pub num_bytes_flushed: Saturating<u64>,
+    pub num_zero_lamport_accounts_flushed: Saturating<usize>,
+    pub num_accounts_reclaimed: Saturating<usize>,
     pub num_accounts_purged: Saturating<usize>,
     pub num_bytes_purged: Saturating<u64>,
     pub store_accounts_timing: StoreAccountsTiming,
@@ -154,6 +156,8 @@ pub struct FlushStats {
 impl FlushStats {
     pub fn accumulate(&mut self, other: &Self) {
         self.num_accounts_flushed += other.num_accounts_flushed;
+        self.num_zero_lamport_accounts_flushed += other.num_zero_lamport_accounts_flushed;
+        self.num_accounts_reclaimed += other.num_accounts_reclaimed;
         self.num_bytes_flushed += other.num_bytes_flushed;
         self.num_accounts_purged += other.num_accounts_purged;
         self.num_bytes_purged += other.num_bytes_purged;
@@ -350,6 +354,7 @@ pub struct ShrinkStats {
     pub alive_accounts: AtomicU64,
     pub index_scan_returned_none: AtomicU64,
     pub index_scan_returned_some: AtomicU64,
+    pub obsolete_accounts_filtered: AtomicU64,
     pub accounts_loaded: AtomicU64,
     pub initial_candidates_count: AtomicU64,
     pub purged_zero_lamports: AtomicU64,
@@ -383,6 +388,11 @@ impl ShrinkStats {
                 (
                     "num_slots_shrunk",
                     self.num_slots_shrunk.swap(0, Ordering::Relaxed),
+                    i64
+                ),
+                (
+                    "obsolete_accounts_filtered",
+                    self.obsolete_accounts_filtered.swap(0, Ordering::Relaxed),
                     i64
                 ),
                 (
