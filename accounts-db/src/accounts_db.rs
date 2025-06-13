@@ -1243,7 +1243,7 @@ impl AccountStorageEntry {
     }
 
     pub fn has_accounts(&self) -> bool {
-        self.count() > 0
+        self.count() > 0 || !self.obsolete_accounts.read().unwrap().is_empty()
     }
 
     pub fn slot(&self) -> Slot {
@@ -3879,6 +3879,19 @@ impl AccountsDb {
         // mutating rooted slots; There should be no writers to them.
         let accounts = [(slot, &shrink_collect.alive_accounts.alive_accounts()[..])];
         let storable_accounts = StorableAccountsBySlot::new(slot, &accounts, self);
+        if storable_accounts.is_empty() {
+            error!(
+                "shrink_storage: slot {} has no accounts to write back, alive_total_bytes: {}, capacity: {}",
+                slot,
+                shrink_collect.alive_total_bytes,
+                shrink_collect.capacity
+            );
+            error!(
+                "There are {} obsolete accounts and {} zero lamport accounts",
+                store.get_obsolete_accounts(None).len(),
+                store.num_zero_lamport_single_ref_accounts()
+            );
+        }
         stats_sub.store_accounts_timing =
             self.store_accounts_frozen(storable_accounts, shrink_in_progress.new_storage());
 
@@ -6001,7 +6014,7 @@ impl AccountsDb {
             self.unref_pubkeys(
                 purged_older_pubkeys.iter().map(|(_slot, pubkey)| pubkey),
                 purged_older_pubkeys.len(),
-                &pubkeys_removed_from_accounts_index,
+                Some(&pubkeys_removed_from_accounts_index),
             );
 
             flush_stats.num_accounts_reclaimed += reclaims.len();
@@ -7374,7 +7387,10 @@ impl AccountsDb {
                             .iter()
                             .map(|len| store.accounts.calculate_stored_size(*len))
                             .sum();
-                        store.remove_accounts(dead_bytes, reset_accounts, offsets.len());
+                        //Dirty hack for boot
+                        if store.count() != 0 {
+                            store.remove_accounts(dead_bytes, reset_accounts, offsets.len());
+                        }
 
                         if let MarkAccountsObsolete::Yes(slot_marked_obsolete) =
                             mark_accounts_obsolete
@@ -7458,7 +7474,7 @@ impl AccountsDb {
         &'a self,
         pubkeys: impl Iterator<Item = &'a Pubkey> + Clone + Send + Sync,
         num_pubkeys: usize,
-        pubkeys_removed_from_accounts_index: &'a PubkeysRemovedFromAccountsIndex,
+        pubkeys_removed_from_accounts_index: Option<&'a PubkeysRemovedFromAccountsIndex>,
     ) {
         let batches = 1 + (num_pubkeys / UNREF_ACCOUNTS_BATCH_SIZE);
         self.thread_pool_clean.install(|| {
@@ -7470,9 +7486,14 @@ impl AccountsDb {
                         .skip(skip)
                         .take(UNREF_ACCOUNTS_BATCH_SIZE)
                         .filter(|pubkey| {
-                            // filter out pubkeys that have already been removed from the accounts index in a previous step
-                            let already_removed =
-                                pubkeys_removed_from_accounts_index.contains(pubkey);
+                            // determine if the pubkey has already been removed from the accounts index
+                            let already_removed = if let Some(pubkeys_removed) =
+                                pubkeys_removed_from_accounts_index
+                            {
+                                pubkeys_removed.contains(pubkey)
+                            } else {
+                                false
+                            };
                             !already_removed
                         }),
                     |_pubkey, slots_refs, _entry| {
@@ -7512,7 +7533,7 @@ impl AccountsDb {
         self.unref_pubkeys(
             purged_slot_pubkeys.iter().map(|(_slot, pubkey)| pubkey),
             purged_slot_pubkeys.len(),
-            pubkeys_removed_from_accounts_index,
+            Some(pubkeys_removed_from_accounts_index),
         );
         for (slot, pubkey) in purged_slot_pubkeys {
             purged_stored_account_slots
@@ -8467,6 +8488,7 @@ impl AccountsDb {
                                         &rent_collector,
                                         &timings,
                                         should_calculate_duplicates_lt_hash,
+                                        max_slot,
                                     );
                                     let intermediate = DuplicatePubkeysVisitedInfo {
                                         accounts_data_len_from_duplicates,
@@ -8615,6 +8637,7 @@ impl AccountsDb {
         rent_collector: &RentCollector,
         timings: &GenerateIndexTimings,
         should_calculate_duplicates_lt_hash: bool,
+        max_slot: Slot,
     ) -> (u64, u64, Option<Box<DuplicatesLtHash>>) {
         let mut accounts_data_len_from_duplicates = 0;
         let mut num_duplicate_accounts = 0_u64;
@@ -8680,6 +8703,26 @@ impl AccountsDb {
             false,
             ScanFilter::All,
         );
+
+        if self.mark_obsolete_accounts {
+            let mut purged_older_pubkeys = Vec::new();
+            let mut reclaims = Vec::new();
+            pubkeys.iter().for_each(|pubkey| {
+                purged_older_pubkeys
+                    .extend(self.accounts_index.purge_startup(pubkey, &mut reclaims));
+            });
+
+            let pubkeys_removed_from_accounts_index = HashSet::default();
+            self.handle_reclaims(
+                (!reclaims.is_empty()).then(|| reclaims.iter()),
+                None,
+                false,
+                &pubkeys_removed_from_accounts_index,
+                HandleReclaims::ProcessDeadSlots(&PurgeStats::default()),
+                MarkAccountsObsolete::Yes(max_slot),
+            );
+        };
+
         timings
             .rent_paying
             .fetch_sub(removed_rent_paying, Ordering::Relaxed);
@@ -8717,11 +8760,12 @@ impl AccountsDb {
                 {
                     let mut count_and_status = store.count_and_status.lock_write();
                     assert_eq!(count_and_status.0, 0);
-                    count_and_status.0 = entry.count;
+                    count_and_status.0 = entry.count - store.get_obsolete_accounts(None).len();
                 }
-                store
-                    .alive_bytes
-                    .store(entry.stored_size, Ordering::Release);
+                store.alive_bytes.store(
+                    entry.stored_size - store.get_obsolete_bytes(None),
+                    Ordering::Release,
+                );
             } else {
                 trace!("id: {} clearing count", id);
                 store.count_and_status.lock_write().0 = 0;
