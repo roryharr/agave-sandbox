@@ -177,7 +177,7 @@ mod tests {
         let offset = 0;
         // Mark the obsolete accounts in storage
         let mut size = storage.accounts.get_account_data_lens(&[0]);
-        storage.mark_accounts_obsolete(vec![(offset, size.pop().unwrap())], 0);
+        storage.mark_accounts_obsolete(vec![(offset, size.pop().unwrap())].into_iter(), 0);
 
         _ = AccountStorageReader::new(&storage, None).unwrap();
     }
@@ -375,7 +375,10 @@ mod tests {
         let mut slot_marked_dead = 0;
         obsolete_account_offset.into_iter().for_each(|offset| {
             let mut size = storage.accounts.get_account_data_lens(&[offset]);
-            storage.mark_accounts_obsolete(vec![(offset, size.pop().unwrap())], slot_marked_dead);
+            storage.mark_accounts_obsolete(
+                vec![(offset, size.pop().unwrap())].into_iter(),
+                slot_marked_dead,
+            );
             slot_marked_dead += 1;
         });
 
