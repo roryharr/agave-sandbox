@@ -1171,12 +1171,16 @@ impl AccountStorageEntry {
         self.alive_bytes.load(Ordering::Acquire)
     }
 
-    /// Marks the account at the given offset as obsolete
-    pub fn mark_account_obsolete(&self, offset: Offset, data_len: usize, slot: Slot) {
-        self.obsolete_accounts
-            .write()
-            .unwrap()
-            .push((offset, data_len, slot));
+    /// Marks the accounts at the given offsets as obsolete
+    pub fn mark_accounts_obsolete(
+        &self,
+        obsolete_accounts: impl IntoIterator<Item = (Offset, usize)>,
+        slot: Slot,
+    ) {
+        let mut obsolete_accounts_list = self.obsolete_accounts.write().unwrap();
+        for (offset, data_len) in obsolete_accounts {
+            obsolete_accounts_list.push((offset, data_len, slot));
+        }
     }
 
     /// Returns the accounts that were marked obsolete as of the passed in slot
@@ -7289,16 +7293,10 @@ impl AccountsDb {
                         if let MarkAccountsObsolete::Yes(slot_marked_obsolete) =
                             mark_accounts_obsolete
                         {
-                            offsets
-                                .into_iter()
-                                .zip(data_lens)
-                                .for_each(|(offset, data_len)| {
-                                    store.mark_account_obsolete(
-                                        offset,
-                                        data_len,
-                                        slot_marked_obsolete,
-                                    );
-                                });
+                            store.mark_accounts_obsolete(
+                                offsets.into_iter().zip(data_lens),
+                                slot_marked_obsolete,
+                            );
                         }
 
                         if Self::is_shrinking_productive(&store)
