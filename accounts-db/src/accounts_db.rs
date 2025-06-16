@@ -1174,12 +1174,13 @@ impl AccountStorageEntry {
     /// Marks the accounts at the given offsets as obsolete
     pub fn mark_accounts_obsolete(
         &self,
-        obsolete_accounts: impl ExactSizeIterator<Item = (Offset, usize)>,
+        newly_obsolete_accounts: impl ExactSizeIterator<Item = (Offset, usize)>,
         slot: Slot,
     ) {
         let mut obsolete_accounts_list = self.obsolete_accounts.write().unwrap();
-        obsolete_accounts_list.reserve(obsolete_accounts.len());
-        for (offset, data_len) in obsolete_accounts {
+        obsolete_accounts_list.reserve(newly_obsolete_accounts.len());
+
+        for (offset, data_len) in newly_obsolete_accounts {
             obsolete_accounts_list.push((offset, data_len, slot));
         }
     }
