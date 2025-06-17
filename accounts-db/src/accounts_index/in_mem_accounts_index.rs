@@ -639,7 +639,6 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
         reclaims: &mut SlotList<T>,
         reclaim: UpsertReclaim,
     ) -> usize {
-        println!("Starting update");
         let mut slot_list = current.slot_list.write().unwrap();
         let (slot, new_entry) = new_value;
         let mut new_reclaims = SlotList::<T>::default();
@@ -729,7 +728,6 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
                         UpsertReclaim::PopulateReclaims => {
                             if !is_cur_account_cached
                             {
-                                println!("Populating reclaims for slot {slot}, cur_slot: {cur_slot}, cur_account_info: {cur_account_info:?}, reclaim_item: {reclaim_item:?}");
                                 reclaims.push(reclaim_item);
                             }
                         }
@@ -817,7 +815,6 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
         new_entry: PreAllocatedAccountMapEntry<T>,
     ) -> InsertNewEntryResults {
         let mut m = Measure::start("entry");
-        println!("New Entry Time");
         let mut map = self.map_internal.write().unwrap();
         let entry = map.entry(pubkey);
         m.stop();
@@ -1980,7 +1977,6 @@ mod tests {
         let at_new_slot = (new_slot, info);
         let unique_other_slot = new_slot + 1;
         for other_slot in [Some(new_slot), Some(unique_other_slot), None] {
-            println!("First ITeration: other_slot: {other_slot:?}");
             let mut reclaims = Vec::default();
             let mut slot_list = Vec::default();
             // upserting into empty slot_list, so always addref
