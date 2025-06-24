@@ -558,15 +558,31 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
         &self,
         pubkey: &Pubkey,
         new_value: PreAllocatedAccountMapEntry<T>,
+        new_slot: Slot,
         other_slot: Option<Slot>,
         reclaims: &mut SlotList<T>,
         reclaim: UpsertReclaim,
+    ) {
+        // try to get it just from memory first using only a read lock
+        self.get_or_create_index_entry_for_pubkey(pubkey, new_slot, |entry| {
+            self.update_slot_list_entry(entry, new_value, other_slot, reclaims, reclaim)
+        });
+    }
+
+    /// Gets a new entry for `pubkey` and calls `callback` with it.
+    /// If the entry is not in the index, a placeholder will be created
+    /// If the entry is in the index, it will be returned as is.
+    pub fn get_or_create_index_entry_for_pubkey(
+        &self,
+        pubkey: &Pubkey,
+        slot: Slot,
+        callback: impl FnOnce(&Arc<AccountMapEntry<T>>),
     ) {
         let mut updated_in_mem = true;
         // try to get it just from memory first using only a read lock
         self.get_only_in_mem(pubkey, false, |entry| {
             if let Some(entry) = entry {
-                self.update_slot_list_entry(entry, new_value, other_slot, reclaims, reclaim);
+                callback(entry);
             } else {
                 let mut m = Measure::start("entry");
                 let mut map = self.map_internal.write().unwrap();
@@ -576,9 +592,7 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
                 match entry {
                     Entry::Occupied(mut occupied) => {
                         let current = occupied.get_mut();
-                        self.update_slot_list_entry(
-                            current, new_value, other_slot, reclaims, reclaim,
-                        );
+                        callback(current);
                     }
                     Entry::Vacant(vacant) => {
                         // not in cache, look on disk
@@ -588,19 +602,19 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
                         let disk_entry = self.load_account_entry_from_disk(vacant.key());
                         let new_value = if let Some(disk_entry) = disk_entry {
                             // on disk, so merge new_value with what was on disk
-                            self.update_slot_list_entry(
-                                &disk_entry,
-                                new_value,
-                                other_slot,
-                                reclaims,
-                                reclaim,
-                            );
                             disk_entry
                         } else {
                             // not on disk, so insert new thing
                             self.stats().inc_insert();
-                            new_value.into_account_map_entry(&self.storage)
+                            PreAllocatedAccountMapEntry::new(
+                                slot,
+                                T::new_cache_item(),
+                                &self.storage,
+                                false,
+                            )
+                            .into_account_map_entry(&self.storage)
                         };
+                        callback(&new_value);
                         assert!(new_value.dirty());
                         vacant.insert(new_value);
                         self.stats().inc_mem_count();
@@ -709,7 +723,10 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
                     };
                     match reclaim {
                         UpsertReclaim::PopulateReclaims => {
-                            reclaims.push(reclaim_item);
+                            if !is_cur_account_cached {
+                                // if the current account is cached, then we do not reclaim it
+                                reclaims.push(reclaim_item);
+                            }
                         }
                         UpsertReclaim::PreviousSlotEntryWasCached => {
                             assert!(is_cur_account_cached);
