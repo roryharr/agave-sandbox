@@ -6453,14 +6453,15 @@ fn test_shrink_collect_simple() {
                             });
 
                             let storage = db.get_storage_for_slot(slot5).unwrap();
-                            let unique_accounts = db.get_unique_accounts_from_storage_for_shrink(
-                                &storage,
-                                &ShrinkStats::default(),
-                            );
+                            let mut unique_accounts = db
+                                .get_unique_accounts_from_storage_for_shrink(
+                                    &storage,
+                                    &ShrinkStats::default(),
+                                );
 
                             let shrink_collect = db.shrink_collect::<AliveAccounts<'_>>(
                                 &storage,
-                                &unique_accounts,
+                                &mut unique_accounts,
                                 &ShrinkStats::default(),
                             );
                             let expect_single_opposite_alive_account =
@@ -6567,9 +6568,9 @@ fn test_shrink_collect_simple() {
 fn test_shrink_collect_with_obsolete_accounts() {
     solana_logger::setup();
     let account_count = 100;
-    let pubkeys = (0..account_count)
-        .map(|_| solana_pubkey::new_rand())
-        .collect::<Vec<_>>();
+    let pubkeys: Vec<_> = iter::repeat_with(Pubkey::new_unique)
+        .take(account_count)
+        .collect();
 
     let db = AccountsDb::new_single_for_tests();
     let slot = 5;
@@ -6608,26 +6609,14 @@ fn test_shrink_collect_with_obsolete_accounts() {
         // Mark Some accounts obsolete. These will include zero lamport and non zero lamport accounts
         if i % 5 == 0 {
             // Lookup the pubkey in the database and find the AccountInfo
-            let account_info = *db
-                .accounts_index
-                .get_bin(pubkey)
-                .slot_list_mut(pubkey, |slot_list| slot_list.clone())
-                .unwrap()
-                .iter()
-                .find(|(new_slot, _)| *new_slot == slot)
-                .map(|(_, account_info)| account_info)
-                .unwrap();
-
-            // Create AccountInfo from offset
-            let reclaims = [(
-                slot,
-                AccountInfo::new(
-                    StorageLocation::AppendVec(storage.id(), account_info.offset()),
-                    account_info.is_zero_lamport(),
-                ),
-            )];
-
-            db.remove_dead_accounts(reclaims.iter(), None, true, MarkAccountsObsolete::Yes(slot));
+            db.accounts_index
+                .get_with_and_then(pubkey, None, None, false, |account_info| {
+                    db.remove_dead_accounts(
+                        [account_info].iter(),
+                        None,
+                        MarkAccountsObsolete::Yes(slot),
+                    );
+                });
 
             obsolete_pubkeys.push(*pubkey);
         } else if i % 4 == 0 {
@@ -6641,11 +6630,14 @@ fn test_shrink_collect_with_obsolete_accounts() {
         }
     }
 
-    let unique_accounts =
+    let mut unique_accounts =
         db.get_unique_accounts_from_storage_for_shrink(&storage, &ShrinkStats::default());
 
-    let shrink_collect =
-        db.shrink_collect::<AliveAccounts<'_>>(&storage, &unique_accounts, &ShrinkStats::default());
+    let shrink_collect = db.shrink_collect::<AliveAccounts<'_>>(
+        &storage,
+        &mut unique_accounts,
+        &ShrinkStats::default(),
+    );
 
     assert_eq!(shrink_collect.slot, slot);
 
@@ -6653,8 +6645,7 @@ fn test_shrink_collect_with_obsolete_accounts() {
     assert_eq!(
         shrink_collect
             .pubkeys_to_unref
-            .iter()
-            .cloned()
+            .into_iter()
             .collect::<HashSet<_>>(),
         unref_pubkeys.iter().clone().collect::<HashSet<_>>()
     );
@@ -6664,15 +6655,14 @@ fn test_shrink_collect_with_obsolete_accounts() {
         shrink_collect
             .alive_accounts
             .accounts
-            .iter()
+            .into_iter()
             .map(|account| *account.pubkey())
             .sorted()
             .collect::<Vec<Pubkey>>(),
         regular_pubkeys
-            .iter()
+            .into_iter()
             .filter(|account| !unref_pubkeys.contains(account))
             .filter(|account| !obsolete_pubkeys.contains(account))
-            .cloned()
             .sorted()
             .collect::<Vec<Pubkey>>()
     );
