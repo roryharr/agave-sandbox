@@ -76,7 +76,6 @@ use {
         utils,
         verify_accounts_hash_in_background::VerifyAccountsHashInBackground,
     },
-    ahash::AHashSet,
     crossbeam_channel::{unbounded, Receiver, Sender, TryRecvError},
     dashmap::{DashMap, DashSet},
     log::*,
@@ -3280,7 +3279,7 @@ impl AccountsDb {
     /// return sum of account size for all alive accounts
     fn load_accounts_index_for_shrink<'a, T: ShrinkCollectRefs<'a>>(
         &self,
-        accounts: &[&'a AccountFromStorage],
+        accounts: &'a [AccountFromStorage],
         stats: &ShrinkStats,
         slot_to_shrink: Slot,
     ) -> LoadAccountsIndexForShrink<'a, T> {
@@ -3300,7 +3299,7 @@ impl AccountsDb {
         self.accounts_index.scan(
             accounts.iter().map(|account| account.pubkey()),
             |pubkey, slots_refs, _entry| {
-                let stored_account = accounts[index];
+                let stored_account = &accounts[index];
                 let mut do_populate_accounts_for_shrink = |ref_count, slot_list| {
                     if stored_account.is_zero_lamport()
                         && ref_count == 1
@@ -3458,7 +3457,7 @@ impl AccountsDb {
     pub(crate) fn shrink_collect<'a: 'b, 'b, T: ShrinkCollectRefs<'b>>(
         &self,
         store: &'a AccountStorageEntry,
-        unique_accounts: &'b GetUniqueAccountsResult,
+        unique_accounts: &'b mut GetUniqueAccountsResult,
         stats: &ShrinkStats,
     ) -> ShrinkCollect<'b, T> {
         let slot = store.slot();
@@ -3480,16 +3479,15 @@ impl AccountsDb {
         // Get a set of all obsolete offsets
         // Slot is not needed, as all obsolete accounts can be considered
         // dead for shrink. Zero lamport accounts are not marked obsolete
-        let obsolete_offsets: AHashSet<_> = store
+        let obsolete_offsets: IntSet<_> = store
             .get_obsolete_accounts(None)
-            .iter()
-            .map(|(offset, _)| *offset)
+            .into_iter()
+            .map(|(offset, _)| offset)
             .collect();
 
         // Filter all the accounts that are marked obsolete
-        let filtered_accounts = stored_accounts
-            .iter()
-            .filter(|account| {
+        stored_accounts
+            .retain(|account| {
                 if obsolete_offsets.contains(&account.index_info.offset()) {
                     // If the account is obsolete, it is dead
                     obsolete_accounts_filtered += 1;
@@ -3497,8 +3495,7 @@ impl AccountsDb {
                 } else {
                     true
                 }
-            })
-            .collect::<Vec<&'b AccountFromStorage>>();
+            });
 
         stats
             .accounts_loaded
@@ -3508,7 +3505,7 @@ impl AccountsDb {
             .fetch_add(*num_duplicated_accounts as u64, Ordering::Relaxed);
         let all_are_zero_lamports_collect = Mutex::new(true);
         self.thread_pool_clean.install(|| {
-            filtered_accounts
+            stored_accounts
                 .par_chunks(SHRINK_COLLECT_CHUNK_SIZE)
                 .for_each(|filtered_accounts| {
                     let LoadAccountsIndexForShrink {
@@ -3786,11 +3783,11 @@ impl AccountsDb {
             // It is 'correct' to ignore calls to shrink when a slot is still in the write cache.
             return;
         }
-        let unique_accounts =
+        let mut unique_accounts =
             self.get_unique_accounts_from_storage_for_shrink(&store, &self.shrink_stats);
         debug!("do_shrink_slot_store: slot: {}", slot);
         let shrink_collect =
-            self.shrink_collect::<AliveAccounts<'_>>(&store, &unique_accounts, &self.shrink_stats);
+            self.shrink_collect::<AliveAccounts<'_>>(&store, &mut unique_accounts, &self.shrink_stats);
 
         // This shouldn't happen if alive_bytes is accurate.
         // However, it is possible that the remaining alive bytes could be 0. In that case, the whole slot should be marked dead by clean.
