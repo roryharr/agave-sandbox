@@ -6153,7 +6153,6 @@ fn test_hash_storage_info() {
         let hash3 = hasher.finish();
         assert_ne!(hash2, hash3); // moddate and written size changed
                                   // can't assert hash here - it is a function of mod date
-
         assert!(load);
         let mut hasher = DefaultHasher::new();
         let load = AccountsDb::hash_storage_info(&mut hasher, &storage, slot);
