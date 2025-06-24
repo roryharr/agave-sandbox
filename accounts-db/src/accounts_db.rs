@@ -6020,23 +6020,6 @@ impl AccountsDb {
         account_infos
     }
 
-    fn flush_read_cache<'a>(&self, accounts: &impl StorableAccounts<'a>) {
-        let mut calc_stored_meta_time = Measure::start("calc_stored_meta");
-        let slot = accounts.target_slot();
-        if self.read_only_accounts_cache.can_slot_be_in_cache(slot) {
-            (0..accounts.len()).for_each(|index| {
-                // based on the patterns of how a validator writes accounts, it is almost always the case that there is no read only cache entry
-                // for this pubkey and slot. So, we can give that hint to the `remove` for performance.
-                self.read_only_accounts_cache
-                    .remove_assume_not_present(*accounts.pubkey(index));
-            });
-        }
-        calc_stored_meta_time.stop();
-        self.stats
-            .calc_stored_meta
-            .fetch_add(calc_stored_meta_time.as_us(), Ordering::Relaxed);
-    }
-
     fn report_store_stats(&self) {
         let mut total_count = 0;
         let mut newest_slot = 0;
@@ -7615,11 +7598,6 @@ impl AccountsDb {
                     i64
                 ),
                 (
-                    "calc_stored_meta_us",
-                    self.stats.calc_stored_meta.swap(0, Ordering::Relaxed),
-                    i64
-                ),
-                (
                     "handle_dead_keys_us",
                     self.stats.handle_dead_keys_us.swap(0, Ordering::Relaxed),
                     i64
@@ -7709,8 +7687,16 @@ impl AccountsDb {
     ) -> StoreAccountsTiming {
         let slot = accounts.target_slot();
         let mut store_accounts_time = Measure::start("store_accounts");
+
         // Flush the read cache if neccessary. This will occur during shrink or clean
-        self.flush_read_cache(&accounts);
+        if self.read_only_accounts_cache.can_slot_be_in_cache(slot) {
+            (0..accounts.len()).for_each(|index| {
+                // based on the patterns of how a validator writes accounts, it is almost always the case that there is no read only cache entry
+                // for this pubkey and slot. So, we can give that hint to the `remove` for performance.
+                self.read_only_accounts_cache
+                    .remove_assume_not_present(*accounts.pubkey(index));
+            });
+        }
 
         // Write the accounts to storage
         let infos = self.write_accounts_to_storage(slot, storage, &accounts);
