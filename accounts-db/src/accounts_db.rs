@@ -1213,7 +1213,7 @@ impl AccountStorageEntry {
     }
 
     pub fn has_accounts(&self) -> bool {
-        self.count() > 0
+        self.count() > 0 || !self.obsolete_accounts.read().unwrap().is_empty()
     }
 
     pub fn slot(&self) -> Slot {
@@ -3107,24 +3107,24 @@ impl AccountsDb {
                 reclaims,
                 expected_single_dead_slot,
                 mark_accounts_obsolete,
+                handle_reclaims,
             );
             reclaim_result.1 = reclaimed_offsets;
 
-            let HandleReclaims::ProcessDeadSlots(purge_stats) = handle_reclaims;
-
-            if let Some(expected_single_dead_slot) = expected_single_dead_slot {
-                assert!(dead_slots.len() <= 1);
-                if dead_slots.len() == 1 {
-                    assert!(dead_slots.contains(&expected_single_dead_slot));
+            if let HandleReclaims::ProcessDeadSlots(purge_stats) = handle_reclaims {
+                if let Some(expected_single_dead_slot) = expected_single_dead_slot {
+                    assert!(dead_slots.len() <= 1);
+                    if dead_slots.len() == 1 {
+                        assert!(dead_slots.contains(&expected_single_dead_slot));
+                    }
                 }
+                self.process_dead_slots(
+                    &dead_slots,
+                    Some(&mut reclaim_result.0),
+                    purge_stats,
+                    pubkeys_removed_from_accounts_index,
+                );
             }
-
-            self.process_dead_slots(
-                &dead_slots,
-                Some(&mut reclaim_result.0),
-                purge_stats,
-                pubkeys_removed_from_accounts_index,
-            );
         }
         reclaim_result
     }
@@ -7204,6 +7204,7 @@ impl AccountsDb {
         reclaims: I,
         expected_slot: Option<Slot>,
         mark_accounts_obsolete: MarkAccountsObsolete,
+        handle_reclaims: HandleReclaims,
     ) -> (IntSet<Slot>, SlotOffsets)
     where
         I: Iterator<Item = &'a (Slot, AccountInfo)>,
@@ -7242,7 +7243,10 @@ impl AccountsDb {
                     store.slot(),
                     *slot
                 );
-                if offsets.len() == store.count() {
+
+                if !matches!(handle_reclaims, HandleReclaims::DoNotProcessDeadSlots)
+                    && offsets.len() == store.count()
+                {
                     // all remaining alive accounts in the storage are being removed, so the entire storage/slot is dead
                     store.remove_accounts(store.alive_bytes(), offsets.len());
                     self.dirty_stores.insert(*slot, store);
@@ -8364,6 +8368,30 @@ impl AccountsDb {
                 }
 
                 self.set_storage_count_and_alive_bytes(storage_info, &mut timings);
+                if self.mark_obsolete_accounts {
+                    unique_pubkeys_by_bin.par_iter().for_each(|pubkeys_by_bin| {
+                        // Let's dedup
+                        if pubkeys_by_bin.is_empty() {
+                            return;
+                        }
+
+                        let mut reclaims = Vec::new();
+                        let map = self.accounts_index.get_bin(pubkeys_by_bin.first().unwrap());
+                        pubkeys_by_bin.iter().for_each(|pubkey| {
+                            map.unsert(pubkey, &mut reclaims, max_slot);
+                        });
+
+                        let pubkeys_removed_from_accounts_index = HashSet::default();
+                        // Handle reclaims is definitely the right thing to do
+                        self.handle_reclaims(
+                            (!reclaims.is_empty()).then(|| reclaims.iter()),
+                            None,
+                            &pubkeys_removed_from_accounts_index,
+                            HandleReclaims::DoNotProcessDeadSlots,
+                            MarkAccountsObsolete::Yes(max_slot),
+                        );
+                    });
+                }
             }
             total_time.stop();
             timings.total_time_us = total_time.as_us();
@@ -8618,6 +8646,7 @@ pub enum CalcAccountsHashDataSource {
 #[derive(Debug, Copy, Clone)]
 enum HandleReclaims<'a> {
     ProcessDeadSlots(&'a PurgeStats),
+    DoNotProcessDeadSlots,
 }
 
 /// Specify whether obsolete accounts should be marked or not during reclaims
