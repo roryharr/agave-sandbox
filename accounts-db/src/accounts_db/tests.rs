@@ -4019,7 +4019,12 @@ define_accounts_db_test!(test_alive_bytes, |accounts_db| {
         assert_eq!(account_info.0, slot);
         let reclaims = [account_info];
         num_obsolete_accounts += reclaims.len();
-        accounts_db.remove_dead_accounts(reclaims.iter(), None, MarkAccountsObsolete::Yes(slot));
+        accounts_db.remove_dead_accounts(
+            reclaims.iter(),
+            None,
+            MarkAccountsObsolete::Yes(slot),
+            HandleReclaims::ProcessDeadSlots(&PurgeStats::default()),
+        );
         let after_size = storage0.alive_bytes();
         if storage0.count() == 0 {
             // when `remove_dead_accounts` reaches 0 accounts, all bytes are marked as dead
