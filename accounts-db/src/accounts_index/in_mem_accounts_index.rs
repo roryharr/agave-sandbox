@@ -606,7 +606,7 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
                             Arc::new(AccountMapEntry::new(
                                 vec![],
                                 0,
-                                AccountMapEntryMeta::new_dirty(&self.storage, true)
+                                AccountMapEntryMeta::new_dirty(&self.storage, true),
                             ))
                         };
                         callback(&new_value);
