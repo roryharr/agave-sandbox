@@ -195,12 +195,7 @@ pub trait IsCached {
     fn is_cached(&self) -> bool;
 }
 
-pub trait NewCached {
-    /// return a new version that can be inserted into the cache
-    fn new_cache_item() -> Self;
-}
-
-pub trait IndexValue: 'static + IsCached + IsZeroLamport + DiskIndexValue + NewCached {}
+pub trait IndexValue: 'static + IsCached + IsZeroLamport + DiskIndexValue {}
 
 pub trait DiskIndexValue:
     'static + Clone + Debug + PartialEq + Copy + Default + Sync + Send
@@ -1588,14 +1583,7 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> AccountsIndex<T, U> {
         );
         let map = self.get_bin(pubkey);
 
-        map.upsert(
-            pubkey,
-            new_item,
-            new_slot,
-            Some(old_slot),
-            reclaims,
-            reclaim,
-        );
+        map.upsert(pubkey, new_item, Some(old_slot), reclaims, reclaim);
         self.update_secondary_indexes(pubkey, account, account_indexes);
     }
 
@@ -2010,7 +1998,7 @@ pub mod tests {
         assert!(index.include_key(&pk2));
     }
 
-    const UPSERT_POPULATE_RECLAIMS: UpsertReclaim = UpsertReclaim::IgnoreReclaims;
+    const UPSERT_POPULATE_RECLAIMS: UpsertReclaim = UpsertReclaim::PopulateReclaims;
 
     #[test]
     fn test_insert_no_ancestors() {
@@ -2050,12 +2038,6 @@ pub mod tests {
     impl IsCached for AccountInfoTest {
         fn is_cached(&self) -> bool {
             true
-        }
-    }
-
-    impl NewCached for AccountInfoTest {
-        fn new_cache_item() -> Self {
-            f64::default()
         }
     }
 
@@ -2401,7 +2383,6 @@ pub mod tests {
         r_account_maps.upsert(
             &key,
             new_entry,
-            slot,
             None,
             &mut SlotList::default(),
             UPSERT_POPULATE_RECLAIMS,
@@ -2480,6 +2461,7 @@ pub mod tests {
                 &mut reclaims,
                 UpsertReclaim::PopulateReclaims,
             );
+            assert!(reclaims.is_empty());
             index.upsert(
                 slot,
                 slot,
@@ -2536,8 +2518,8 @@ pub mod tests {
                 &mut reclaims,
                 UpsertReclaim::PopulateReclaims,
             );
-            // cached items should not be reclaimed
-            assert!(reclaims.is_empty());
+            // reclaimed
+            assert!(!reclaims.is_empty());
             reclaims.clear();
             index.upsert(
                 slot,
@@ -2857,7 +2839,7 @@ pub mod tests {
             &AccountSecondaryIndexes::default(),
             false,
             &mut gc,
-            UpsertReclaim::PopulateReclaims,
+            UPSERT_POPULATE_RECLAIMS,
         );
         assert_eq!(gc, vec![(0, true)]);
         index
@@ -3576,19 +3558,6 @@ pub mod tests {
             false
         }
     }
-
-    impl NewCached for u64 {
-        fn new_cache_item() -> Self {
-            u64::default()
-        }
-    }
-
-    impl NewCached for bool {
-        fn new_cache_item() -> Self {
-            bool::default()
-        }
-    }
-
     impl IsZeroLamport for bool {
         fn is_zero_lamport(&self) -> bool {
             false
