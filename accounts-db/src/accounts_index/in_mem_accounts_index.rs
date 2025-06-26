@@ -622,6 +622,9 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
                             ))
                         };
                         callback(&new_value);
+
+                        // Ensure that after callback there is an item in the slot list
+                        assert_ne!(new_value.slot_list.read().unwrap().len(), 0);
                         assert!(new_value.dirty());
                         vacant.insert(new_value);
                         self.stats().inc_mem_count();
