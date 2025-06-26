@@ -539,7 +539,7 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
     /// update 'entry' with 'new_value'
     fn update_slot_list_entry(
         &self,
-        entry: &Arc<AccountMapEntry<T>>,
+        entry: &AccountMapEntry<T>,
         new_value: PreAllocatedAccountMapEntry<T>,
         other_slot: Option<Slot>,
         reclaims: &mut SlotList<T>,
@@ -558,25 +558,22 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
         &self,
         pubkey: &Pubkey,
         new_value: PreAllocatedAccountMapEntry<T>,
-        new_slot: Slot,
         other_slot: Option<Slot>,
         reclaims: &mut SlotList<T>,
         reclaim: UpsertReclaim,
     ) {
-        // try to get it just from memory first using only a read lock
-        self.get_or_create_index_entry_for_pubkey(pubkey, new_slot, |entry| {
+        self.get_or_create_index_entry_for_pubkey(pubkey, |entry| {
             self.update_slot_list_entry(entry, new_value, other_slot, reclaims, reclaim)
         });
     }
 
     /// Gets a new entry for `pubkey` and calls `callback` with it.
-    /// If the entry is not in the index, a placeholder will be created
+    /// If the entry is not in the index, an empty entry will be created
     /// If the entry is in the index, it will be returned as is.
     pub fn get_or_create_index_entry_for_pubkey(
         &self,
         pubkey: &Pubkey,
-        slot: Slot,
-        callback: impl FnOnce(&Arc<AccountMapEntry<T>>),
+        callback: impl FnOnce(&AccountMapEntry<T>),
     ) {
         let mut updated_in_mem = true;
         // try to get it just from memory first using only a read lock
@@ -606,13 +603,11 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
                         } else {
                             // not on disk, so insert new thing
                             self.stats().inc_insert();
-                            PreAllocatedAccountMapEntry::new(
-                                slot,
-                                T::new_cache_item(),
-                                &self.storage,
-                                false,
-                            )
-                            .into_account_map_entry(&self.storage)
+                            Arc::new(AccountMapEntry::new(
+                                vec![],
+                                0,
+                                AccountMapEntryMeta::new_dirty(&self.storage, true)
+                            ))
                         };
                         callback(&new_value);
                         assert!(new_value.dirty());
@@ -723,10 +718,7 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
                     };
                     match reclaim {
                         UpsertReclaim::PopulateReclaims => {
-                            if !is_cur_account_cached {
-                                // if the current account is cached, then we do not reclaim it
-                                reclaims.push(reclaim_item);
-                            }
+                            reclaims.push(reclaim_item);
                         }
                         UpsertReclaim::PreviousSlotEntryWasCached => {
                             assert!(is_cur_account_cached);
