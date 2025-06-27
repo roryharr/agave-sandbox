@@ -3268,7 +3268,6 @@ impl AccountsDb {
         let mut index_scan_returned_none_count = 0;
         let mut all_are_zero_lamports = true;
         let latest_full_snapshot_slot = self.latest_full_snapshot_slot();
-
         self.accounts_index.scan(
             accounts.iter().map(|account| account.pubkey()),
             |pubkey, slots_refs, _entry| {
