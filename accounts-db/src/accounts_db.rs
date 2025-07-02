@@ -3446,7 +3446,6 @@ impl AccountsDb {
         let alive_accounts_collect = Mutex::new(T::with_capacity(len, slot));
         let pubkeys_to_unref_collect = Mutex::new(Vec::with_capacity(len));
         let zero_lamport_single_ref_pubkeys_collect = Mutex::new(Vec::with_capacity(len));
-        let mut obsolete_accounts_filtered = 0;
 
         // Get a set of all obsolete offsets
         // Slot is not needed, as all obsolete accounts can be considered
@@ -3459,9 +3458,7 @@ impl AccountsDb {
 
         // Filter all the accounts that are marked obsolete
         let initial_len = stored_accounts.len();
-        stored_accounts.retain(|account| {
-            !obsolete_offsets.contains(&account.index_info.offset())
-        });
+        stored_accounts.retain(|account| !obsolete_offsets.contains(&account.index_info.offset()));
         let obsolete_accounts_filtered = initial_len - stored_accounts.len();
 
         stats
