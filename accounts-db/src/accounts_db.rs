@@ -3458,15 +3458,11 @@ impl AccountsDb {
             .collect();
 
         // Filter all the accounts that are marked obsolete
+        let initial_len = stored_accounts.len();
         stored_accounts.retain(|account| {
-            if obsolete_offsets.contains(&account.index_info.offset()) {
-                // If the account is obsolete, it is dead
-                obsolete_accounts_filtered += 1;
-                false
-            } else {
-                true
-            }
+            !obsolete_offsets.contains(&account.index_info.offset())
         });
+        let obsolete_accounts_filtered = initial_len - stored_accounts.len();
 
         stats
             .accounts_loaded
