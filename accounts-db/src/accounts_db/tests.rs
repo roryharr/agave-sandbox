@@ -23,6 +23,7 @@ use {
     solana_hash::HASH_BYTES,
     solana_pubkey::PUBKEY_BYTES,
     std::{
+        hash::DefaultHasher,
         iter::{self, FromIterator},
         str::FromStr,
         sync::{atomic::AtomicBool, RwLock},
@@ -6772,6 +6773,7 @@ fn test_shrink_collect_with_obsolete_accounts() {
                         [account_info].iter(),
                         None,
                         MarkAccountsObsolete::Yes(slot),
+                        HandleReclaims::DoNotProcessDeadSlots,
                     );
                 });
 
