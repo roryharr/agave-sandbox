@@ -595,13 +595,14 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
         slot_list: &mut SlotList<T>,
         reclaims: &mut SlotList<T>,
         purge_slot: Slot,
-    ) {
+    ) -> u64 {
         let max_slot = slot_list
             .iter()
             .map(|(slot, _account)| *slot)
             .max()
             .unwrap();
         let max_slot = max_slot.min(purge_slot);
+        let mut count = 0;
 
         (0..slot_list.len())
             .rev() // rev since we delete from the list in some cases
@@ -612,8 +613,10 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
                     let reclaim_item = slot_list[slot_list_index];
                     slot_list.remove(slot_list_index);
                     reclaims.push(reclaim_item);
+                    count += 1;
                 }
             });
+        count
     }
 
     /// update 'entry' with 'new_value'
@@ -624,14 +627,10 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
         max_slot: Slot,
     ) {
         let mut slot_list = entry.slot_list.write().unwrap();
-        let mut new_reclaims = SlotList::<T>::default();
-        Self::unsert_slot_list_entry(&mut slot_list, &mut new_reclaims, max_slot);
+        let count = Self::unsert_slot_list_entry(&mut slot_list, reclaims, max_slot);
 
         // Now decrement until we have reclaimed all the entries
-        for _ in 0..new_reclaims.len() {
-            entry.unref();
-        }
-        reclaims.extend(new_reclaims);
+        entry.unref_by_count(count);
         assert_eq!(
             entry.ref_count(),
             1,
@@ -790,36 +789,21 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
     ) -> usize {
         let mut slot_list = current.slot_list.write().unwrap();
         let (slot, new_entry) = new_value;
-        let mut new_reclaims = SlotList::<T>::default();
-        let ref_change = Self::update_slot_list(
+        let (addref, count) = Self::update_slot_list(
             &mut slot_list,
             slot,
             new_entry,
             other_slot,
-            &mut new_reclaims,
+            reclaims,
             reclaim,
         );
-        if reclaim == UpsertReclaim::PopulateReclaims {
-            // Add ref first
+        if addref {
             current.addref();
+        }
 
-            // Now decrement until we have reclaimed all the entries
-            for _ in 0..new_reclaims.len() {
-                current.unref();
-            }
-            reclaims.extend(new_reclaims);
-            assert_ne!(
-                current.ref_count(),
-                0,
-                "ref count should not be zero after reclaiming entries"
-            );
-        } else if reclaim == UpsertReclaim::PreviousSlotEntryWasCached {
-            // if we are updating a cached entry, then we should not addref as cached entries do not have a ref
-        } else if reclaim == UpsertReclaim::IgnoreReclaims {
-            // If we are ignoring reclaims, then we do not need to change the ref count.
-            if ref_change {
-                current.addref();
-            }
+        if reclaim == UpsertReclaim::PopulateReclaims {
+            // Decrement all the removed entries
+            current.unref_by_count(count);
         }
 
         current.set_dirty(true);
@@ -842,8 +826,9 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
         mut other_slot: Option<Slot>,
         reclaims: &mut SlotList<T>,
         reclaim: UpsertReclaim,
-    ) -> bool {
+    ) -> (bool, u64) {
         let mut addref = !account_info.is_cached();
+        let mut refs_removed = 0;
 
         if other_slot == Some(slot) {
             other_slot = None; // redundant info, so ignore
@@ -880,6 +865,7 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
                     match reclaim {
                         UpsertReclaim::PopulateReclaims => {
                             if !is_cur_account_cached {
+                                refs_removed +=1;
                                 reclaims.push(reclaim_item);
                             }
                         }
@@ -906,6 +892,7 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
                         let reclaim_item = slot_list[slot_list_index];
                         slot_list.remove(slot_list_index);
                         reclaims.push(reclaim_item);
+                        refs_removed +=1;
                     }
                 }
             });
@@ -913,7 +900,7 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
             // if we make it here, we did not find the slot in the list
             slot_list.push((slot, account_info));
         }
-        addref
+        (addref, refs_removed)
     }
 
     // convert from raw data on disk to AccountMapEntry, set to age in future
@@ -2248,7 +2235,7 @@ mod tests {
                     other_slot,
                     &mut reclaims,
                     reclaim
-                ),
+                ).0,
                 "other_slot: {other_slot:?}"
             );
             assert_eq!(slot_list, vec![at_new_slot]);
@@ -2271,7 +2258,7 @@ mod tests {
                 other_slot,
                 &mut reclaims,
                 reclaim
-            ),
+            ).0,
             "other_slot: {other_slot:?}"
         );
         assert_eq!(slot_list, vec![at_new_slot]);
@@ -2291,7 +2278,7 @@ mod tests {
                 other_slot,
                 &mut reclaims,
                 reclaim
-            ),
+            ).0,
             "other_slot: {other_slot:?}"
         );
         assert_eq!(slot_list, vec![at_new_slot]);
@@ -2382,7 +2369,7 @@ mod tests {
                         expected.push((new_slot, info));
                     }
                     assert_eq!(
-                        expected_result, result,
+                        expected_result, result.0,
                         "return value different. other: {other_slot:?}, {expected:?}, {slot_list:?}, original: {original:?}"
                     );
                     // sort for easy comparison
