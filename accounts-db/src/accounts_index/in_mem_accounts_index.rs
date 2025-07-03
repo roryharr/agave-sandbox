@@ -552,18 +552,13 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
     fn update_slot_list_entry(
         &self,
         entry: &AccountMapEntry<T>,
-        new_value: PreAllocatedAccountMapEntry<T>,
+        new_value: (Slot, T),
         other_slot: Option<Slot>,
         reclaims: &mut SlotList<T>,
         reclaim: UpsertReclaim,
     ) {
-        let new_value: (Slot, T) = new_value.into();
-        let mut upsert_cached = new_value.1.is_cached();
-        if Self::lock_and_update_slot_list(entry, new_value, other_slot, reclaims, reclaim) > 1 {
-            // if slot list > 1, then we are going to hold this entry in memory until it gets set back to 1
-            upsert_cached = true;
-        }
-        self.set_age_to_future(entry, upsert_cached);
+        let multiple_ref =  Self::lock_and_update_slot_list(entry, new_value, other_slot, reclaims, reclaim) > 1;
+        self.set_age_to_future(entry, multiple_ref);
     }
 
     /// Insert a cached entry into the accounts index
@@ -649,8 +644,17 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
         reclaims: &mut SlotList<T>,
         reclaim: UpsertReclaim,
     ) {
+        let (slot, account_info) = new_value.into();
+        let is_cached = account_info.is_cached();
+
         self.get_or_create_index_entry_for_pubkey(pubkey, |entry| {
-            self.update_slot_list_entry(entry, new_value, other_slot, reclaims, reclaim)
+            if is_cached {
+                self.insert_cache_entry(entry, slot, account_info);
+            }
+            else {
+                self.update_slot_list_entry(entry, (slot, account_info), other_slot, reclaims, reclaim)
+            }
+
         });
     }
 
