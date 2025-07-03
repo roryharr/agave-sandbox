@@ -3823,7 +3823,7 @@ impl AccountsDb {
         let accounts = [(slot, &shrink_collect.alive_accounts.alive_accounts()[..])];
         let storable_accounts = StorableAccountsBySlot::new(slot, &accounts, self);
         stats_sub.store_accounts_timing =
-            self.store_accounts_frozen(storable_accounts, shrink_in_progress.new_storage());
+            self.store_accounts_frozen(storable_accounts, shrink_in_progress.new_storage(), UpsertReclaim::IgnoreReclaims);
 
         rewrite_elapsed.stop();
         stats_sub.rewrite_elapsed_us = Saturating(rewrite_elapsed.as_us());
@@ -5918,9 +5918,9 @@ impl AccountsDb {
             );
             let (store_accounts_timing_inner, store_accounts_total_inner_us) =
                 if should_flush_f.is_some() {
-                    measure_us!(self.store_accounts_flush((slot, &accounts[..]), &flushed_store,))
+                    measure_us!(self.store_accounts_frozen((slot, &accounts[..]), &flushed_store, UpsertReclaim::PopulateReclaims))
                 } else {
-                    measure_us!(self.store_accounts_frozen((slot, &accounts[..]), &flushed_store,))
+                    measure_us!(self.store_accounts_frozen((slot, &accounts[..]), &flushed_store, UpsertReclaim::IgnoreReclaims))
                 };
             flush_stats.store_accounts_timing = store_accounts_timing_inner;
             flush_stats.store_accounts_total_us = Saturating(store_accounts_total_inner_us);
@@ -7721,6 +7721,7 @@ impl AccountsDb {
         &self,
         accounts: impl StorableAccounts<'a>,
         storage: &Arc<AccountStorageEntry>,
+        reclaim: UpsertReclaim,
     ) -> StoreAccountsTiming {
         let slot = accounts.target_slot();
         let mut store_accounts_time = Measure::start("store_accounts");
@@ -7743,14 +7744,6 @@ impl AccountsDb {
             .fetch_add(store_accounts_time.as_us(), Ordering::Relaxed);
         let mut update_index_time = Measure::start("update_index");
 
-        let reclaim = if matches!(reclaim, StoreReclaims::Ignore) {
-            UpsertReclaim::IgnoreReclaims
-        } else if store_to.is_cached() {
-            UpsertReclaim::PreviousSlotEntryWasCached
-        } else {
-            UpsertReclaim::PopulateReclaims
-        };
-
         // If the cache was flushed, then because `update_index` occurs
         // after the account are stored by the above `store_accounts_to`
         // call and all the accounts are stored, all reads after this point
@@ -7758,7 +7751,7 @@ impl AccountsDb {
         let mut reclaims = self.update_index(
             infos,
             &accounts,
-            UpsertReclaim::IgnoreReclaims,
+            reclaim,
             UpdateIndexThreadSelection::PoolWithThreshold,
             &self.thread_pool_clean,
         );
@@ -7790,18 +7783,13 @@ impl AccountsDb {
         let mut handle_reclaims_elapsed = 0;
         if reclaim == UpsertReclaim::PopulateReclaims {
             let mut handle_reclaims_time = Measure::start("handle_reclaims");
-            let slot = if let StoreTo::Storage(storage) = store_to {
-                storage.slot()
-            } else {
-                unreachable!("reclaim should only be UpsertReclaim if store_to is Storage");
-            };
             self.handle_reclaims(
                 (!reclaims.is_empty()).then(|| reclaims.iter()),
                 None,
                 &HashSet::default(),
                 // this callsite does NOT process dead slots
                 HandleReclaims::ProcessDeadSlots(&PurgeStats::default()),
-                MarkAccountsObsolete::Yes(slot),
+                MarkAccountsObsolete::Yes(storage.slot()),
             );
             handle_reclaims_time.stop();
             handle_reclaims_elapsed = handle_reclaims_time.as_us();
@@ -8023,6 +8011,8 @@ impl AccountsDb {
         if let Some(limit) = limit_load_slot_count_from_snapshot {
             slots.truncate(limit); // get rid of the newer slots and keep just the older
         }
+
+        let max_slot = slots.last().cloned().unwrap_or_default();
         let accounts_data_len = AtomicU64::new(0);
 
         let zero_lamport_pubkeys = Mutex::new(HashSet::new());
