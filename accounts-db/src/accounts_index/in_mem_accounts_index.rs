@@ -721,7 +721,9 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
                     };
                     match reclaim {
                         UpsertReclaim::PopulateReclaims => {
-                            reclaims.push(reclaim_item);
+                            if !is_cur_account_cached {
+                                reclaims.push(reclaim_item);
+                            }
                         }
                         UpsertReclaim::PreviousSlotEntryWasCached => {
                             assert!(is_cur_account_cached);
