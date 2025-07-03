@@ -3685,7 +3685,7 @@ pub mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "decremented ref count when already zero")]
+    #[should_panic(expected = "decremented ref below zero")]
     fn test_illegal_unref() {
         let value = true;
         let key = solana_pubkey::new_rand();
