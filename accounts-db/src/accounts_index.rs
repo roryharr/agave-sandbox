@@ -2518,7 +2518,7 @@ pub mod tests {
                 &mut reclaims,
                 UpsertReclaim::PopulateReclaims,
             );
-            // No reclaims, since the itemr replaced was cached
+            // No reclaims, since the entry replaced was cached
             assert!(reclaims.is_empty());
             index.upsert(
                 slot,
