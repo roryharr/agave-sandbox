@@ -16,7 +16,6 @@ use {
         },
         accounts_partition,
         storable_accounts::StorableAccountsBySlot,
-        accounts_index::UpsertReclaim,
     },
     solana_clock::Slot,
     solana_loader_v3_interface::state::UpgradeableLoaderState,
@@ -356,7 +355,7 @@ impl<'a> SnapshotMinimizer<'a> {
                 StorableAccountsBySlot::new(slot, &accounts, self.accounts_db());
 
             self.accounts_db()
-                .store_accounts_frozen(storable_accounts, new_storage, UpsertReclaim::IgnoreReclaims);
+                .store_accounts_frozen(storable_accounts, new_storage);
 
             new_storage.flush().unwrap();
         }

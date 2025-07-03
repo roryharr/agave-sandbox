@@ -583,14 +583,8 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
     }
 
     /// modifies slot_list
-    /// any entry at 'slot' or slot 'other_slot' is replaced with 'account_info'.
-    /// or, 'account_info' is appended to the slot list if the slot did not exist previously.
-    /// returns true if caller should addref
-    /// conditions when caller should addref:
-    ///   'account_info' does NOT represent a cached storage (the slot is being flushed from the cache)
-    /// AND
-    ///   previous slot_list entry AT 'slot' did not exist (this is the first time this account was modified in this "slot"), or was previously cached (the storage is now being flushed from the cache)
-    /// Note that even if entry DID exist at 'other_slot', the above conditions apply.
+    /// Preserve the newest slot in the slot list and any other slots newer than max_slot
+    /// Returns the number of items removed
     fn unsert_slot_list_entry(
         slot_list: &mut SlotList<T>,
         reclaims: &mut SlotList<T>,
@@ -602,7 +596,7 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
             .max()
             .unwrap();
         let max_slot = max_slot.min(purge_slot);
-        let mut count = 0;
+        let mut reclaim_count = 0;
 
         (0..slot_list.len())
             .rev() // rev since we delete from the list in some cases
@@ -613,28 +607,28 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
                     let reclaim_item = slot_list[slot_list_index];
                     slot_list.remove(slot_list_index);
                     reclaims.push(reclaim_item);
-                    count += 1;
+                    reclaim_count += 1;
                 }
             });
-        count
+        reclaim_count
     }
 
     /// update 'entry' with 'new_value'
     fn unsert_slot_list(
         &self,
-        entry: &Arc<AccountMapEntry<T>>,
+        entry: &AccountMapEntry<T>,
         reclaims: &mut SlotList<T>,
         max_slot: Slot,
     ) {
         let mut slot_list = entry.slot_list.write().unwrap();
-        let count = Self::unsert_slot_list_entry(&mut slot_list, reclaims, max_slot);
+        let removed_count = Self::unsert_slot_list_entry(&mut slot_list, reclaims, max_slot);
 
-        // Now decrement until we have reclaimed all the entries
-        entry.unref_by_count(count);
+        // Remove all entries
+        entry.unref_by_count(removed_count);
         assert_eq!(
             entry.ref_count(),
             1,
-            "ref count should not be zero after reclaiming entries"
+            "ref count should be one after cleaning all entries"
         );
 
         entry.set_dirty(true);
@@ -642,48 +636,9 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
     }
 
     pub fn unsert(&self, pubkey: &Pubkey, reclaims: &mut SlotList<T>, max_slot: Slot) {
-        let mut updated_in_mem = true;
-        // try to get it just from memory first using only a read lock
-        self.get_only_in_mem(pubkey, false, |entry| {
-            if let Some(entry) = entry {
-                self.unsert_slot_list(entry, reclaims, max_slot);
-            } else {
-                let mut m = Measure::start("entry");
-                let mut map = self.map_internal.write().unwrap();
-                let entry = map.entry(*pubkey);
-                m.stop();
-                let found = matches!(entry, Entry::Occupied(_));
-                match entry {
-                    Entry::Occupied(mut occupied) => {
-                        let current = occupied.get_mut();
-                        self.unsert_slot_list(current, reclaims, max_slot);
-                    }
-                    Entry::Vacant(vacant) => {
-                        // not in cache, look on disk
-                        updated_in_mem = false;
-
-                        // go to in-mem cache first
-                        let disk_entry = self.load_account_entry_from_disk(vacant.key());
-                        let new_value = if let Some(disk_entry) = disk_entry {
-                            // on disk, so merge new_value with what was on disk
-                            self.unsert_slot_list(&disk_entry, reclaims, max_slot);
-                            disk_entry
-                        } else {
-                            panic!();
-                        };
-                        assert!(new_value.dirty());
-                        vacant.insert(new_value);
-                        self.stats().inc_mem_count();
-                    }
-                };
-
-                drop(map);
-                self.update_entry_stats(m, found);
-            };
-        });
-        if updated_in_mem {
-            Self::update_stat(&self.stats().updates_in_mem, 1);
-        }
+        self.get_or_create_index_entry_for_pubkey(pubkey, |entry| {
+            self.unsert_slot_list(entry, reclaims, max_slot);
+        })
     }
 
     pub fn upsert(
