@@ -721,6 +721,9 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
                     };
                     match reclaim {
                         UpsertReclaim::PopulateReclaims => {
+                            // Reclaims are used to reclaim other versions of accounts when they are
+                            // rewritten elsewhere. Cached accounts are not in storage, so there is
+                            // no reason to store the reclaim.
                             if !is_cur_account_cached {
                                 reclaims.push(reclaim_item);
                             }
