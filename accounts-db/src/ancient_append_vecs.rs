@@ -493,16 +493,6 @@ impl AccountsDb {
             return;
         }
 
-        accounts_to_combine
-            .accounts_to_combine
-            .iter()
-            .for_each(|combine| {
-                self.unref_shrunk_dead_accounts(
-                    combine.pubkeys_to_unref.iter().cloned(),
-                    combine.slot,
-                );
-            });
-
         let write_ancient_accounts = self.write_packed_storages(&accounts_to_combine, pack);
 
         self.finish_combine_ancient_slots_packed_internal(
@@ -3689,6 +3679,7 @@ pub mod tests {
         let db = AccountsDb::new_single_for_tests();
         let empty_account = AccountSharedData::default();
         for count in 0..3 {
+            println!("Count is {count}");
             let pubkeys_to_unref = (0..count)
                 .map(|_| solana_pubkey::new_rand())
                 .collect::<Vec<_>>();
@@ -3711,7 +3702,7 @@ pub mod tests {
                     );
                 }
                 expected_ref_counts_before_unref.insert(*k, 2);
-                expected_ref_counts_after_unref.insert(*k, 1);
+                expected_ref_counts_after_unref.insert(*k, 2);
             });
 
             let shrink_collect = ShrinkCollect::<ShrinkCollectAliveSeparatedByRefs> {
@@ -3747,9 +3738,6 @@ pub mod tests {
                 ScanFilter::All,
             );
             assert!(expected_ref_counts_before_unref.is_empty());
-
-            // unref ref_counts
-            db.unref_shrunk_dead_accounts(shrink_collect.pubkeys_to_unref.iter().cloned(), 0);
 
             // Assert ref_counts after unref
             db.accounts_index.scan(

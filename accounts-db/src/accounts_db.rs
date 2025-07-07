@@ -3652,51 +3652,6 @@ impl AccountsDb {
             .fetch_add(time.as_us(), Ordering::Relaxed);
     }
 
-    pub(crate) fn unref_shrunk_dead_accounts<'a>(
-        &self,
-        pubkeys: impl Iterator<Item = &'a Pubkey>,
-        slot: Slot,
-    ) {
-        self.accounts_index.scan(
-            pubkeys,
-            |pubkey, slot_refs, _entry| {
-                match slot_refs {
-                    Some((slot_list, ref_count)) => {
-                        // Let's handle the special case - after unref, the result is a single ref zero lamport account.
-                        if slot_list.len() == 1 && ref_count == 2 {
-                            if let Some((slot_alive, acct_info)) = slot_list.first() {
-                                if acct_info.is_zero_lamport() && !acct_info.is_cached() {
-                                    self.zero_lamport_single_ref_found(
-                                        *slot_alive,
-                                        acct_info.offset(),
-                                    );
-                                }
-                            }
-                        }
-                    }
-                    None => {
-                        // We also expect that the accounts index must contain an
-                        // entry for `pubkey`. Log a warning for now. In future,
-                        // we will panic when this happens.
-                        warn!(
-                        "pubkey {pubkey} in slot {slot} was NOT found in accounts index during \
-                         shrink"
-                    );
-                        datapoint_warn!(
-                            "accounts_db-shink_pubkey_missing_from_index",
-                            ("store_slot", slot, i64),
-                            ("pubkey", pubkey.to_string(), String),
-                        );
-                    }
-                }
-                AccountsIndexScanResult::Unref
-            },
-            None,
-            false,
-            ScanFilter::All,
-        );
-    }
-
     /// This function handles the case when zero lamport single ref accounts are found during shrink.
     pub(crate) fn zero_lamport_single_ref_found(&self, slot: Slot, offset: Offset) {
         // This function can be called when a zero lamport single ref account is
@@ -3799,7 +3754,7 @@ impl AccountsDb {
             return;
         }
 
-        self.unref_shrunk_dead_accounts(shrink_collect.pubkeys_to_unref.iter().cloned(), slot);
+        //self.unref_shrunk_dead_accounts(shrink_collect.pubkeys_to_unref.iter().cloned(), slot);
 
         let total_accounts_after_shrink = shrink_collect.alive_accounts.len();
         debug!(
