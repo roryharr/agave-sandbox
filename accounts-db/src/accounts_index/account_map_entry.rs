@@ -55,10 +55,7 @@ impl<T: IndexValue> AccountMapEntry<T> {
     pub fn unref_by_count(&self, count: u64) -> RefCount {
         let previous = self.ref_count.fetch_sub(count, Ordering::Release);
         self.set_dirty(true);
-        assert!(
-            previous >= count,
-            "decremented ref below zero: {self:?}"
-        );
+        assert!(previous >= count, "decremented ref below zero: {self:?}");
         previous
     }
 

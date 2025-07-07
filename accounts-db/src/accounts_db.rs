@@ -7762,7 +7762,6 @@ impl AccountsDb {
             .store_num_accounts
             .fetch_add(accounts.len() as u64, Ordering::Relaxed);
 
-
         StoreAccountsTiming {
             store_accounts_elapsed: store_accounts_time.as_us(),
             update_index_elapsed: update_index_time.as_us(),

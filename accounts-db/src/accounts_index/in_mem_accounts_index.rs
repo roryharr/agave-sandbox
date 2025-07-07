@@ -557,7 +557,8 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
         reclaims: &mut SlotList<T>,
         reclaim: UpsertReclaim,
     ) {
-        let multiple_ref =  Self::lock_and_update_slot_list(entry, new_value, other_slot, reclaims, reclaim) > 1;
+        let multiple_ref =
+            Self::lock_and_update_slot_list(entry, new_value, other_slot, reclaims, reclaim) > 1;
         self.set_age_to_future(entry, multiple_ref);
     }
 
@@ -650,11 +651,15 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
         self.get_or_create_index_entry_for_pubkey(pubkey, |entry| {
             if is_cached {
                 self.insert_cache_entry(entry, slot, account_info);
+            } else {
+                self.update_slot_list_entry(
+                    entry,
+                    (slot, account_info),
+                    other_slot,
+                    reclaims,
+                    reclaim,
+                )
             }
-            else {
-                self.update_slot_list_entry(entry, (slot, account_info), other_slot, reclaims, reclaim)
-            }
-
         });
     }
 
@@ -824,7 +829,7 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
                     match reclaim {
                         UpsertReclaim::PopulateReclaims => {
                             if !is_cur_account_cached {
-                                refs_removed +=1;
+                                refs_removed += 1;
                                 reclaims.push(reclaim_item);
                             }
                         }
@@ -851,7 +856,7 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
                         let reclaim_item = slot_list[slot_list_index];
                         slot_list.remove(slot_list_index);
                         reclaims.push(reclaim_item);
-                        refs_removed +=1;
+                        refs_removed += 1;
                     }
                 }
             });
@@ -2194,7 +2199,8 @@ mod tests {
                     other_slot,
                     &mut reclaims,
                     reclaim
-                ).0,
+                )
+                .0,
                 "other_slot: {other_slot:?}"
             );
             assert_eq!(slot_list, vec![at_new_slot]);
@@ -2217,7 +2223,8 @@ mod tests {
                 other_slot,
                 &mut reclaims,
                 reclaim
-            ).0,
+            )
+            .0,
             "other_slot: {other_slot:?}"
         );
         assert_eq!(slot_list, vec![at_new_slot]);
@@ -2237,7 +2244,8 @@ mod tests {
                 other_slot,
                 &mut reclaims,
                 reclaim
-            ).0,
+            )
+            .0,
             "other_slot: {other_slot:?}"
         );
         assert_eq!(slot_list, vec![at_new_slot]);
