@@ -394,6 +394,9 @@ mod serde_snapshot_tests {
             if mark_obsolete_accounts == MarkObsoleteAccounts::Enabled {
                 daccounts.check_storage(0, 78, 78);
                 daccounts.check_storage(1, 11, 11);
+            } else if daccounts.mark_obsolete_accounts == MarkObsoleteAccounts::Enabled {
+                daccounts.check_storage(0, 78, 100);
+                daccounts.check_storage(1, 11, 21);
             } else {
                 daccounts.check_storage(0, 100, 100);
                 daccounts.check_storage(1, 21, 21);
