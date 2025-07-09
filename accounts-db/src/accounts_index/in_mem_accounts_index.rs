@@ -555,10 +555,10 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
     }
 
     /// Insert a cached entry into the accounts index
-    /// Code is required just for test for now, but will be used in future PRs
-    /// Allowing dead code at this time rather than moving it from test to normal code later
-    #[allow(dead_code)]
-    fn insert_cache_entry(&self, entry: &AccountMapEntry<T>, slot: Slot, account_info: T) {
+    /// If the entry is already present, just mark dirty and set the age to the future
+    /// Code is required just for test for now, but will be used in future PRs so not putting in the test area
+    #[cfg(test)]
+    fn cache_entry_at_slot(&self, entry: &AccountMapEntry<T>, slot: Slot, account_info: T) {
         let mut slot_list = entry.slot_list.write().unwrap();
         if !slot_list
             .iter()
@@ -583,9 +583,9 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
         });
     }
 
-    /// Gets a new entry for `pubkey` and calls `callback` with it.
+    /// Gets an entry for `pubkey` and calls `callback` with it.
     /// If the entry is not in the index, an empty entry will be created
-    /// If the entry is in the index, it will be returned as is.
+    /// If the entry is in the index, it will be returned as is
     pub fn get_or_create_index_entry_for_pubkey(
         &self,
         pubkey: &Pubkey,
@@ -1686,7 +1686,7 @@ mod tests {
             assert!(entry.slot_list.read().unwrap().is_empty());
             assert_eq!(entry.ref_count(), 0);
             assert!(entry.dirty());
-            accounts_index.insert_cache_entry(entry, slot, 0);
+            accounts_index.cache_entry_at_slot(entry, slot, 0);
             callback_called = true;
         });
 
@@ -1743,12 +1743,19 @@ mod tests {
             .try_write(&pubkey, disk_entry)
             .unwrap();
 
+        // Ensure the entry is not found in meory
+        let mut found = false;
+        accounts_index.get_only_in_mem(&pubkey, false, |entry| {
+            found = entry.is_some();
+        });
+        assert!(!found);
+
         let mut callback_called = false;
         accounts_index.get_or_create_index_entry_for_pubkey(&pubkey, |entry| {
             assert_eq!(entry.slot_list.read().unwrap().len(), 1);
             assert_eq!(entry.ref_count(), 1);
             assert!(!entry.dirty()); // Entry loaded from disk should not be dirty
-            accounts_index.insert_cache_entry(entry, slot, 0);
+            accounts_index.cache_entry_at_slot(entry, slot, 0);
             callback_called = true;
         });
 
