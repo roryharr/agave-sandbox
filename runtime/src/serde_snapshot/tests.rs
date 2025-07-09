@@ -375,8 +375,16 @@ mod serde_snapshot_tests {
             // Don't check the first 35 accounts which have not been modified on slot 0
             daccounts.check_accounts(&pubkeys[35..], 0, 65, 37);
             daccounts.check_accounts(&pubkeys1, 1, 10, 1);
-            daccounts.check_storage(0, 100, 100);
-            daccounts.check_storage(1, 21, 21);
+
+            // With accounts marked obsolete in the storages, storages are shrunk when saved/restored
+            if daccounts.mark_obsolete_accounts {
+                daccounts.check_storage(0, 78, 78);
+                daccounts.check_storage(1, 11, 11);
+            } else {
+                daccounts.check_storage(0, 100, 100);
+                daccounts.check_storage(1, 21, 21);
+            }
+
             daccounts.check_storage(2, 31, 31);
 
             assert_eq!(
@@ -486,8 +494,16 @@ mod serde_snapshot_tests {
         accounts.print_accounts_stats("post_f");
 
         accounts.assert_load_account(current_slot, pubkey, some_lamport);
-        accounts.assert_load_account(current_slot, purged_pubkey1, 0);
-        accounts.assert_load_account(current_slot, purged_pubkey2, 0);
+
+        // With accounts marked obsolete in the storages, they will be entirely purged when the
+        // accounts are deserialized and serialized.
+        if accounts.mark_obsolete_accounts {
+            accounts.assert_not_load_account(current_slot, purged_pubkey1);
+            accounts.assert_not_load_account(current_slot, purged_pubkey2);
+        } else {
+            accounts.assert_load_account(current_slot, purged_pubkey1, 0);
+            accounts.assert_load_account(current_slot, purged_pubkey2, 0);
+        }
         accounts.assert_load_account(current_slot, dummy_pubkey, dummy_lamport);
 
         let calculated_capitalization =
@@ -584,8 +600,15 @@ mod serde_snapshot_tests {
         accounts.print_count_and_status("after purge zero");
 
         accounts.assert_load_account(current_slot, pubkey, old_lamport);
-        accounts.assert_load_account(current_slot, purged_pubkey1, 0);
-        accounts.assert_load_account(current_slot, purged_pubkey2, 0);
+        // With accounts marked obsolete in the storages, accounts will be marked
+        // obsolete when deserializing
+        if accounts.mark_obsolete_accounts {
+            accounts.assert_not_load_account(current_slot, purged_pubkey1);
+            accounts.assert_not_load_account(current_slot, purged_pubkey2);
+        } else {
+            accounts.assert_load_account(current_slot, purged_pubkey1, 0);
+            accounts.assert_load_account(current_slot, purged_pubkey2, 0);
+        }
     }
 
     #[test_case(StorageAccess::Mmap)]
@@ -606,6 +629,7 @@ mod serde_snapshot_tests {
 
         let pubkey1 = solana_pubkey::new_rand();
         let pubkey2 = solana_pubkey::new_rand();
+        let pubkey3 = solana_pubkey::new_rand();
         let dummy_pubkey = solana_pubkey::new_rand();
 
         let mut current_slot = 0;
@@ -641,6 +665,7 @@ mod serde_snapshot_tests {
         current_slot += 1;
         accounts.assert_ref_count(&pubkey1, 3);
         accounts.store_for_tests((current_slot, [(&pubkey1, &zero_lamport_account)].as_slice()));
+        accounts.store_for_tests((current_slot, [(&pubkey3, &account2)].as_slice()));
         accounts.add_root_and_flush_write_cache(current_slot);
         // had to be a root to flush, but clean won't work as this test expects if it is a root
         // so, remove the root from alive_roots, then restore it after clean
@@ -701,6 +726,9 @@ mod serde_snapshot_tests {
 
         // 2nd clean needed to clean-up pubkey1
         accounts.clean_accounts_for_tests();
+
+        // Shrink all slots to remove the unused pubkey
+        accounts.shrink_all_slots(false, &EpochSchedule::default(), None);
 
         // Ensure pubkey2 is cleaned from the index finally
         accounts.assert_not_load_account(current_slot, pubkey1);
