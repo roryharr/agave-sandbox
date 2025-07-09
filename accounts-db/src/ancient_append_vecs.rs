@@ -11,7 +11,6 @@ use {
             stats::{ShrinkAncientStats, ShrinkStatsSub},
             AccountFromStorage, AccountStorageEntry, AccountsDb, AliveAccounts,
             GetUniqueAccountsResult, ShrinkCollect, ShrinkCollectAliveSeparatedByRefs,
-            UpdateIndexThreadSelection,
         },
         active_stats::ActiveStatItem,
         storable_accounts::{StorableAccounts, StorableAccountsBySlot},
@@ -545,11 +544,9 @@ impl AccountsDb {
         let target_slot = accounts_to_write.target_slot();
         let (shrink_in_progress, create_and_insert_store_elapsed_us) =
             measure_us!(self.get_store_for_shrink(target_slot, bytes));
-        let (store_accounts_timing, rewrite_elapsed_us) = measure_us!(self.store_accounts_frozen(
-            accounts_to_write,
-            shrink_in_progress.new_storage(),
-            UpdateIndexThreadSelection::PoolWithThreshold
-        ));
+        let (store_accounts_timing, rewrite_elapsed_us) = measure_us!(
+            self.store_accounts_frozen(accounts_to_write, shrink_in_progress.new_storage(),)
+        );
 
         write_ancient_accounts.metrics.accumulate(&ShrinkStatsSub {
             store_accounts_timing,
