@@ -297,7 +297,7 @@ pub const ACCOUNTS_DB_CONFIG_FOR_TESTING: AccountsDbConfig = AccountsDbConfig {
     partitioned_epoch_rewards_config: DEFAULT_PARTITIONED_EPOCH_REWARDS_CONFIG,
     storage_access: StorageAccess::File,
     scan_filter_for_shrinking: ScanFilter::OnlyAbnormalTest,
-    mark_obsolete_accounts: false,
+    mark_obsolete_accounts: true,
     num_background_threads: None,
     num_foreground_threads: None,
     num_hash_threads: None,
@@ -319,7 +319,7 @@ pub const ACCOUNTS_DB_CONFIG_FOR_BENCHMARKS: AccountsDbConfig = AccountsDbConfig
     partitioned_epoch_rewards_config: DEFAULT_PARTITIONED_EPOCH_REWARDS_CONFIG,
     storage_access: StorageAccess::File,
     scan_filter_for_shrinking: ScanFilter::OnlyAbnormal,
-    mark_obsolete_accounts: false,
+    mark_obsolete_accounts: true,
     num_background_threads: None,
     num_foreground_threads: None,
     num_hash_threads: None,
@@ -2787,11 +2787,16 @@ impl AccountsDb {
             return;
         }
         let mut clean_dead_slots = Measure::start("reclaims::clean_dead_slots");
-        self.clean_stored_dead_slots(
-            dead_slots,
-            purged_account_slots,
-            pubkeys_removed_from_accounts_index,
-        );
+
+        if !self.mark_obsolete_accounts {
+            self.clean_stored_dead_slots(
+                dead_slots,
+                purged_account_slots,
+                pubkeys_removed_from_accounts_index,
+            );
+        } else {
+            self.remove_dead_slots_metadata(dead_slots.iter());
+        }
         clean_dead_slots.stop();
 
         let mut purge_removed_slots = Measure::start("reclaims::purge_removed_slots");
@@ -5289,10 +5294,17 @@ impl AccountsDb {
                 flush_stats.num_bytes_flushed.0,
                 "flush_slot_cache",
             );
+            let reclaim_method = if self.mark_obsolete_accounts && should_flush_f.is_some() {
+                UpsertReclaim::ReclaimOldSlots
+            } else {
+                UpsertReclaim::IgnoreReclaims
+            };
+
             let (store_accounts_timing_inner, store_accounts_total_inner_us) = measure_us!(self
-                .store_accounts_frozen(
+                ._store_accounts_frozen(
                     (slot, &accounts[..]),
                     &flushed_store,
+                    reclaim_method,
                     UpdateIndexThreadSelection::PoolWithThreshold,
                 ));
             flush_stats.store_accounts_timing = store_accounts_timing_inner;
@@ -6136,10 +6148,6 @@ impl AccountsDb {
         let slot = accounts.target_slot();
         let mut store_accounts_time = Measure::start("store_accounts");
 
-        // Other values for UpsertReclaim are not supported yet
-        #[cfg(not(test))]
-        assert_eq!(reclaim_handling, UpsertReclaim::IgnoreReclaims);
-
         // Flush the read cache if necessary. This will occur during shrink or clean
         if self.read_only_accounts_cache.can_slot_be_in_cache(slot) {
             (0..accounts.len()).for_each(|index| {
@@ -6181,6 +6189,8 @@ impl AccountsDb {
             .store_num_accounts
             .fetch_add(accounts.len() as u64, Ordering::Relaxed);
 
+        // If there are any reclaims then they should be handled. Reclaims effect
+        // all storages, and may result in the removal of dead storages.
         // If there are any reclaims then they should be handled. Reclaims affect
         // all storages, and may result in the removal of dead storages.
         let mut handle_reclaims_elapsed = 0;
@@ -6192,7 +6202,7 @@ impl AccountsDb {
                 None,
                 &HashSet::default(),
                 HandleReclaims::ProcessDeadSlots(&purge_stats),
-                MarkAccountsObsolete::No,
+                MarkAccountsObsolete::Yes(slot),
             );
             handle_reclaims_time.stop();
             handle_reclaims_elapsed = handle_reclaims_time.as_us();
