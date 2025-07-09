@@ -394,6 +394,9 @@ mod serde_snapshot_tests {
             if mark_obsolete_accounts == MarkObsoleteAccounts::Enabled {
                 daccounts.check_storage(0, 78, 78);
                 daccounts.check_storage(1, 11, 11);
+            } else if daccounts.mark_obsolete_accounts == MarkObsoleteAccounts::Enabled {
+                daccounts.check_storage(0, 78, 100);
+                daccounts.check_storage(1, 11, 21);
             } else {
                 daccounts.check_storage(0, 100, 100);
                 daccounts.check_storage(1, 21, 21);
@@ -523,6 +526,7 @@ mod serde_snapshot_tests {
     fn test_accounts_purge_chained_purge_before_snapshot_restore(storage_access: StorageAccess) {
         solana_logger::setup();
         with_chained_zero_lamport_accounts(|accounts, current_slot| {
+            accounts.set_latest_full_snapshot_slot(0);
             accounts.clean_accounts_for_tests();
             reconstruct_accounts_db_via_serialization(&accounts, current_slot, storage_access)
         });
