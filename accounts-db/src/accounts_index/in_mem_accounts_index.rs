@@ -585,7 +585,9 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
 
     /// Gets an entry for `pubkey` and calls `callback` with it.
     /// If the entry is not in the index, an empty entry will be created
-    /// If the entry is in the index, it will be returned as is
+    //// Gets an entry for `pubkey` and passes it to `callback`.
+    /// If the entry is not in the index, an empty entry will be created and passed to `callback`.
+    /// If the entry is in the index, it will be passed to `callback` as is.
     pub fn get_or_create_index_entry_for_pubkey(
         &self,
         pubkey: &Pubkey,
