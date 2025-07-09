@@ -342,6 +342,7 @@ pub const ACCOUNTS_DB_CONFIG_FOR_TESTING: AccountsDbConfig = AccountsDbConfig {
     partitioned_epoch_rewards_config: DEFAULT_PARTITIONED_EPOCH_REWARDS_CONFIG,
     storage_access: StorageAccess::File,
     scan_filter_for_shrinking: ScanFilter::OnlyAbnormalTest,
+    mark_obsolete_accounts: true,
     num_clean_threads: None,
     num_foreground_threads: None,
     num_hash_threads: None,
@@ -365,6 +366,7 @@ pub const ACCOUNTS_DB_CONFIG_FOR_BENCHMARKS: AccountsDbConfig = AccountsDbConfig
     partitioned_epoch_rewards_config: DEFAULT_PARTITIONED_EPOCH_REWARDS_CONFIG,
     storage_access: StorageAccess::File,
     scan_filter_for_shrinking: ScanFilter::OnlyAbnormal,
+    mark_obsolete_accounts: false,
     num_clean_threads: None,
     num_foreground_threads: None,
     num_hash_threads: None,
@@ -492,6 +494,7 @@ pub struct AccountsDbConfig {
     pub partitioned_epoch_rewards_config: PartitionedEpochRewardsConfig,
     pub storage_access: StorageAccess,
     pub scan_filter_for_shrinking: ScanFilter,
+    pub mark_obsolete_accounts: bool,
     /// Number of threads for background cleaning operations (`thread_pool_clean')
     pub num_clean_threads: Option<NonZeroUsize>,
     /// Number of threads for foreground operations (`thread_pool`)
@@ -1450,6 +1453,11 @@ pub struct AccountsDb {
     /// Members are Slot and capacity. If capacity is smaller, then
     /// that means the storage was already shrunk.
     pub(crate) best_ancient_slots_to_shrink: RwLock<VecDeque<(Slot, u64)>>,
+
+    /// Flag to indicate if the experimental obsolete account tracking feature is enabled
+    /// This feature tracks obsolete accounts in the account storage entry allowing
+    /// for storage entries and the index to be cleaned more aggressively
+    pub mark_obsolete_accounts: bool,
 }
 
 /// results from 'split_storages_ancient'
@@ -1883,6 +1891,7 @@ impl AccountsDb {
             accounts_file_provider: AccountsFileProvider::default(),
             latest_full_snapshot_slot: SeqLock::new(None),
             best_ancient_slots_to_shrink: RwLock::default(),
+            mark_obsolete_accounts: accounts_db_config.mark_obsolete_accounts,
         };
 
         {
@@ -6118,11 +6127,15 @@ impl AccountsDb {
         let mut lt_hash = storages
             .par_iter()
             .fold(LtHash::identity, |mut accum, storage| {
+                let obsolete_accounts = storage.get_obsolete_accounts(None);
                 storage
                     .accounts
-                    .scan_accounts(|_offset, account| {
-                        let account_lt_hash = Self::lt_hash_account(&account, account.pubkey());
-                        accum.mix_in(&account_lt_hash.0);
+                    .scan_accounts(|offset, account| {
+                        // Obsolete accounts were not included in the original hash, so they should not be added here
+                        if !obsolete_accounts.contains(&(offset, account.data.len())) {
+                            let account_lt_hash = Self::lt_hash_account(&account, account.pubkey());
+                            accum.mix_in(&account_lt_hash.0);
+                        }
                     })
                     .expect("must scan accounts storage");
                 accum
@@ -7790,7 +7803,7 @@ impl AccountsDb {
         &self,
         limit_load_slot_count_from_snapshot: Option<usize>,
         verify: bool,
-        should_calculate_duplicates_lt_hash: bool,
+        populate_duplicates_lt_hash: bool,
     ) -> IndexGenerationInfo {
         let mut total_time = Measure::start("generate_index");
         let mut slots = self.storage.all_slots();
@@ -7799,6 +7812,12 @@ impl AccountsDb {
             slots.truncate(limit); // get rid of the newer slots and keep just the older
         }
         let accounts_data_len = AtomicU64::new(0);
+        // With obsolete accounts, the duplicates lt_hash should NOT be created, but current
+        // code uses the presence of a duplicates lt_hash to determine whether the snapshot
+        // used a merkle hash or a lattice hash. This should be refactored when merkle
+        // hash support is disabled
+        let should_calculate_duplicates_lt_hash =
+            populate_duplicates_lt_hash && !self.mark_obsolete_accounts;
 
         let zero_lamport_pubkeys = Mutex::new(HashSet::new());
         let mut outer_duplicates_lt_hash = None;
@@ -8144,6 +8163,38 @@ impl AccountsDb {
                 }
 
                 self.set_storage_count_and_alive_bytes(storage_info, &mut timings);
+                if self.mark_obsolete_accounts {
+                    // Mark all reclaims at max_slot. This is safe because the only snapshot paths care about
+                    // this information. Since this account was just restored from the previous snapshot and
+                    // it is known that it was already obsolete at that time, it must hold true that it will
+                    // still be obsolete if a newer snapshot is created, since a newer snapshot will always
+                    // be performed on a slot greater than the current slot
+                    let max_slot = slots.last().cloned().unwrap_or_default();
+                    unique_pubkeys_by_bin.par_iter().for_each(|pubkeys_by_bin| {
+                        let reclaims = self.accounts_index.clean_and_unref_rooted_entries_by_bin(
+                            pubkeys_by_bin,
+                            |slot, account_info| {
+                                // Since the unref makes every account a single ref account, all
+                                // zero lamport accounts should be tracked as zero_lamport_single_ref
+                                if account_info.is_zero_lamport() {
+                                    self.zero_lamport_single_ref_found(slot, account_info.offset());
+                                }
+                            },
+                        );
+
+                        let pubkeys_removed_from_accounts_index: PubkeysRemovedFromAccountsIndex =
+                            pubkeys_by_bin.iter().cloned().collect();
+                        let stats = PurgeStats::default();
+                        self.handle_reclaims(
+                            (!reclaims.is_empty()).then(|| reclaims.iter()),
+                            None,
+                            &pubkeys_removed_from_accounts_index,
+                            HandleReclaims::ProcessDeadSlots(&stats),
+                            MarkAccountsObsolete::Yes(max_slot),
+                        );
+                        stats.report("reclaim_duplicates_index_generation", None);
+                    });
+                }
             }
             total_time.stop();
             timings.total_time_us = total_time.as_us();
@@ -8152,11 +8203,12 @@ impl AccountsDb {
 
         self.accounts_index.log_secondary_indexes();
 
-        // The duplicates lt hash must be Some if should_calculate_duplicates_lt_hash is true.
-        // But, if there were no duplicates, then we'd never set outer_duplicates_lt_hash to Some!
-        // So do one last check here to ensure outer_duplicates_lt_hash is Some if we're supposed
+        // The duplicates lt hash must be Some if populate_duplicates_lt_hash is true.
+        // But, if there were no duplicates or obsolete accounts marking removed all
+        // duplicates, then we'd never set outer_duplicates_lt_hash to Some! So do one
+        // last check here to ensure outer_duplicates_lt_hash is Some if we're supposed
         // to calculate the duplicates lt hash.
-        if should_calculate_duplicates_lt_hash && outer_duplicates_lt_hash.is_none() {
+        if populate_duplicates_lt_hash && outer_duplicates_lt_hash.is_none() {
             outer_duplicates_lt_hash = Some(Box::new(DuplicatesLtHash::default()));
         }
 
