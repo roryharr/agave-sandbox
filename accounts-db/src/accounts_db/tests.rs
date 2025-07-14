@@ -1133,6 +1133,61 @@ fn test_clean_zero_lamport_and_dead_slot() {
 }
 
 #[test]
+fn test_clean_dead_slot_with_obsolete_accounts() {
+    solana_logger::setup();
+
+    // This test is triggering a scenario in reclaim_accounts where the entire slot is reclaimed
+    // When an entire slot is reclaimed, it normally unrefs the pubkeys, while when individual
+    // accounts are reclaimed it does not unref the pubkeys
+
+    // Obsolete accounts are already unreffed so they should not be unreffed again
+
+    let accounts = AccountsDb::new_single_for_tests();
+    let pubkey = solana_pubkey::new_rand();
+    let account = AccountSharedData::new(1, 1, AccountSharedData::default().owner());
+
+    // Store account 1 in slot 0
+    accounts.store_for_tests(0, &[(&pubkey, &account)]);
+
+    // Update account 1 as in slot 1
+    accounts.store_for_tests(1, &[(&pubkey, &account)]);
+
+    // Update account 1 as in slot 2
+    accounts.store_for_tests(2, &[(&pubkey, &account)]);
+
+    // Flush the slots individually to avoid reclaims
+    accounts.add_root_and_flush_write_cache(0);
+    accounts.add_root_and_flush_write_cache(1);
+    accounts.add_root_and_flush_write_cache(2);
+
+    // Pubkey1 should be in 3 slots, 0 and 1 and 2
+    assert_eq!(accounts.accounts_index.ref_count_from_storage(&pubkey), 3);
+
+    // Mark pubkey in slot 1 as obsolete, simulating obsolete accounts being enabled
+    let old_storage = accounts
+        .storage
+        .get_slot_storage_entry_shrinking_in_progress_ok(1)
+        .unwrap();
+    old_storage.mark_accounts_obsolete(vec![(0, 1)].into_iter(), 2);
+
+    // Unreference pubkey, which would occur during the normal mark_accounts_obsolete flow
+    accounts.unref_pubkeys([pubkey].iter(), 1, &HashSet::new());
+
+    // Pubkey1 should now have two references: Slot0 and Slot2.
+    assert_eq!(accounts.accounts_index.ref_count_from_storage(&pubkey), 2);
+
+    // Clean, remove slot0/1.
+    accounts.clean_accounts_for_tests();
+    assert!(accounts.storage.get_slot_storage_entry(0).is_none());
+    assert!(accounts.storage.get_slot_storage_entry(1).is_none());
+
+    // Ref count for pubkey should be 1. It was decremented for slot1 and above, and decremented
+    // for slot0 during clean_accounts_for_tests
+    // It was NOT decremented for slot1 during clean_accounts_for_test as it was marked obsolete
+    assert_eq!(accounts.accounts_index.ref_count_from_storage(&pubkey), 1);
+}
+
+#[test]
 #[should_panic(expected = "ref count expected to be zero")]
 fn test_remove_zero_lamport_multi_ref_accounts_panic() {
     let accounts = AccountsDb::new_single_for_tests();
@@ -7304,6 +7359,68 @@ fn test_clean_old_storages_with_reclaims_rooted() {
         .storage
         .get_slot_storage_entry_shrinking_in_progress_ok(old_slot)
         .unwrap();
+    accounts_db.dirty_stores.insert(old_slot, old_storage);
+
+    // ensure the slot list for `pubkey` has both the old and new slots
+    let slot_list = accounts_db
+        .accounts_index
+        .get_bin(&pubkey)
+        .slot_list_mut(&pubkey, |slot_list| slot_list.clone())
+        .unwrap();
+    assert_eq!(slot_list.len(), slots.len());
+    assert!(slot_list.iter().map(|(slot, _)| slot).eq(slots.iter()));
+
+    // `clean` should now reclaim the account in `old_slot`, even though `new_slot` is not
+    // explicitly being cleaned
+    accounts_db.clean_accounts_for_tests();
+
+    // ensure we've reclaimed the account in `old_slot`
+    let slot_list = accounts_db
+        .accounts_index
+        .get_bin(&pubkey)
+        .slot_list_mut(&pubkey, |slot_list| slot_list.clone())
+        .unwrap();
+    assert_eq!(slot_list.len(), 1);
+    assert!(slot_list
+        .iter()
+        .map(|(slot, _)| slot)
+        .eq(iter::once(&new_slot)));
+}
+
+/// Test that `clean` reclaims old accounts when cleaning old storages
+///
+/// When `clean` constructs candidates from old storages, pubkeys in these storages may have other
+/// newer versions of the accounts in other newer storages *not* explicitly marked to be visited by
+/// `clean`.  In this case, `clean` should still reclaim the old versions of these accounts.
+#[test]
+fn test_clean_old_storages_with_reclaims_rooted_and_obsolete_accounts_marked() {
+    let accounts_db = AccountsDb::new_single_for_tests();
+    let pubkey = Pubkey::new_unique();
+    let old_slot = 11;
+    let new_slot = 22;
+    let slots = [old_slot, new_slot];
+    for &slot in &slots {
+        let account = AccountSharedData::new(slot, 0, &Pubkey::new_unique());
+        // store `pubkey` into multiple slots, and also store another unique pubkey
+        // to prevent the whole storage from being marked as dead by `clean`.
+        accounts_db.store_for_tests(
+            slot,
+            &[(&pubkey, &account), (&Pubkey::new_unique(), &account)],
+        );
+        accounts_db.add_root_and_flush_write_cache(slot);
+        accounts_db.uncleaned_pubkeys.remove(&slot);
+        // ensure this slot is *not* in the dirty_stores nor uncleaned_pubkeys, because we want to
+        // test cleaning *old* storages, i.e. when they aren't explicitly marked for cleaning
+        assert!(!accounts_db.dirty_stores.contains_key(&slot));
+        assert!(!accounts_db.uncleaned_pubkeys.contains_key(&slot));
+    }
+
+    // add `old_slot` to the dirty stores list to mimic it being picked up as old
+    let old_storage = accounts_db
+        .storage
+        .get_slot_storage_entry_shrinking_in_progress_ok(old_slot)
+        .unwrap();
+    old_storage.mark_accounts_obsolete(vec![(0, 136)].into_iter(), new_slot);
     accounts_db.dirty_stores.insert(old_slot, old_storage);
 
     // ensure the slot list for `pubkey` has both the old and new slots
