@@ -5009,8 +5009,9 @@ impl AccountsDb {
             let ending_max_root = self.accounts_index.max_root_inclusive();
             if starting_max_root != ending_max_root {
                 warn!(
-                    "do_load_with_populate_read_cache() called with fixed max root, but max root
-                    changed from {starting_max_root} to {ending_max_root} during function call"
+                    "do_load_with_populate_read_cache() scanning pubkey {pubkey} called with \
+                    fixed max root, but max root changed from {starting_max_root} to \
+                    {ending_max_root} during function call"
                 );
             }
         }
