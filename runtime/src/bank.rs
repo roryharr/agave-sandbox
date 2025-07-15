@@ -4111,7 +4111,7 @@ impl Bank {
             })
         });
         self.update_bank_hash_stats(&accounts);
-        self.rc.accounts.store_accounts_par(accounts, None);
+        self.rc.accounts.store_accounts_par(accounts);
         m.stop();
         self.rc
             .accounts
