@@ -593,6 +593,8 @@ struct GenerateIndexTimings {
     pub visit_zero_lamports_us: u64,
     pub num_zero_lamport_single_refs: u64,
     pub all_accounts_are_zero_lamports_slots: u64,
+    pub mark_obsolete_accounts_us: u64,
+    pub num_obsolete_accounts_marked: u64,
 }
 
 #[derive(Default, Debug, PartialEq, Eq)]
@@ -666,6 +668,16 @@ impl GenerateIndexTimings {
             (
                 "all_accounts_are_zero_lamports_slots",
                 self.all_accounts_are_zero_lamports_slots,
+                i64
+            ),
+            (
+                "mark_obsolete_accounts_us",
+                self.mark_obsolete_accounts_us,
+                i64
+            ),
+            (
+                "num_obsolete_accounts_marked",
+                self.num_obsolete_accounts_marked,
                 i64
             ),
         );
@@ -8163,38 +8175,22 @@ impl AccountsDb {
                 }
 
                 self.set_storage_count_and_alive_bytes(storage_info, &mut timings);
-                if self.mark_obsolete_accounts {
+
+                let mut mark_obsolete_accounts_time = Measure::start("mark_obsolete_accounts_time");
+                let obsolete_accounts_marked = if self.mark_obsolete_accounts {
                     // Mark all reclaims at max_slot. This is safe because the only snapshot paths care about
                     // this information. Since this account was just restored from the previous snapshot and
                     // it is known that it was already obsolete at that time, it must hold true that it will
                     // still be obsolete if a newer snapshot is created, since a newer snapshot will always
                     // be performed on a slot greater than the current slot
-                    let max_slot = slots.last().cloned().unwrap_or_default();
-                    unique_pubkeys_by_bin.par_iter().for_each(|pubkeys_by_bin| {
-                        let reclaims = self.accounts_index.clean_and_unref_rooted_entries_by_bin(
-                            pubkeys_by_bin,
-                            |slot, account_info| {
-                                // Since the unref makes every account a single ref account, all
-                                // zero lamport accounts should be tracked as zero_lamport_single_ref
-                                if account_info.is_zero_lamport() {
-                                    self.zero_lamport_single_ref_found(slot, account_info.offset());
-                                }
-                            },
-                        );
-
-                        let pubkeys_removed_from_accounts_index: PubkeysRemovedFromAccountsIndex =
-                            pubkeys_by_bin.iter().cloned().collect();
-                        let stats = PurgeStats::default();
-                        self.handle_reclaims(
-                            (!reclaims.is_empty()).then(|| reclaims.iter()),
-                            None,
-                            &pubkeys_removed_from_accounts_index,
-                            HandleReclaims::ProcessDeadSlots(&stats),
-                            MarkAccountsObsolete::Yes(max_slot),
-                        );
-                        stats.report("reclaim_duplicates_index_generation", None);
-                    });
-                }
+                    let slot_marked_obsolete = slots.last().cloned().unwrap_or_default();
+                    self.mark_obsolete_accounts_on_boot(slot_marked_obsolete, unique_pubkeys_by_bin)
+                } else {
+                    0
+                };
+                mark_obsolete_accounts_time.stop();
+                timings.mark_obsolete_accounts_us = mark_obsolete_accounts_time.as_us();
+                timings.num_obsolete_accounts_marked = obsolete_accounts_marked;
             }
             total_time.stop();
             timings.total_time_us = total_time.as_us();
@@ -8216,6 +8212,49 @@ impl AccountsDb {
             accounts_data_len: accounts_data_len.load(Ordering::Relaxed),
             duplicates_lt_hash: outer_duplicates_lt_hash,
         }
+    }
+
+    /// Use the duplicated pubkeys to mark all older version of the pubkeys as obsolete
+    /// This will unref the accounts and then reclaim the accounts
+    fn mark_obsolete_accounts_on_boot(
+        &self,
+        slot_marked_obsolete: Slot,
+        pubkeys_with_duplicates_by_bin: Vec<Vec<Pubkey>>,
+    ) -> u64 {
+        let stats = PurgeStats::default();
+
+        let reclaims_marked: usize = pubkeys_with_duplicates_by_bin
+            .par_iter()
+            .map(|pubkeys_by_bin| {
+                let reclaims = self.accounts_index.clean_and_unref_rooted_entries_by_bin(
+                    pubkeys_by_bin,
+                    |slot, account_info| {
+                        // Since the unref makes every account a single ref account, all
+                        // zero lamport accounts should be tracked as zero_lamport_single_ref
+                        if account_info.is_zero_lamport() {
+                            self.zero_lamport_single_ref_found(slot, account_info.offset());
+                        }
+                    },
+                );
+
+                // Convert from a vector to a hashset for use in reclaims
+                let pubkeys_removed_from_accounts_index: PubkeysRemovedFromAccountsIndex =
+                    pubkeys_by_bin.iter().cloned().collect();
+
+                // Mark all the entries as obsolete, and remove any empty storages
+                self.handle_reclaims(
+                    (!reclaims.is_empty()).then(|| reclaims.iter()),
+                    None,
+                    &pubkeys_removed_from_accounts_index,
+                    HandleReclaims::ProcessDeadSlots(&stats),
+                    MarkAccountsObsolete::Yes(slot_marked_obsolete),
+                );
+                reclaims.len()
+            })
+            .sum();
+
+        stats.report("reclaim_duplicates_index_generation", None);
+        reclaims_marked as u64
     }
 
     /// Startup processes can consume large amounts of memory while inserting accounts into the index as fast as possible.
