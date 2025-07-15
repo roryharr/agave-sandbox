@@ -1537,7 +1537,10 @@ impl AccountsDb {
         let mut dirty_store_processing_time = Measure::start("dirty_store_processing");
         let max_root_inclusive = self.accounts_index.max_root_inclusive();
         let max_slot_inclusive = max_clean_root_inclusive.unwrap_or(max_root_inclusive);
-        let mut dirty_stores = Vec::with_capacity(self.dirty_stores.len());
+
+        #[allow(clippy::disallowed_methods)]
+        let len = self.dirty_stores.len();
+        let mut dirty_stores = Vec::with_capacity(len);
         // find the oldest dirty slot
         // we'll add logging if that append vec cannot be marked dead
         let mut min_dirty_slot = None::<u64>;
@@ -1678,6 +1681,7 @@ impl AccountsDb {
                     .expect("must scan accounts storage")
             },
         );
+        #[allow(clippy::disallowed_methods)]
         let total = pubkey_refcount.len();
         let failed = AtomicBool::default();
         let threads = quarter_thread_count();
@@ -3378,6 +3382,7 @@ impl AccountsDb {
         // As long as we don't mark anything as dead at slots > latest_full_snapshot_slot, then shrink will have nothing to do for
         // slots > latest_full_snapshot_slot.
         let maybe_clean = || {
+            #[allow(clippy::disallowed_methods)]
             if self.dirty_stores.len() > DIRTY_STORES_CLEANING_THRESHOLD {
                 let latest_full_snapshot_slot = self.latest_full_snapshot_slot();
                 self.clean_accounts(latest_full_snapshot_slot, is_startup);
@@ -3525,6 +3530,7 @@ impl AccountsDb {
         if let Some(slot_cache) = self.accounts_cache.slot_cache(slot) {
             // If we see the slot in the cache, then all the account information
             // is in this cached slot
+            #[allow(clippy::disallowed_methods)]
             if slot_cache.len() > SCAN_SLOT_PAR_ITER_THRESHOLD {
                 ScanStorageResult::Cached(self.thread_pool_foreground.install(|| {
                     slot_cache
@@ -6980,6 +6986,7 @@ impl AccountsDb {
     /// Return the number of slots marked with uncleaned pubkeys.
     /// This is useful for testing clean algorithms.
     pub fn get_len_of_slots_with_uncleaned_pubkeys(&self) -> usize {
+        #[allow(clippy::disallowed_methods)]
         self.uncleaned_pubkeys.len()
     }
 
@@ -7160,7 +7167,10 @@ impl AccountsDb {
             .saturating_add(
                 self.accounts_cache
                     .slot_cache(slot)
-                    .map(|slot_cache| slot_cache.len())
+                    .map(|slot_cache| {
+                        #[allow(clippy::disallowed_methods)]
+                        slot_cache.len()
+                    })
                     .unwrap_or_default(),
             )
     }

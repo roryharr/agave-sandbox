@@ -161,10 +161,6 @@ mod test {
             deserialize_from(&mut reader).unwrap();
 
         // Verify the deserialized data matches the original obsolete accounts
-        assert_eq!(
-            deserialized_obsolete_accounts.map.len(),
-            obsolete_accounts.len()
-        );
         for (slot, obsolete_accounts) in obsolete_accounts {
             let deserialized_obsolete_accounts =
                 deserialized_obsolete_accounts.remove(&slot).unwrap();

@@ -1532,6 +1532,7 @@ impl UsageQueueLoaderInner {
     }
 
     fn count(&self) -> usize {
+        #[allow(clippy::disallowed_methods)]
         self.usage_queues.len()
     }
 }

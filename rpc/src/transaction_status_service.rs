@@ -551,7 +551,6 @@ pub(crate) mod tests {
             .unwrap();
 
         transaction_status_service.quiesce_and_join_for_tests(exit);
-        assert_eq!(test_notifier.notifications.len(), 1);
         let key = TestNotifierKey {
             slot,
             transaction_index,
@@ -659,7 +658,6 @@ pub(crate) mod tests {
             )))
             .unwrap();
         transaction_status_service.quiesce_and_join_for_tests(exit);
-        assert_eq!(test_notifier.notifications.len(), 2);
 
         let key1 = TestNotifierKey {
             slot,

@@ -8390,8 +8390,9 @@ where
         None,
         None,
     ));
-    let vote_and_stake_accounts = load_vote_and_stake_accounts(&bank);
-    assert_eq!(vote_and_stake_accounts.len(), 2);
+    #[allow(clippy::disallowed_methods)]
+    let vote_and_stake_accounts_len = load_vote_and_stake_accounts(&bank).len();
+    assert_eq!(vote_and_stake_accounts_len, 2);
 
     let mut vote_account = bank
         .get_account(&validator_vote_keypairs0.vote_keypair.pubkey())
@@ -8429,9 +8430,10 @@ where
     );
 
     // Accounts must be valid stake and vote accounts
-    let vote_and_stake_accounts = load_vote_and_stake_accounts(&bank);
+    #[allow(clippy::disallowed_methods)]
+    let vote_and_stake_accounts_len = load_vote_and_stake_accounts(&bank).len();
     assert_eq!(
-        vote_and_stake_accounts.len(),
+        vote_and_stake_accounts_len,
         usize::from(!check_owner_change)
     );
 }
