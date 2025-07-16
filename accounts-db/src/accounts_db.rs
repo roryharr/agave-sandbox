@@ -7213,12 +7213,12 @@ impl AccountsDb {
                     *slot
                 );
 
-                let remaining_count = if offsets.len() == store.count() {
+                let remaining_accounts = if offsets.len() == store.count() {
                     // all remaining alive accounts in the storage are being removed, so the entire storage/slot is dead
                     store.remove_accounts(store.alive_bytes(), offsets.len())
                 } else {
                     // not all accounts are being removed, so figure out sizes of accounts we are removing and update the alive bytes and alive account count
-                    let (count, us) = measure_us!({
+                    let (remaining_accounts, us) = measure_us!({
                         let mut offsets = offsets.iter().cloned().collect::<Vec<_>>();
                         // sort so offsets are in order. This improves efficiency of loading the accounts.
                         offsets.sort_unstable();
@@ -7227,7 +7227,8 @@ impl AccountsDb {
                             .iter()
                             .map(|len| store.accounts.calculate_stored_size(*len))
                             .sum();
-                        let count = store.remove_accounts(dead_bytes, offsets.len());
+                        let remaining_accounts = store.remove_accounts(dead_bytes, offsets.len());
+
                         if let MarkAccountsObsolete::Yes(slot_marked_obsolete) =
                             mark_accounts_obsolete
                         {
@@ -7236,19 +7237,18 @@ impl AccountsDb {
                                 slot_marked_obsolete,
                             );
                         }
-
-                        count
+                        remaining_accounts
                     });
                     self.clean_accounts_stats
                         .get_account_sizes_us
                         .fetch_add(us, Ordering::Relaxed);
-                    count
+                    remaining_accounts
                 };
 
                 // Check if we have removed all accounts from the storage
                 // This may be different from the check above as this
                 // can be multithreaded
-                if remaining_count == 0 {
+                if remaining_accounts == 0 {
                     self.dirty_stores.insert(*slot, store);
                     dead_slots.insert(*slot);
                 } else if Self::is_shrinking_productive(&store)
