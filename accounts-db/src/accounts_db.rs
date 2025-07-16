@@ -1093,7 +1093,9 @@ impl AccountStorageEntry {
             count_and_status: SeqLock::new(*count_and_status),
             alive_bytes: AtomicUsize::new(self.alive_bytes()),
             accounts,
-            zero_lamport_single_ref_offsets: RwLock::default(),
+            zero_lamport_single_ref_offsets: RwLock::new(
+                self.zero_lamport_single_ref_offsets.read().unwrap().clone(),
+            ),
             obsolete_accounts: RwLock::new(self.obsolete_accounts.read().unwrap().clone()),
         })
     }
@@ -1270,6 +1272,10 @@ impl AccountStorageEntry {
 
         self.alive_bytes.fetch_sub(num_bytes, Ordering::Release);
         count = count.saturating_sub(num_accounts);
+        if count == 0
+        {
+            self.alive_bytes.store(0, Ordering::Release);
+        }
         *count_and_status = (count, status);
         count
     }
@@ -5568,10 +5574,14 @@ impl AccountsDb {
 
             let store_id = storage.id();
             for (i, offset) in stored_accounts_info.offsets.iter().enumerate() {
+                let zero_lamport = accounts_and_meta_to_store.is_zero_lamport(i);
                 infos.push(AccountInfo::new(
                     StorageLocation::AppendVec(store_id, *offset),
-                    accounts_and_meta_to_store.is_zero_lamport(i),
+                    zero_lamport,
                 ));
+                if zero_lamport {
+                    storage.insert_zero_lamport_single_ref_account_offset(*offset);
+                }
             }
             storage.add_accounts(
                 stored_accounts_info.offsets.len(),
@@ -5862,14 +5872,24 @@ impl AccountsDb {
                 "flush_slot_cache",
             );
             let (store_accounts_timing_inner, store_accounts_total_inner_us) =
-                measure_us!(self.store_accounts_frozen((slot, &accounts[..]), &flushed_store,));
+                if should_flush_f.is_some() {
+                    measure_us!(self.store_accounts_reclaim((slot, &accounts[..]), &flushed_store))
+                } else {
+                    measure_us!(self.store_accounts_frozen((slot, &accounts[..]), &flushed_store))
+                };
             flush_stats.store_accounts_timing = store_accounts_timing_inner;
             flush_stats.store_accounts_total_us = Saturating(store_accounts_total_inner_us);
 
             // If the above sizing function is correct, just one AppendVec is enough to hold
             // all the data for the slot
-            assert!(self.storage.get_slot_storage_entry(slot).is_some());
             self.reopen_storage_as_readonly_shrinking_in_progress_ok(slot);
+            let storage = self.storage.get_slot_storage_entry(slot);
+            let storage = storage.expect("Storage entry exists after flush");
+
+            // Zero lamport single refs may have been added. Check if this is a candidate for shrink
+            if self.is_candidate_for_shrink(&storage) {
+                self.shrink_candidate_slots.lock().unwrap().insert(slot);
+            }
         }
 
         // Remove this slot from the cache, which will to AccountsDb's new readers should look like an
@@ -7245,7 +7265,7 @@ impl AccountsDb {
                     *slot
                 );
 
-                let remaining_accounts = if offsets.len() == store.count() {
+                let remaining_accounts = if offsets.len() == store.count() && !self.mark_obsolete_accounts{
                     // all remaining alive accounts in the storage are being removed, so the entire storage/slot is dead
                     store.remove_accounts(store.alive_bytes(), offsets.len())
                 } else {
@@ -7756,11 +7776,59 @@ impl AccountsDb {
             .fetch_add(store_accounts_time.as_us(), Ordering::Relaxed);
         let mut update_index_time = Measure::start("update_index");
 
-        let reclaim = UpsertReclaim::IgnoreReclaims;
+        // If the cache was flushed, then because `update_index` occurs
+        // after the account are stored by the above `store_accounts_to`
+        // call and all the accounts are stored, all reads after this point
+        // will know to not check the cache anymore
+        self.update_index(
+            infos,
+            &accounts,
+            UpsertReclaim::IgnoreReclaims,
+            UpdateIndexThreadSelection::PoolWithThreshold,
+            &self.thread_pool_clean,
+        );
+        update_index_time.stop();
+        self.stats
+            .store_update_index
+            .fetch_add(update_index_time.as_us(), Ordering::Relaxed);
+        self.stats
+            .store_num_accounts
+            .fetch_add(accounts.len() as u64, Ordering::Relaxed);
 
-        // if we are squashing a single slot, then we can expect a single dead slot
-        let expected_single_dead_slot =
-            (!accounts.contains_multiple_slots()).then(|| accounts.target_slot());
+        StoreAccountsTiming {
+            store_accounts_elapsed: store_accounts_time.as_us(),
+            update_index_elapsed: update_index_time.as_us(),
+            handle_reclaims_elapsed: 0,
+        }
+    }
+
+    /// Stores accounts in the storage and updates the index.
+    /// This should only be used on accounts that are rooted (frozen)
+    pub fn store_accounts_reclaim<'a>(
+        &self,
+        accounts: impl StorableAccounts<'a>,
+        storage: &Arc<AccountStorageEntry>,
+    ) -> StoreAccountsTiming {
+        let slot = accounts.target_slot();
+        let mut store_accounts_time = Measure::start("store_accounts");
+
+        // Flush the read cache if neccessary. This will occur during shrink or clean
+        if self.read_only_accounts_cache.can_slot_be_in_cache(slot) {
+            (0..accounts.len()).for_each(|index| {
+                // based on the patterns of how a validator writes accounts, it is almost always the case that there is no read only cache entry
+                // for this pubkey and slot. So, we can give that hint to the `remove` for performance.
+                self.read_only_accounts_cache
+                    .remove_assume_not_present(accounts.pubkey(index));
+            });
+        }
+
+        // Write the accounts to storage
+        let infos = self.write_accounts_to_storage(slot, storage, &accounts);
+        store_accounts_time.stop();
+        self.stats
+            .store_accounts
+            .fetch_add(store_accounts_time.as_us(), Ordering::Relaxed);
+        let mut update_index_time = Measure::start("update_index");
 
         // If the cache was flushed, then because `update_index` occurs
         // after the account are stored by the above `store_accounts_to`
@@ -7769,7 +7837,7 @@ impl AccountsDb {
         let reclaims = self.update_index(
             infos,
             &accounts,
-            UpsertReclaim::IgnoreReclaims,
+            UpsertReclaim::PopulateReclaims,
             UpdateIndexThreadSelection::PoolWithThreshold,
             &self.thread_pool_clean,
         );
@@ -7791,25 +7859,20 @@ impl AccountsDb {
         //
         // From 1) and 2) we guarantee passing `no_purge_stats` == None, which is
         // equivalent to asserting there will be no dead slots, is safe.
-        let mut handle_reclaims_elapsed = 0;
-        if reclaim == UpsertReclaim::PopulateReclaims {
-            let mut handle_reclaims_time = Measure::start("handle_reclaims");
-            self.handle_reclaims(
-                (!reclaims.is_empty()).then(|| reclaims.iter()),
-                expected_single_dead_slot,
-                &HashSet::default(),
-                // this callsite does NOT process dead slots
-                HandleReclaims::DoNotProcessDeadSlots,
-                MarkAccountsObsolete::No,
-            );
-            handle_reclaims_time.stop();
-            handle_reclaims_elapsed = handle_reclaims_time.as_us();
-            self.stats
-                .store_handle_reclaims
-                .fetch_add(handle_reclaims_elapsed, Ordering::Relaxed);
-        } else {
-            assert!(reclaims.is_empty());
-        }
+        let mut handle_reclaims_time = Measure::start("handle_reclaims");
+        self.handle_reclaims(
+            (!reclaims.is_empty()).then(|| reclaims.iter()),
+            None,
+            &HashSet::default(),
+            // this callsite does NOT process dead slots
+            HandleReclaims::ProcessDeadSlots(&PurgeStats::default()),
+            MarkAccountsObsolete::Yes(storage.slot()),
+        );
+        handle_reclaims_time.stop();
+        let handle_reclaims_elapsed = handle_reclaims_time.as_us();
+        self.stats
+            .store_handle_reclaims
+            .fetch_add(handle_reclaims_elapsed, Ordering::Relaxed);
 
         StoreAccountsTiming {
             store_accounts_elapsed: store_accounts_time.as_us(),
@@ -8673,6 +8736,7 @@ pub enum CalcAccountsHashDataSource {
 #[derive(Debug, Copy, Clone)]
 enum HandleReclaims<'a> {
     ProcessDeadSlots(&'a PurgeStats),
+    #[allow(dead_code)]
     DoNotProcessDeadSlots,
 }
 

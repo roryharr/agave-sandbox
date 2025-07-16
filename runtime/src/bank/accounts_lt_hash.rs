@@ -894,19 +894,26 @@ mod tests {
 
         // calculate the duplicates lt hash by skipping the first version (latest) of each account,
         // and then mixing together all the rest
-        let duplicates_lt_hash = stored_accounts_map
-            .values()
-            .map(|lt_hashes| {
-                // the first element in the vec is the latest; all the rest are duplicates
-                &lt_hashes[1..]
-            })
-            .fold(LtHash::identity(), |mut accum, duplicate_lt_hashes| {
-                for duplicate_lt_hash in duplicate_lt_hashes {
-                    accum.mix_in(&duplicate_lt_hash.0);
-                }
-                accum
-            });
-        let duplicates_lt_hash = DuplicatesLtHash(duplicates_lt_hash);
+        let duplicates_lt_hash = if !bank.rc.accounts.accounts_db.mark_obsolete_accounts
+        {
+            let duplicates_lt_hash = stored_accounts_map
+                .values()
+                .map(|lt_hashes| {
+                    // the first element in the vec is the latest; all the rest are duplicates
+                    &lt_hashes[1..]
+                })
+                .fold(LtHash::identity(), |mut accum, duplicate_lt_hashes| {
+                    for duplicate_lt_hash in duplicate_lt_hashes {
+                        accum.mix_in(&duplicate_lt_hash.0);
+                    }
+                    accum
+                });
+            DuplicatesLtHash(duplicates_lt_hash)
+        }
+        else {
+            // if mark_obsolete_accounts is enabled, then the duplicates lt hash is empty
+            DuplicatesLtHash::default()
+        };
 
         // ensure that calculating the accounts lt hash from storages is correct
         let calculated_accounts_lt_hash_from_storages = bank

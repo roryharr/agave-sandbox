@@ -206,6 +206,22 @@ mod serde_snapshot_tests {
         }
     }
 
+    // With obsolete accounts marked, obsolete references are marked in the storage
+    // and no longer need to be referenced. This leads to a static reference count
+    // of 1. As referencing checking is common in tests, this test wrapper abstracts the behavior
+    fn check_ref_count(
+        mark_obsolete_accounts: bool,
+        expected_ref_count: u64,
+        actual_ref_count: u64,
+    ) {
+        let expected_ref_count = if mark_obsolete_accounts {
+            1
+        } else {
+            expected_ref_count
+        };
+        assert_eq!(expected_ref_count, actual_ref_count);
+    }
+
     #[test_case(StorageAccess::Mmap)]
     fn test_accounts_serialize(storage_access: StorageAccess) {
         solana_logger::setup();
@@ -403,10 +419,10 @@ mod serde_snapshot_tests {
             daccounts.check_accounts(&pubkeys[35..], 0, 65, 37);
             daccounts.check_accounts(&pubkeys1, 1, 10, 1);
 
-            // With accounts marked obsolete enabled, entries are marked obsolete when saved/restored
+            // With accounts marked obsolete in the storages, storages are shrunk when saved/restored
             if daccounts.mark_obsolete_accounts {
-                daccounts.check_storage(0, 78, 100);
-                daccounts.check_storage(1, 11, 21);
+                daccounts.check_storage(0, 78, 78);
+                daccounts.check_storage(1, 11, 11);
             } else {
                 daccounts.check_storage(0, 100, 100);
                 daccounts.check_storage(1, 21, 21);
@@ -473,7 +489,7 @@ mod serde_snapshot_tests {
         accounts.assert_load_account(current_slot, pubkey, zero_lamport);
     }
 
-    fn with_chained_zero_lamport_accounts<F>(f: F, restore: bool)
+    fn with_chained_zero_lamport_accounts<F>(f: F)
     where
         F: Fn(AccountsDb, Slot) -> AccountsDb,
     {
@@ -524,9 +540,10 @@ mod serde_snapshot_tests {
         accounts.print_accounts_stats("post_f");
 
         accounts.assert_load_account(current_slot, pubkey, some_lamport);
-        // With accounts marked obsolete, accounts will be marked obsolete when deserializing which
-        // will make them not loadable
-        if accounts.mark_obsolete_accounts && restore {
+
+        // With accounts marked obsolete in the storages, they will be entirely purged when the
+        // accounts are deserialized and serialized.
+        if accounts.mark_obsolete_accounts {
             accounts.assert_not_load_account(current_slot, purged_pubkey1);
             accounts.assert_not_load_account(current_slot, purged_pubkey2);
         } else {
@@ -554,8 +571,7 @@ mod serde_snapshot_tests {
             |accounts, current_slot| {
                 accounts.clean_accounts_for_tests();
                 reconstruct_accounts_db_via_serialization(&accounts, current_slot, storage_access)
-            },
-            false,
+            }
         );
     }
 
@@ -573,8 +589,7 @@ mod serde_snapshot_tests {
                 accounts.print_accounts_stats("after_reconstruct");
                 accounts.clean_accounts_for_tests();
                 reconstruct_accounts_db_via_serialization(&accounts, current_slot, storage_access)
-            },
-            true,
+            }
         );
     }
 
@@ -690,28 +705,48 @@ mod serde_snapshot_tests {
         current_slot += 1;
         assert_eq!(0, accounts.alive_account_count_in_slot(current_slot));
         accounts.add_root_and_flush_write_cache(current_slot - 1);
-        assert_eq!(1, accounts.ref_count_for_pubkey(&pubkey1));
+        check_ref_count(
+            accounts.mark_obsolete_accounts,
+            1,
+            accounts.ref_count_for_pubkey(&pubkey1),
+        );
         accounts.store_for_tests(current_slot, &[(&pubkey1, &account2)]);
         accounts.store_for_tests(current_slot, &[(&pubkey1, &account2)]);
         accounts.add_root_and_flush_write_cache(current_slot);
         assert_eq!(1, accounts.alive_account_count_in_slot(current_slot));
         // Stores to same pubkey, same slot only count once towards the
         // ref count
-        assert_eq!(2, accounts.ref_count_for_pubkey(&pubkey1));
+        check_ref_count(
+            accounts.mark_obsolete_accounts,
+            2,
+            accounts.ref_count_for_pubkey(&pubkey1),
+        );
         accounts.calculate_accounts_delta_hash(current_slot);
 
         // C: Yet more update to trigger lazy clean of step A
         current_slot += 1;
-        assert_eq!(2, accounts.ref_count_for_pubkey(&pubkey1));
+        check_ref_count(
+            accounts.mark_obsolete_accounts,
+            2,
+            accounts.ref_count_for_pubkey(&pubkey1),
+        );
         accounts.store_for_tests(current_slot, &[(&pubkey1, &account3)]);
         accounts.add_root_and_flush_write_cache(current_slot);
-        assert_eq!(3, accounts.ref_count_for_pubkey(&pubkey1));
+        check_ref_count(
+            accounts.mark_obsolete_accounts,
+            3,
+            accounts.ref_count_for_pubkey(&pubkey1),
+        );
         accounts.calculate_accounts_delta_hash(current_slot);
         accounts.add_root_and_flush_write_cache(current_slot);
 
         // D: Make pubkey1 0-lamport; also triggers clean of step B
         current_slot += 1;
-        assert_eq!(3, accounts.ref_count_for_pubkey(&pubkey1));
+        check_ref_count(
+            accounts.mark_obsolete_accounts,
+            3,
+            accounts.ref_count_for_pubkey(&pubkey1),
+        );
         accounts.store_for_tests(current_slot, &[(&pubkey1, &zero_lamport_account)]);
         accounts.store_for_tests(current_slot, &[(&pubkey3, &account2)]);
         accounts.add_root_and_flush_write_cache(current_slot);
@@ -733,11 +768,12 @@ mod serde_snapshot_tests {
             .alive_roots
             .insert(current_slot);
 
-        assert_eq!(
-            // Removed one reference from the dead slot (reference only counted once
-            // even though there were two stores to the pubkey in that slot)
-            3, /* == 3 - 1 + 1 */
-            accounts.ref_count_for_pubkey(&pubkey1)
+        // Removed one reference from the dead slot (reference only counted once
+        // even though there were two stores to the pubkey in that slot)
+        check_ref_count(
+            accounts.mark_obsolete_accounts,
+            3,
+            accounts.ref_count_for_pubkey(&pubkey1),
         );
         accounts.calculate_accounts_delta_hash(current_slot);
         accounts.add_root(current_slot);
