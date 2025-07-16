@@ -7245,7 +7245,9 @@ impl AccountsDb {
                     count
                 };
 
-                // Double check just in case, did we remove all accounts?
+                // Check if we have removed all accounts from the storage
+                // This may be different from the check above as this
+                // can be multithreaded
                 if remaining_count == 0 {
                     self.dirty_stores.insert(*slot, store);
                     dead_slots.insert(*slot);
