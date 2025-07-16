@@ -1179,11 +1179,26 @@ fn test_clean_dead_slot_with_obsolete_accounts() {
     accounts.add_root_and_flush_write_cache(2);
 
     // Pubkey1 should be in 3 slots, 0 and 1 and 2
-    assert_eq!(accounts.accounts_index.ref_count_from_storage(&pubkey), 1);
+    if accounts.mark_obsolete_accounts
+    {
+        assert_eq!(accounts.accounts_index.ref_count_from_storage(&pubkey), 1);
 
+    }
+    else
+    {
+        // Mark pubkey in slot 1 as obsolete, simulating obsolete accounts being enabled
+        let old_storage = accounts
+            .storage
+            .get_slot_storage_entry_shrinking_in_progress_ok(1)
+            .unwrap();
+        old_storage.mark_accounts_obsolete(vec![(0, 1)].into_iter(), 2);
 
-    // Pubkey1 should now have two references: Slot0 and Slot2.
-    assert_eq!(accounts.accounts_index.ref_count_from_storage(&pubkey), 1);
+        // Unreference pubkey, which would occur during the normal mark_accounts_obsolete flow
+        accounts.unref_pubkeys([pubkey].iter(), 1, &HashSet::new());
+
+        // Pubkey1 should now have two references: Slot0 and Slot2.
+        assert_eq!(accounts.accounts_index.ref_count_from_storage(&pubkey), 2);
+    }
 
     // Clean, remove slot0/1.
     accounts.clean_accounts_for_tests();
@@ -4644,6 +4659,7 @@ fn test_shrink_unref_handle_zero_lamport_single_ref_accounts() {
         // accounts can be cleaned immediately.
         assert_eq!(db.accounts_index.ref_count_from_storage(&account_key1), 0);
     } else {
+        println!("I'm in here");
         // After shrink slot 0, check that the zero_lamport account on slot 1
         // should be marked since it become singe_ref.
         assert_eq!(db.accounts_index.ref_count_from_storage(&account_key1), 1);
