@@ -1597,6 +1597,7 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> AccountsIndex<T, U> {
 
     /// Clean the slot list by removing all slot_list items older than the max_slot
     /// Decrease the reference count of the entry by the number of removed accounts.
+    /// Returns the slot and account_info of the remaining entry in the slot list
     fn clean_and_unref_slot_list(
         &self,
         entry: &AccountMapEntry<T>,
@@ -1632,7 +1633,7 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> AccountsIndex<T, U> {
 
         entry.set_dirty(true);
 
-        // Return the last entry in the slot list, which should be the newest one
+        // Return the last entry in the slot list, which is the only one
         *slot_list
             .last()
             .expect("Slot list should have at least one entry after cleaning")
@@ -1653,14 +1654,14 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> AccountsIndex<T, U> {
             None => return reclaims, // no pubkeys to process, return
         };
 
-        pubkeys_by_bin.iter().for_each(|pubkey| {
+        for pubkey in pubkeys_by_bin {
             map.get_internal_inner(pubkey, |entry| {
                 let entry = entry.expect("Expected entry to exist in accounts index");
                 let (slot, account_info) = self.clean_and_unref_slot_list(entry, &mut reclaims);
                 callback(slot, account_info);
-                (true, ())
+                (false, ())
             });
-        });
+        }
         reclaims
     }
 

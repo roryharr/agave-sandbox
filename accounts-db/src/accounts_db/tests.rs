@@ -7372,14 +7372,14 @@ fn test_calculate_capitalization_overflow_inter_slot() {
     accounts_db.calculate_capitalization_at_startup_from_index(&Ancestors::from(vec![0, 1]), 1);
 }
 #[test]
-fn test_mark_obsolete_accounts_on_boot_none() {
+fn test_mark_obsolete_accounts_at_startup_none() {
     let (_accounts_dirs, paths) = get_temp_accounts_paths(2).unwrap();
     let accounts_db = AccountsDb::new_for_tests(paths);
     let slots = 0;
-    let pubkeys_with_duplicates_by_bin: Vec<Vec<Pubkey>> = vec![];
+    let pubkeys_with_duplicates_by_bin = vec![];
 
     let num_accounts_reclaimed =
-        accounts_db.mark_obsolete_accounts_on_boot(slots, pubkeys_with_duplicates_by_bin);
+        accounts_db.mark_obsolete_accounts_at_startup(slots, pubkeys_with_duplicates_by_bin);
 
     assert_eq!(
         num_accounts_reclaimed, 0,
@@ -7388,7 +7388,7 @@ fn test_mark_obsolete_accounts_on_boot_none() {
 }
 
 #[test]
-fn test_mark_obsolete_accounts_on_boot_kill_slot() {
+fn test_mark_obsolete_accounts_at_startup_purge_slot() {
     let (_accounts_dirs, paths) = get_temp_accounts_paths(2).unwrap();
     let accounts_db = AccountsDb::new_for_tests(paths);
     let slots = 2;
@@ -7397,7 +7397,7 @@ fn test_mark_obsolete_accounts_on_boot_kill_slot() {
     let account = AccountSharedData::new(100, 0, &Pubkey::default());
 
     // Store the same pubkey in multiple slots
-    // Store other pubkey in slot0 to ensure slot is not freed
+    // Store other pubkey in slot0 to ensure slot is not purged
     accounts_db.store_for_tests(0, &[(&pubkey1, &account), (&pubkey2, &account)]);
     accounts_db.flush_accounts_cache_slot_for_tests(0);
     accounts_db.store_for_tests(1, &[(&pubkey1, &account)]);
@@ -7405,18 +7405,18 @@ fn test_mark_obsolete_accounts_on_boot_kill_slot() {
     accounts_db.store_for_tests(2, &[(&pubkey1, &account)]);
     accounts_db.flush_accounts_cache_slot_for_tests(2);
 
-    let pubkeys_with_duplicates_by_bin: Vec<Vec<Pubkey>> = vec![vec![pubkey1]];
+    let pubkeys_with_duplicates_by_bin = vec![vec![pubkey1]];
 
     let accounts_marked_obsolete =
-        accounts_db.mark_obsolete_accounts_on_boot(slots, pubkeys_with_duplicates_by_bin);
+        accounts_db.mark_obsolete_accounts_at_startup(slots, pubkeys_with_duplicates_by_bin);
 
-    // Verify that slot 0 has not been freed
+    // Verify that slot 0 has not been purged
     assert!(accounts_db.storage.get_slot_storage_entry(0).is_some());
 
-    // Verify that slot 1 has been freed
+    // Verify that slot 1 has been purged
     assert!(accounts_db.storage.get_slot_storage_entry(1).is_none());
 
-    //Verify that the pubkey ref count is 1
+    //Verify that the pubkey ref1's count is 1
     assert_eq!(
         accounts_db.accounts_index.ref_count_from_storage(&pubkey1),
         1
@@ -7426,7 +7426,7 @@ fn test_mark_obsolete_accounts_on_boot_kill_slot() {
 }
 
 #[test]
-fn test_mark_obsolete_accounts_on_boot_multiple_bins() {
+fn test_mark_obsolete_accounts_at_startup_multiple_bins() {
     let (_accounts_dirs, paths) = get_temp_accounts_paths(2).unwrap();
     let accounts_db = AccountsDb::new_for_tests(paths);
     let pubkey1 = Pubkey::from([0; 32]); // Ensure pubkey1 is in bin 0
@@ -7438,18 +7438,18 @@ fn test_mark_obsolete_accounts_on_boot_multiple_bins() {
         accounts_db.flush_accounts_cache_slot_for_tests(slot);
     }
 
-    let pubkeys_with_duplicates_by_bin: Vec<Vec<Pubkey>> = vec![vec![pubkey1], vec![pubkey2]];
+    let pubkeys_with_duplicates_by_bin = vec![vec![pubkey1], vec![pubkey2]];
 
     let accounts_marked_obsolete =
-        accounts_db.mark_obsolete_accounts_on_boot(2, pubkeys_with_duplicates_by_bin);
+        accounts_db.mark_obsolete_accounts_at_startup(2, pubkeys_with_duplicates_by_bin);
 
-    // Verify that slot 0 has been freed
+    // Verify that slot 0 has been purged
     assert!(accounts_db.storage.get_slot_storage_entry(0).is_none());
 
-    // Verify that slot 1 has been freed
+    // Verify that slot 1 has been purged
     assert!(accounts_db.storage.get_slot_storage_entry(1).is_some());
 
-    // Verify that both pubkeys are ref_count 1
+    // Verify that both pubkeys ref_counts are 1
     assert_eq!(
         accounts_db.accounts_index.ref_count_from_storage(&pubkey1),
         1

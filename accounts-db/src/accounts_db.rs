@@ -565,7 +565,7 @@ struct SlotIndexGenerationInfo {
 /// These accounts need to have their lt hashes mixed *out*.
 /// This is the final value, that when applied to all the storages at startup,
 /// will produce the correct accounts lt hash.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct DuplicatesLtHash(pub LtHash);
 
 impl Default for DuplicatesLtHash {
@@ -1466,9 +1466,9 @@ pub struct AccountsDb {
     /// that means the storage was already shrunk.
     pub(crate) best_ancient_slots_to_shrink: RwLock<VecDeque<(Slot, u64)>>,
 
-    /// Flag to indicate if the experimental obsolete account tracking feature is enabled
+    /// Flag to indicate if the experimental obsolete account tracking feature is enabled.
     /// This feature tracks obsolete accounts in the account storage entry allowing
-    /// for storage entries and the index to be cleaned more aggressively
+    /// for earlier cleaning of obsolete accounts in the storages and index.
     pub mark_obsolete_accounts: bool,
 }
 
@@ -6157,6 +6157,12 @@ impl AccountsDb {
                 accum
             });
 
+        if self.mark_obsolete_accounts {
+            // If `mark_obsolete_accounts` is true, then none if the duplicate accounts were
+            // included in the lt_hash, and do not need to be mixed out.
+            // The duplicates_lt_hash should be the default value.
+            assert_eq!(duplicates_lt_hash, &DuplicatesLtHash::default());
+        }
         lt_hash.mix_out(&duplicates_lt_hash.0);
 
         AccountsLtHash(lt_hash)
@@ -8177,20 +8183,23 @@ impl AccountsDb {
                 self.set_storage_count_and_alive_bytes(storage_info, &mut timings);
 
                 let mut mark_obsolete_accounts_time = Measure::start("mark_obsolete_accounts_time");
-                let obsolete_accounts_marked = if self.mark_obsolete_accounts {
-                    // Mark all reclaims at max_slot. This is safe because the only snapshot paths care about
+                let num_obsolete_accounts_marked = if self.mark_obsolete_accounts {
+                    // Mark all reclaims at max_slot. This is safe because only the snapshot paths care about
                     // this information. Since this account was just restored from the previous snapshot and
                     // it is known that it was already obsolete at that time, it must hold true that it will
                     // still be obsolete if a newer snapshot is created, since a newer snapshot will always
                     // be performed on a slot greater than the current slot
-                    let slot_marked_obsolete = slots.last().cloned().unwrap_or_default();
-                    self.mark_obsolete_accounts_on_boot(slot_marked_obsolete, unique_pubkeys_by_bin)
+                    let slot_marked_obsolete = slots.last().copied().unwrap();
+                    self.mark_obsolete_accounts_at_startup(
+                        slot_marked_obsolete,
+                        unique_pubkeys_by_bin,
+                    )
                 } else {
                     0
                 };
                 mark_obsolete_accounts_time.stop();
                 timings.mark_obsolete_accounts_us = mark_obsolete_accounts_time.as_us();
-                timings.num_obsolete_accounts_marked = obsolete_accounts_marked;
+                timings.num_obsolete_accounts_marked = num_obsolete_accounts_marked;
             }
             total_time.stop();
             timings.total_time_us = total_time.as_us();
@@ -8216,7 +8225,7 @@ impl AccountsDb {
 
     /// Use the duplicated pubkeys to mark all older version of the pubkeys as obsolete
     /// This will unref the accounts and then reclaim the accounts
-    fn mark_obsolete_accounts_on_boot(
+    fn mark_obsolete_accounts_at_startup(
         &self,
         slot_marked_obsolete: Slot,
         pubkeys_with_duplicates_by_bin: Vec<Vec<Pubkey>>,

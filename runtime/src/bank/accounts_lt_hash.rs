@@ -390,8 +390,11 @@ mod tests {
     use {
         super::*,
         crate::{
-            bank::tests::new_bank_from_parent_with_bank_forks, runtime_config::RuntimeConfig,
-            snapshot_bank_utils, snapshot_config::SnapshotConfig, snapshot_utils,
+            bank::{tests::new_bank_from_parent_with_bank_forks, BankTestConfig},
+            runtime_config::RuntimeConfig,
+            snapshot_bank_utils,
+            snapshot_config::SnapshotConfig,
+            snapshot_utils,
         },
         solana_account::{ReadableAccount as _, WritableAccount as _},
         solana_accounts_db::{
@@ -788,7 +791,20 @@ mod tests {
     #[test_case(Features::All; "all features")]
     fn test_calculate_accounts_lt_hash_at_startup_from_storages(features: Features) {
         let (genesis_config, mint_keypair) = genesis_config_with(features);
-        let (mut bank, bank_forks) = Bank::new_with_bank_forks_for_tests(&genesis_config);
+
+        // Disable marking accounts as obsolete for this test since it skips index generation, which
+        // is where obsolete accounts are marked on startup. Skipping marking them effectively
+        // disables the feature, but there is an assert that ensures the duplicates hash is default
+        // when the flag is true. This assert fails since duplicates DO need to be mixed out.
+        let bank_test_config = BankTestConfig {
+            accounts_db_config: AccountsDbConfig {
+                mark_obsolete_accounts: false,
+                ..AccountsDbConfig::default()
+            },
+        };
+
+        let bank = Bank::new_with_config_for_tests(&genesis_config, bank_test_config);
+        let (mut bank, bank_forks) = bank.wrap_with_bank_forks_for_tests();
 
         let amount = cmp::max(
             bank.get_minimum_balance_for_rent_exemption(0),
