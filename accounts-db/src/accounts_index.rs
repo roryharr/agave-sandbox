@@ -1598,7 +1598,9 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> AccountsIndex<T, U> {
     /// Clean the slot list by removing all slot_list items older than the max_slot
     /// Decrease the reference count of the entry by the number of removed accounts.
     /// Returns the slot and account_info of the remaining entry in the slot list
-    fn clean_and_unref_slot_list(
+    /// Note: This must only be called on startup, and reclaims
+    /// must be reclaimed.
+    fn clean_and_unref_slot_list_on_startup(
         &self,
         entry: &AccountMapEntry<T>,
         reclaims: &mut SlotList<T>,
@@ -1615,6 +1617,7 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> AccountsIndex<T, U> {
         slot_list.retain(|(slot, value)| {
             // keep the newest entry, and reclaim all others
             if *slot < max_slot {
+                assert!(!value.is_cached(), "Unsafe to reclaim cached entries");
                 reclaims.push((*slot, *value));
                 reclaim_count += 1;
                 false
@@ -1657,7 +1660,8 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> AccountsIndex<T, U> {
         for pubkey in pubkeys_by_bin {
             map.get_internal_inner(pubkey, |entry| {
                 let entry = entry.expect("Expected entry to exist in accounts index");
-                let (slot, account_info) = self.clean_and_unref_slot_list(entry, &mut reclaims);
+                let (slot, account_info) =
+                    self.clean_and_unref_slot_list_on_startup(entry, &mut reclaims);
                 callback(slot, account_info);
                 (false, ())
             });
@@ -3620,7 +3624,7 @@ pub mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "decremented ref below zero")]
+    #[should_panic(expected = "decremented ref count below zero")]
     fn test_illegal_unref() {
         let value = true;
         let key = solana_pubkey::new_rand();

@@ -7416,7 +7416,7 @@ fn test_mark_obsolete_accounts_at_startup_purge_slot() {
     // Verify that slot 1 has been purged
     assert!(accounts_db.storage.get_slot_storage_entry(1).is_none());
 
-    //Verify that the pubkey ref1's count is 1
+    // Verify that the pubkey ref1's count is 1
     assert_eq!(
         accounts_db.accounts_index.ref_count_from_storage(&pubkey1),
         1

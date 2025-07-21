@@ -342,7 +342,7 @@ pub const ACCOUNTS_DB_CONFIG_FOR_TESTING: AccountsDbConfig = AccountsDbConfig {
     partitioned_epoch_rewards_config: DEFAULT_PARTITIONED_EPOCH_REWARDS_CONFIG,
     storage_access: StorageAccess::File,
     scan_filter_for_shrinking: ScanFilter::OnlyAbnormalTest,
-    mark_obsolete_accounts: true,
+    mark_obsolete_accounts: false,
     num_clean_threads: None,
     num_foreground_threads: None,
     num_hash_threads: None,

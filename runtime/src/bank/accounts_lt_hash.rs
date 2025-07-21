@@ -745,11 +745,24 @@ mod tests {
         assert!(!bank.cache_for_accounts_lt_hash.contains_key(&address));
     }
 
-    #[test_case(Features::None; "no features")]
-    #[test_case(Features::All; "all features")]
-    fn test_calculate_accounts_lt_hash_at_startup_from_index(features: Features) {
+    #[test_matrix(
+        [Features::None, Features::All],
+        [true, false] // Mark Obsolete Accounts
+    )]
+    fn test_calculate_accounts_lt_hash_at_startup_from_index(
+        features: Features,
+        mark_obsolete_accounts: bool,
+    ) {
         let (genesis_config, mint_keypair) = genesis_config_with(features);
-        let (mut bank, bank_forks) = Bank::new_with_bank_forks_for_tests(&genesis_config);
+        let bank_test_config = BankTestConfig {
+            accounts_db_config: AccountsDbConfig {
+                mark_obsolete_accounts,
+                ..ACCOUNTS_DB_CONFIG_FOR_TESTING
+            },
+        };
+
+        let bank = Bank::new_with_config_for_tests(&genesis_config, bank_test_config);
+        let (mut bank, bank_forks) = bank.wrap_with_bank_forks_for_tests();
 
         let amount = cmp::max(
             bank.get_minimum_balance_for_rent_exemption(0),
@@ -787,19 +800,20 @@ mod tests {
         assert_eq!(expected_accounts_lt_hash, calculated_accounts_lt_hash);
     }
 
-    #[test_case(Features::None; "no features")]
-    #[test_case(Features::All; "all features")]
-    fn test_calculate_accounts_lt_hash_at_startup_from_storages(features: Features) {
+    #[test_matrix(
+        [Features::None, Features::All],
+        [true, false] // Mark Obsolete Accounts
+    )]
+    fn test_calculate_accounts_lt_hash_at_startup_from_storages(
+        features: Features,
+        mark_obsolete_accounts: bool,
+    ) {
         let (genesis_config, mint_keypair) = genesis_config_with(features);
 
-        // Disable marking accounts as obsolete for this test since it skips index generation, which
-        // is where obsolete accounts are marked on startup. Skipping marking them effectively
-        // disables the feature, but there is an assert that ensures the duplicates hash is default
-        // when the flag is true. This assert fails since duplicates DO need to be mixed out.
         let bank_test_config = BankTestConfig {
             accounts_db_config: AccountsDbConfig {
-                mark_obsolete_accounts: false,
-                ..AccountsDbConfig::default()
+                mark_obsolete_accounts,
+                ..ACCOUNTS_DB_CONFIG_FOR_TESTING
             },
         };
 
@@ -851,13 +865,15 @@ mod tests {
         for storage in &storages {
             storage
                 .accounts
-                .scan_accounts(|_offset, account| {
+                .scan_accounts(|offset, account| {
                     let pubkey = account.pubkey();
                     let account_lt_hash = AccountsDb::lt_hash_account(&account, pubkey);
-                    stored_accounts_map
-                        .entry(*pubkey)
-                        .or_default()
-                        .push(account_lt_hash)
+                    stored_accounts_map.entry(*pubkey).or_default().push((
+                        account_lt_hash,
+                        storage.slot(),
+                        offset,
+                        account.data().len(),
+                    ));
                 })
                 .expect("must scan accounts storage");
         }
@@ -872,7 +888,21 @@ mod tests {
             })
             .fold(LtHash::identity(), |mut accum, duplicate_lt_hashes| {
                 for duplicate_lt_hash in duplicate_lt_hashes {
-                    accum.mix_in(&duplicate_lt_hash.0);
+                    if !bank.accounts().accounts_db.mark_obsolete_accounts {
+                        accum.mix_in(&duplicate_lt_hash.0 .0);
+                    } else {
+                        let slot = duplicate_lt_hash.1;
+                        let offset = duplicate_lt_hash.2;
+                        let data_len = duplicate_lt_hash.3;
+                        let account_storage_entry = bank
+                            .accounts()
+                            .accounts_db
+                            .storage
+                            .get_slot_storage_entry(slot)
+                            .unwrap();
+                        account_storage_entry
+                            .mark_accounts_obsolete(vec![(offset, data_len)].into_iter(), slot);
+                    }
                 }
                 accum
             });
@@ -892,16 +922,27 @@ mod tests {
 
     #[test_matrix(
         [Features::None, Features::All],
-        [IndexLimitMb::Minimal, IndexLimitMb::InMemOnly]
+        [IndexLimitMb::Minimal, IndexLimitMb::InMemOnly],
+        [true, false] // Mark Obsolete Accounts
     )]
     fn test_verify_accounts_lt_hash_at_startup(
         features: Features,
         accounts_index_limit: IndexLimitMb,
+        mark_obsolete_accounts: bool,
     ) {
         let (mut genesis_config, mint_keypair) = genesis_config_with(features);
         // This test requires zero fees so that we can easily transfer an account's entire balance.
         genesis_config.fee_rate_governor = FeeRateGovernor::new(0, 0);
-        let (mut bank, bank_forks) = Bank::new_with_bank_forks_for_tests(&genesis_config);
+
+        let bank_test_config = BankTestConfig {
+            accounts_db_config: AccountsDbConfig {
+                mark_obsolete_accounts,
+                ..ACCOUNTS_DB_CONFIG_FOR_TESTING
+            },
+        };
+
+        let bank = Bank::new_with_config_for_tests(&genesis_config, bank_test_config);
+        let (mut bank, bank_forks) = bank.wrap_with_bank_forks_for_tests();
 
         let amount = cmp::max(
             bank.get_minimum_balance_for_rent_exemption(0),
@@ -1050,12 +1091,28 @@ mod tests {
         assert_eq!(expected_cache, actual_cache.as_slice());
     }
 
-    /// Ensure that the snapshot hash is correct
-    #[test_case(Features::None; "no features")]
-    #[test_case(Features::All; "all features")]
-    fn test_snapshots(features: Features) {
+    /// Ensure that the snapshot hash is correct when snapshots_lt_hash is enabled
+    #[test_matrix(
+        [Features::None, Features::All],
+        [true, false],
+        [false, true]
+    )]
+    fn test_snapshots_lt_hash(
+        features: Features,
+        mark_obsolete_accounts: bool,
+        mark_obsolete_accounts_during_index_generation: bool,
+    ) {
         let (genesis_config, mint_keypair) = genesis_config_with(features);
-        let (mut bank, bank_forks) = Bank::new_with_bank_forks_for_tests(&genesis_config);
+
+        let bank_test_config = BankTestConfig {
+            accounts_db_config: AccountsDbConfig {
+                mark_obsolete_accounts,
+                ..ACCOUNTS_DB_CONFIG_FOR_TESTING
+            },
+        };
+
+        let bank = Bank::new_with_config_for_tests(&genesis_config, bank_test_config);
+        let (mut bank, bank_forks) = bank.wrap_with_bank_forks_for_tests();
 
         let amount = cmp::max(
             bank.get_minimum_balance_for_rent_exemption(0),
@@ -1089,6 +1146,10 @@ mod tests {
         )
         .unwrap();
         let (_accounts_tempdir, accounts_dir) = snapshot_utils::create_tmp_accounts_dir_for_tests();
+        let accounts_db_config = AccountsDbConfig {
+            mark_obsolete_accounts: mark_obsolete_accounts_during_index_generation,
+            ..ACCOUNTS_DB_CONFIG_FOR_TESTING
+        };
         let (roundtrip_bank, _) = snapshot_bank_utils::bank_from_snapshot_archives(
             &[accounts_dir],
             &bank_snapshots_dir,
@@ -1102,7 +1163,7 @@ mod tests {
             false,
             false,
             false,
-            Some(ACCOUNTS_DB_CONFIG_FOR_TESTING),
+            Some(accounts_db_config),
             None,
             Arc::default(),
         )

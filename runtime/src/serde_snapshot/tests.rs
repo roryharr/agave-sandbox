@@ -473,7 +473,7 @@ mod serde_snapshot_tests {
         accounts.assert_load_account(current_slot, pubkey, zero_lamport);
     }
 
-    fn with_chained_zero_lamport_accounts<F>(f: F, restore: bool)
+    fn with_chained_zero_lamport_accounts<F>(restore: bool, f: F)
     where
         F: Fn(AccountsDb, Slot) -> AccountsDb,
     {
@@ -545,32 +545,23 @@ mod serde_snapshot_tests {
     #[test_case(StorageAccess::File)]
     fn test_accounts_purge_chained_purge_before_snapshot_restore(storage_access: StorageAccess) {
         solana_logger::setup();
-        with_chained_zero_lamport_accounts(
-            |accounts, current_slot| {
-                accounts.clean_accounts_for_tests();
-                reconstruct_accounts_db_via_serialization(&accounts, current_slot, storage_access)
-            },
-            false,
-        );
+        with_chained_zero_lamport_accounts(false, |accounts, current_slot| {
+            accounts.clean_accounts_for_tests();
+            reconstruct_accounts_db_via_serialization(&accounts, current_slot, storage_access)
+        });
     }
 
     #[test_case(StorageAccess::Mmap)]
     #[test_case(StorageAccess::File)]
     fn test_accounts_purge_chained_purge_after_snapshot_restore(storage_access: StorageAccess) {
         solana_logger::setup();
-        with_chained_zero_lamport_accounts(
-            |accounts, current_slot| {
-                let accounts = reconstruct_accounts_db_via_serialization(
-                    &accounts,
-                    current_slot,
-                    storage_access,
-                );
-                accounts.print_accounts_stats("after_reconstruct");
-                accounts.clean_accounts_for_tests();
-                reconstruct_accounts_db_via_serialization(&accounts, current_slot, storage_access)
-            },
-            true,
-        );
+        with_chained_zero_lamport_accounts(true, |accounts, current_slot| {
+            let accounts =
+                reconstruct_accounts_db_via_serialization(&accounts, current_slot, storage_access);
+            accounts.print_accounts_stats("after_reconstruct");
+            accounts.clean_accounts_for_tests();
+            reconstruct_accounts_db_via_serialization(&accounts, current_slot, storage_access)
+        });
     }
 
     #[test_case(StorageAccess::Mmap)]
