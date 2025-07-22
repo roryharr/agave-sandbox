@@ -6161,7 +6161,7 @@ impl AccountsDb {
             // If `mark_obsolete_accounts` is true, then none if the duplicate accounts were
             // included in the lt_hash, and do not need to be mixed out.
             // The duplicates_lt_hash should be the default value.
-            assert_eq!(duplicates_lt_hash, &DuplicatesLtHash::default());
+            assert_eq!(*duplicates_lt_hash, DuplicatesLtHash::default());
         }
         lt_hash.mix_out(&duplicates_lt_hash.0);
 
