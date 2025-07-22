@@ -143,6 +143,7 @@ macro_rules! define_accounts_db_test {
         }
     };
 }
+
 pub(crate) use define_accounts_db_test;
 
 fn run_generate_index_duplicates_within_slot_test(db: AccountsDb, reverse: bool) {
@@ -7461,4 +7462,56 @@ fn test_mark_obsolete_accounts_at_startup_multiple_bins() {
 
     // Ensure that stats were accumulated correctly
     assert_eq!(accounts_marked_obsolete, 2);
+}
+
+#[test_case(true; "mark_obsolete_accounts")]
+#[test_case(false; "do_not_mark_obsolete_accounts")]
+// This test verifies that when obsolete accounts are marked, the duplicates lt hash is set to the
+// default value. When they are not marked, it is populated. The second case ensures test validity.
+fn test_obsolete_accounts_empty_default_duplicate_hash(mark_obsolete_accounts: bool) {
+    let slot0 = 0;
+    let slot1 = 1;
+
+    let db = AccountsDb::new_with_config(
+        Vec::new(),
+        Some(AccountsDbConfig {
+            mark_obsolete_accounts,
+            ..ACCOUNTS_DB_CONFIG_FOR_TESTING
+        }),
+        None,
+        Arc::default(),
+    );
+
+    let pubkey = Pubkey::new_unique();
+
+    let storage = db.create_and_insert_store(slot0, 1000, "test");
+
+    let account0 = AccountSharedData::new(1, 0, &Pubkey::default());
+    let account1 = AccountSharedData::new(100, 0, &Pubkey::default());
+
+    storage
+        .accounts
+        .write_accounts(&(slot0, &[(&pubkey, &account0)][..]), 0);
+
+    let storage = db.create_and_insert_store(slot1, 1000, "test");
+
+    storage
+        .accounts
+        .write_accounts(&(slot0, &[(&pubkey, &account1)][..]), 0);
+
+    assert!(!db.accounts_index.contains(&pubkey));
+    let result = db.generate_index(None, false, true);
+    if mark_obsolete_accounts {
+        // If obsolete accounts are marked, the duplicates lt hash should be the default value
+        // This is because all duplicates are marked as obsolete and skipped during lt hash calculation.
+        assert_eq!(
+            *result.duplicates_lt_hash.unwrap(),
+            DuplicatesLtHash::default()
+        );
+    } else {
+        assert_ne!(
+            *result.duplicates_lt_hash.unwrap(),
+            DuplicatesLtHash::default()
+        );
+    }
 }

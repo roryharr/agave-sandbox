@@ -565,7 +565,7 @@ struct SlotIndexGenerationInfo {
 /// These accounts need to have their lt hashes mixed *out*.
 /// This is the final value, that when applied to all the storages at startup,
 /// will produce the correct accounts lt hash.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub struct DuplicatesLtHash(pub LtHash);
 
 impl Default for DuplicatesLtHash {
