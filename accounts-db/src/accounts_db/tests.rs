@@ -7372,6 +7372,7 @@ fn test_calculate_capitalization_overflow_inter_slot() {
     accounts_db.store_for_tests(1, &[(&Pubkey::new_unique(), &account)]);
     accounts_db.calculate_capitalization_at_startup_from_index(&Ancestors::from(vec![0, 1]), 1);
 }
+
 #[test]
 fn test_mark_obsolete_accounts_at_startup_none() {
     let (_accounts_dirs, paths) = get_temp_accounts_paths(2).unwrap();
@@ -7379,11 +7380,11 @@ fn test_mark_obsolete_accounts_at_startup_none() {
     let slots = 0;
     let pubkeys_with_duplicates_by_bin = vec![];
 
-    let num_accounts_reclaimed =
+    let obsolete_stats =
         accounts_db.mark_obsolete_accounts_at_startup(slots, pubkeys_with_duplicates_by_bin);
 
     assert_eq!(
-        num_accounts_reclaimed, 0,
+        obsolete_stats.accounts_marked_obsolete, 0,
         "No accounts should be reclaimed for empty bin"
     );
 }
@@ -7408,7 +7409,7 @@ fn test_mark_obsolete_accounts_at_startup_purge_slot() {
 
     let pubkeys_with_duplicates_by_bin = vec![vec![pubkey1]];
 
-    let accounts_marked_obsolete =
+    let obsolete_stats =
         accounts_db.mark_obsolete_accounts_at_startup(slots, pubkeys_with_duplicates_by_bin);
 
     // Verify that slot 0 has not been purged
@@ -7423,7 +7424,7 @@ fn test_mark_obsolete_accounts_at_startup_purge_slot() {
         1
     );
 
-    assert_eq!(accounts_marked_obsolete, 2);
+    assert_eq!(obsolete_stats.accounts_marked_obsolete, 2);
 }
 
 #[test]
@@ -7441,7 +7442,7 @@ fn test_mark_obsolete_accounts_at_startup_multiple_bins() {
 
     let pubkeys_with_duplicates_by_bin = vec![vec![pubkey1], vec![pubkey2]];
 
-    let accounts_marked_obsolete =
+    let obsolete_stats =
         accounts_db.mark_obsolete_accounts_at_startup(2, pubkeys_with_duplicates_by_bin);
 
     // Verify that slot 0 has been purged
@@ -7461,13 +7462,14 @@ fn test_mark_obsolete_accounts_at_startup_multiple_bins() {
     );
 
     // Ensure that stats were accumulated correctly
-    assert_eq!(accounts_marked_obsolete, 2);
+    assert_eq!(obsolete_stats.accounts_marked_obsolete, 2);
+    assert_eq!(obsolete_stats.slots_removed, 1);
 }
 
-#[test_case(true; "mark_obsolete_accounts")]
-#[test_case(false; "do_not_mark_obsolete_accounts")]
 // This test verifies that when obsolete accounts are marked, the duplicates lt hash is set to the
 // default value. When they are not marked, it is populated. The second case ensures test validity.
+#[test_case(true; "mark_obsolete_accounts")]
+#[test_case(false; "do_not_mark_obsolete_accounts")]
 fn test_obsolete_accounts_empty_default_duplicate_hash(mark_obsolete_accounts: bool) {
     let slot0 = 0;
     let slot1 = 1;
@@ -7497,7 +7499,7 @@ fn test_obsolete_accounts_empty_default_duplicate_hash(mark_obsolete_accounts: b
 
     storage
         .accounts
-        .write_accounts(&(slot0, &[(&pubkey, &account1)][..]), 0);
+        .write_accounts(&(slot1, &[(&pubkey, &account1)][..]), 0);
 
     assert!(!db.accounts_index.contains(&pubkey));
     let result = db.generate_index(None, false, true);

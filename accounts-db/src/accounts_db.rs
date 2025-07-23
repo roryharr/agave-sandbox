@@ -36,8 +36,8 @@ use {
         },
         accounts_cache::{AccountsCache, CachedAccount, SlotCache},
         accounts_db::stats::{
-            AccountsStats, CleanAccountsStats, FlushStats, PurgeStats, ShrinkAncientStats,
-            ShrinkStats, ShrinkStatsSub, StoreAccountsTiming,
+            AccountsStats, CleanAccountsStats, FlushStats, ObsoleteAccountStats, PurgeStats,
+            ShrinkAncientStats, ShrinkStats, ShrinkStatsSub, StoreAccountsTiming,
         },
         accounts_file::{
             AccountsFile, AccountsFileError, AccountsFileProvider, MatchAccountOwnerError,
@@ -595,6 +595,7 @@ struct GenerateIndexTimings {
     pub all_accounts_are_zero_lamports_slots: u64,
     pub mark_obsolete_accounts_us: u64,
     pub num_obsolete_accounts_marked: u64,
+    pub num_slots_removed_as_obsolete: u64,
 }
 
 #[derive(Default, Debug, PartialEq, Eq)]
@@ -678,6 +679,11 @@ impl GenerateIndexTimings {
             (
                 "num_obsolete_accounts_marked",
                 self.num_obsolete_accounts_marked,
+                i64
+            ),
+            (
+                "num_slots_removed_as_obsolete",
+                self.num_slots_removed_as_obsolete,
                 i64
             ),
         );
@@ -7821,7 +7827,7 @@ impl AccountsDb {
         &self,
         limit_load_slot_count_from_snapshot: Option<usize>,
         verify: bool,
-        populate_duplicates_lt_hash: bool,
+        should_calculate_duplicates_lt_hash: bool,
     ) -> IndexGenerationInfo {
         let mut total_time = Measure::start("generate_index");
         let mut slots = self.storage.all_slots();
@@ -7830,12 +7836,6 @@ impl AccountsDb {
             slots.truncate(limit); // get rid of the newer slots and keep just the older
         }
         let accounts_data_len = AtomicU64::new(0);
-        // With obsolete accounts, the duplicates lt_hash should NOT be created, but current
-        // code uses the presence of a duplicates lt_hash to determine whether the snapshot
-        // used a merkle hash or a lattice hash. This should be refactored when merkle
-        // hash support is disabled
-        let should_calculate_duplicates_lt_hash =
-            populate_duplicates_lt_hash && !self.mark_obsolete_accounts;
 
         let zero_lamport_pubkeys = Mutex::new(HashSet::new());
         let mut outer_duplicates_lt_hash = None;
@@ -8129,7 +8129,13 @@ impl AccountsDb {
                                     ) = self.visit_duplicate_pubkeys_during_startup(
                                         pubkeys,
                                         &timings,
-                                        should_calculate_duplicates_lt_hash,
+                                        // With obsolete accounts, the duplicates lt_hash should
+                                        // NOT be created, but hash generation from storages
+                                        // requires a duplicates_lt_hash. Skip calculating the
+                                        // duplicates hash from accounts if obsolete accounts
+                                        // are being marked.
+                                        should_calculate_duplicates_lt_hash
+                                            && !self.mark_obsolete_accounts,
                                     );
                                     let intermediate = DuplicatePubkeysVisitedInfo {
                                         accounts_data_len_from_duplicates,
@@ -8182,24 +8188,26 @@ impl AccountsDb {
 
                 self.set_storage_count_and_alive_bytes(storage_info, &mut timings);
 
-                let mut mark_obsolete_accounts_time = Measure::start("mark_obsolete_accounts_time");
-                let num_obsolete_accounts_marked = if self.mark_obsolete_accounts {
+                if self.mark_obsolete_accounts {
+                    let mut mark_obsolete_accounts_time =
+                        Measure::start("mark_obsolete_accounts_time");
                     // Mark all reclaims at max_slot. This is safe because only the snapshot paths care about
                     // this information. Since this account was just restored from the previous snapshot and
                     // it is known that it was already obsolete at that time, it must hold true that it will
                     // still be obsolete if a newer snapshot is created, since a newer snapshot will always
                     // be performed on a slot greater than the current slot
                     let slot_marked_obsolete = slots.last().copied().unwrap();
-                    self.mark_obsolete_accounts_at_startup(
+                    let obsolete_account_stats = self.mark_obsolete_accounts_at_startup(
                         slot_marked_obsolete,
                         unique_pubkeys_by_bin,
-                    )
-                } else {
-                    0
-                };
-                mark_obsolete_accounts_time.stop();
-                timings.mark_obsolete_accounts_us = mark_obsolete_accounts_time.as_us();
-                timings.num_obsolete_accounts_marked = num_obsolete_accounts_marked;
+                    );
+
+                    mark_obsolete_accounts_time.stop();
+                    timings.mark_obsolete_accounts_us = mark_obsolete_accounts_time.as_us();
+                    timings.num_obsolete_accounts_marked =
+                        obsolete_account_stats.accounts_marked_obsolete;
+                    timings.num_slots_removed_as_obsolete = obsolete_account_stats.slots_removed;
+                }
             }
             total_time.stop();
             timings.total_time_us = total_time.as_us();
@@ -8213,7 +8221,7 @@ impl AccountsDb {
         // duplicates, then we'd never set outer_duplicates_lt_hash to Some! So do one
         // last check here to ensure outer_duplicates_lt_hash is Some if we're supposed
         // to calculate the duplicates lt hash.
-        if populate_duplicates_lt_hash && outer_duplicates_lt_hash.is_none() {
+        if should_calculate_duplicates_lt_hash && outer_duplicates_lt_hash.is_none() {
             outer_duplicates_lt_hash = Some(Box::new(DuplicatesLtHash::default()));
         }
 
@@ -8229,10 +8237,8 @@ impl AccountsDb {
         &self,
         slot_marked_obsolete: Slot,
         pubkeys_with_duplicates_by_bin: Vec<Vec<Pubkey>>,
-    ) -> u64 {
-        let stats = PurgeStats::default();
-
-        let reclaims_marked: usize = pubkeys_with_duplicates_by_bin
+    ) -> ObsoleteAccountStats {
+        let stats: ObsoleteAccountStats = pubkeys_with_duplicates_by_bin
             .par_iter()
             .map(|pubkeys_by_bin| {
                 let reclaims = self.accounts_index.clean_and_unref_rooted_entries_by_bin(
@@ -8245,6 +8251,7 @@ impl AccountsDb {
                         }
                     },
                 );
+                let stats = PurgeStats::default();
 
                 // Convert from a vector to a hashset for use in reclaims
                 let pubkeys_removed_from_accounts_index: PubkeysRemovedFromAccountsIndex =
@@ -8258,12 +8265,14 @@ impl AccountsDb {
                     HandleReclaims::ProcessDeadSlots(&stats),
                     MarkAccountsObsolete::Yes(slot_marked_obsolete),
                 );
-                reclaims.len()
+                ObsoleteAccountStats {
+                    accounts_marked_obsolete: reclaims.len() as u64,
+                    slots_removed: stats.total_removed_storage_entries.load(Ordering::Relaxed)
+                        as u64,
+                }
             })
             .sum();
-
-        stats.report("reclaim_duplicates_index_generation", None);
-        reclaims_marked as u64
+        stats
     }
 
     /// Startup processes can consume large amounts of memory while inserting accounts into the index as fast as possible.
