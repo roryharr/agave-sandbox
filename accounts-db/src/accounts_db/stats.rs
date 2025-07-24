@@ -766,12 +766,12 @@ impl ShrinkAncientStats {
 }
 
 #[derive(Debug, Default)]
-pub struct ObsoleteAccountStats {
+pub struct ObsoleteAccountsStats {
     pub accounts_marked_obsolete: u64,
     pub slots_removed: u64,
 }
 
-impl Sum<Self> for ObsoleteAccountStats {
+impl Sum<Self> for ObsoleteAccountsStats {
     fn sum<I>(iter: I) -> Self
     where
         I: Iterator<Item = Self>,

@@ -36,7 +36,7 @@ use {
         },
         accounts_cache::{AccountsCache, CachedAccount, SlotCache},
         accounts_db::stats::{
-            AccountsStats, CleanAccountsStats, FlushStats, ObsoleteAccountStats, PurgeStats,
+            AccountsStats, CleanAccountsStats, FlushStats, ObsoleteAccountsStats, PurgeStats,
             ShrinkAncientStats, ShrinkStats, ShrinkStatsSub, StoreAccountsTiming,
         },
         accounts_file::{
@@ -8237,8 +8237,8 @@ impl AccountsDb {
         &self,
         slot_marked_obsolete: Slot,
         pubkeys_with_duplicates_by_bin: Vec<Vec<Pubkey>>,
-    ) -> ObsoleteAccountStats {
-        let stats: ObsoleteAccountStats = pubkeys_with_duplicates_by_bin
+    ) -> ObsoleteAccountsStats {
+        let stats: ObsoleteAccountsStats = pubkeys_with_duplicates_by_bin
             .par_iter()
             .map(|pubkeys_by_bin| {
                 let reclaims = self.accounts_index.clean_and_unref_rooted_entries_by_bin(
@@ -8265,7 +8265,7 @@ impl AccountsDb {
                     HandleReclaims::ProcessDeadSlots(&stats),
                     MarkAccountsObsolete::Yes(slot_marked_obsolete),
                 );
-                ObsoleteAccountStats {
+                ObsoleteAccountsStats {
                     accounts_marked_obsolete: reclaims.len() as u64,
                     slots_removed: stats.total_removed_storage_entries.load(Ordering::Relaxed)
                         as u64,
