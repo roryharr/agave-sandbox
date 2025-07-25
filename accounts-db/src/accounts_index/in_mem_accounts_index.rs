@@ -1853,7 +1853,7 @@ mod tests {
                         && slot_list.contains(&(new_slot, info))
                     {
                         // skip this permutation if 'new_slot' is already in the slot_list, but we are trying to reclaim other slot
-                        // This is a panic case
+                        // This is an assert case as only one of new_slot and other_slot should be in the slot list
                         continue;
                     }
 
