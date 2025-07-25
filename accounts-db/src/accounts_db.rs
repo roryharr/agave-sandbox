@@ -3473,8 +3473,11 @@ impl AccountsDb {
         // mutating rooted slots; There should be no writers to them.
         let accounts = [(slot, &shrink_collect.alive_accounts.alive_accounts()[..])];
         let storable_accounts = StorableAccountsBySlot::new(slot, &accounts, self);
-        stats_sub.store_accounts_timing =
-            self.store_accounts_frozen(storable_accounts, shrink_in_progress.new_storage());
+        stats_sub.store_accounts_timing = self.store_accounts_frozen(
+            storable_accounts,
+            shrink_in_progress.new_storage(),
+            UpdateIndexThreadSelection::PoolWithThreshold,
+        );
 
         rewrite_elapsed.stop();
         stats_sub.rewrite_elapsed_us = Saturating(rewrite_elapsed.as_us());
@@ -5544,10 +5547,16 @@ impl AccountsDb {
                     measure_us!(self.store_accounts_flush(
                         (slot, &accounts[..]),
                         &flushed_store,
-                        UpsertReclaim::PopulateReclaims
+                        UpsertReclaim::PopulateReclaims,
+                        UpdateIndexThreadSelection::PoolWithThreshold,
                     ))
                 } else {
-                    measure_us!(self.store_accounts_frozen((slot, &accounts[..]), &flushed_store))
+                    measure_us!(self
+                    .store_accounts_frozen(
+                        (slot, &accounts[..]),
+                        &flushed_store,
+                        UpdateIndexThreadSelection::PoolWithThreshold,
+                    ))
                 };
             flush_stats.store_accounts_timing = store_accounts_timing_inner;
             flush_stats.store_accounts_total_us = Saturating(store_accounts_total_inner_us);
@@ -6655,8 +6664,9 @@ impl AccountsDb {
         &self,
         accounts: impl StorableAccounts<'a>,
         storage: &Arc<AccountStorageEntry>,
+        update_index_thread_selection: UpdateIndexThreadSelection,
     ) -> StoreAccountsTiming {
-        self.store_accounts_flush(accounts, storage, UpsertReclaim::IgnoreReclaims)
+        self.store_accounts_flush(accounts, storage, UpsertReclaim::IgnoreReclaims, update_index_thread_selection)
     }
 
     /// Stores accounts in the storage and updates the index.
@@ -6666,6 +6676,7 @@ impl AccountsDb {
         accounts: impl StorableAccounts<'a>,
         storage: &Arc<AccountStorageEntry>,
         handle_reclaims: UpsertReclaim,
+        update_index_thread_selection: UpdateIndexThreadSelection,
     ) -> StoreAccountsTiming {
         let slot = accounts.target_slot();
         let mut store_accounts_time = Measure::start("store_accounts");
@@ -6696,7 +6707,7 @@ impl AccountsDb {
             infos,
             &accounts,
             handle_reclaims,
-            UpdateIndexThreadSelection::PoolWithThreshold,
+            update_index_thread_selection,
             &self.thread_pool_clean,
         );
 
