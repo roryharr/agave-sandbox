@@ -1228,9 +1228,6 @@ impl AccountStorageEntry {
 
         self.alive_bytes.fetch_sub(num_bytes, Ordering::Release);
         count = count.saturating_sub(num_accounts);
-        if count == 0 {
-            self.alive_bytes.store(0, Ordering::Release);
-        }
         *count_and_status = (count, status);
         count
     }
@@ -2881,11 +2878,18 @@ impl AccountsDb {
             return;
         }
         let mut clean_dead_slots = Measure::start("reclaims::clean_dead_slots");
-        self.clean_stored_dead_slots(
-            dead_slots,
-            purged_account_slots,
-            pubkeys_removed_from_accounts_index,
-        );
+
+        if !self.mark_obsolete_accounts
+        {
+            self.clean_stored_dead_slots(
+                dead_slots,
+                purged_account_slots,
+                pubkeys_removed_from_accounts_index,
+            );
+        }
+        else {
+            self.remove_dead_slots_metadata(dead_slots.iter());
+        }
         clean_dead_slots.stop();
 
         let mut purge_removed_slots = Measure::start("reclaims::purge_removed_slots");
@@ -6180,9 +6184,7 @@ impl AccountsDb {
                     *slot
                 );
 
-                let remaining_accounts = if offsets.len() == store.count()
-                    && !self.mark_obsolete_accounts
-                {
+                let remaining_accounts = if offsets.len() == store.count() {
                     // all remaining alive accounts in the storage are being removed, so the entire storage/slot is dead
                     store.remove_accounts(store.alive_bytes(), offsets.len())
                 } else {
