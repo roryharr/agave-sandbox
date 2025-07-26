@@ -5739,7 +5739,6 @@ impl AccountsDb {
             .par_iter()
             .fold(LtHash::identity, |mut accum, storage| {
                 let obsolete_accounts = storage.get_obsolete_accounts(Some(max_slot));
-                assert_eq!(obsolete_accounts.len(), obsolete_accounts_filtered_slot.len());
                 storage
                     .accounts
                     .scan_accounts(|offset, account| {
