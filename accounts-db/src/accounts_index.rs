@@ -1421,6 +1421,24 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> AccountsIndex<T, U> {
             })
             .for_each(f);
     }
+    /// Caches the given pubkey at the given slot with the new account information.
+    pub fn cache(&self, new_slot: Slot, pubkey: &Pubkey, account_info: T) -> Slot{
+        // We don't atomically update both primary index and secondary index together.
+        // This certainly creates a small time window with inconsistent state across the two indexes.
+        // However, this is acceptable because:
+        //
+        //  - A strict consistent view at any given moment of time is not necessary, because the only
+        //  use case for the secondary index is `scan`, and `scans` are only supported/require consistency
+        //  on frozen banks, and this inconsistency is only possible on working banks.
+        //
+        //  - The secondary index is never consulted as primary source of truth for gets/stores.
+        //  So, what the accounts_index sees alone is sufficient as a source of truth for other non-scan
+        //  account operations.
+        let map = self.get_bin(pubkey);
+
+        map.cache(pubkey, new_slot, account_info)
+        //self.update_secondary_indexes(pubkey, account, account_indexes);
+    }
 
     /// Updates the given pubkey at the given slot with the new account information.
     /// on return, the index's previous account info may be returned in 'reclaims' depending on 'previous_slot_entry_was_cached'

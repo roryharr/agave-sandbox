@@ -413,9 +413,13 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
 
     /// Insert a cached entry into the accounts index
     /// If the entry is already present, just mark dirty and set the age to the future
-    fn cache_entry_at_slot(current: &AccountMapEntry<T>, new_value: SlotListItem<T>) {
+    fn cache_entry_at_slot(current: &AccountMapEntry<T>, new_value: (Slot, T)) -> Slot {
         let mut slot_list = current.slot_list_write_lock();
         let (slot, new_entry) = new_value;
+
+        // Find the highest slot in the current slot_list
+        let highest_slot = slot_list.iter().map(|(existing_slot, _)| *existing_slot).max().unwrap_or(0);
+
         if !slot_list
             .iter()
             .any(|(existing_slot, _)| *existing_slot == slot)
@@ -423,6 +427,18 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
             slot_list.push((slot, new_entry));
         }
         current.set_dirty(true);
+
+        // Return the difference between the current slot and the highest slot
+        //TODO: Clip here. Sometimes highest_slot is > slot
+        slot - highest_slot
+    }
+
+    pub fn cache(&self, pubkey: &Pubkey, slot: Slot, account_info: T) -> Slot {
+        let mut new_slot = 0;
+        self.get_or_create_index_entry_for_pubkey(pubkey, |entry| {
+            new_slot = Self::cache_entry_at_slot(entry, (slot, account_info));
+        });
+        new_slot
     }
 
     pub fn upsert(
