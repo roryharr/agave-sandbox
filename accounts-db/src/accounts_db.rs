@@ -36,7 +36,8 @@ use {
         accounts_cache::{AccountsCache, CachedAccount, SlotCache},
         accounts_db::stats::{
             AccountsStats, CleanAccountsStats, FlushStats, ObsoleteAccountsStats, PurgeStats,
-            ShrinkAncientStats, ShrinkStats, ShrinkStatsSub, StoreAccountsTiming,
+            ShrinkAncientStats, ShrinkStats, ShrinkStatsSub, StoreAccountsTiming, AgeBuckets,
+            AgeBucketsNonAtomic,
         },
         accounts_file::{AccountsFile, AccountsFileError, AccountsFileProvider, StorageAccess},
         accounts_hash::{AccountLtHash, AccountsLtHash, ZERO_LAMPORT_ACCOUNT_LT_HASH},
@@ -1283,6 +1284,7 @@ pub struct AccountsDb {
     pub num_hash_threads: Option<NonZeroUsize>,
 
     pub stats: AccountsStats,
+    pub age_bucket: AgeBuckets,
 
     clean_accounts_stats: CleanAccountsStats,
 
@@ -1540,6 +1542,7 @@ impl AccountsDb {
             num_hash_threads: accounts_db_config.num_hash_threads,
             verify_accounts_hash_in_bg: VerifyAccountsHashInBackground::default(),
             active_stats: ActiveStats::default(),
+            age_bucket: AgeBuckets::default(),
             storage: AccountStorage::default(),
             accounts_cache: AccountsCache::default(),
             uncleaned_pubkeys: DashMap::default(),
@@ -5652,6 +5655,36 @@ impl AccountsDb {
         }
     }
 
+    fn cache_accounts<'a>(&self, infos: Vec<AccountInfo>, accounts: &impl StorableAccounts<'a>) {
+        let target_slot = accounts.target_slot();
+        let len = std::cmp::min(accounts.len(), infos.len());
+        let mut slot_diff_metrics = AgeBucketsNonAtomic::default();
+
+        (0..len).for_each(|i| {
+            let info = infos[i];
+            accounts.account(i, |account| {
+                let slot_diff = self.accounts_index
+                    .cache(target_slot, account.pubkey(), info);
+
+                if slot_diff == target_slot {
+                    slot_diff_metrics.new_accounts +=  1; // First bucket for new (slot_diff == target_slot)
+                } else if slot_diff == 0 {
+                    slot_diff_metrics.buckets[1]  +=1; // Second bucket for slot_diff == 0
+                } else {
+                    let mut bucket = 2;
+                    let mut value = slot_diff;
+                    while value >= 10 && bucket < 10 {
+                        value /= 10;
+                        bucket += 1;
+                    }
+                    slot_diff_metrics.buckets[bucket]  +=1;
+                };
+            });
+        });
+        self.age_bucket.accumulate(&slot_diff_metrics);
+        self.age_bucket.report();
+    }
+
     fn update_index<'a>(
         &self,
         infos: Vec<AccountInfo>,
@@ -6058,7 +6091,7 @@ impl AccountsDb {
         &self,
         accounts: impl StorableAccounts<'a>,
         transactions: Option<&'a [&'a SanitizedTransaction]>,
-        update_index_thread_selection: UpdateIndexThreadSelection,
+        _update_index_thread_selection: UpdateIndexThreadSelection,
     ) {
         // If all transactions in a batch are errored,
         // it's possible to get a store with no accounts.
@@ -6086,12 +6119,9 @@ impl AccountsDb {
         // Update the index
         let mut update_index_time = Measure::start("update_index");
 
-        self.update_index(
+        self.cache_accounts(
             infos,
-            &accounts,
-            UpsertReclaim::PreviousSlotEntryWasCached,
-            update_index_thread_selection,
-            &self.thread_pool_foreground,
+            &accounts
         );
 
         update_index_time.stop();
