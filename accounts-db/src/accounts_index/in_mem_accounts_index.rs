@@ -706,7 +706,9 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
                     found_slot = true;
 
                     if !is_cur_account_cached {
-                        // current info at 'old_slot' is NOT cached, so we should NOT addref. This slot already has a ref count for this pubkey.
+                        // Replacing an existing entry at 'old_slot' with a new entry at 'slot'.
+                        // If the previous entry at 'old_slot' was uncached, addref is not needed
+                        // as the previous entry already had a reference and is being removed.
                         addref = false;
                     }
                 } else {
