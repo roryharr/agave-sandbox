@@ -5839,6 +5839,19 @@ impl AccountsDb {
         }
     }
 
+    fn cache_accounts<'a>(&self, infos: Vec<AccountInfo>, accounts: &impl StorableAccounts<'a>) {
+        let target_slot = accounts.target_slot();
+        let len = std::cmp::min(accounts.len(), infos.len());
+
+        (0..len).for_each(|i| {
+            let info = infos[i];
+            accounts.account(i, |account| {
+                self.accounts_index
+                    .cache(target_slot, account.pubkey(), info);
+            });
+        });
+    }
+
     fn update_index<'a>(
         &self,
         infos: Vec<AccountInfo>,
@@ -6243,11 +6256,7 @@ impl AccountsDb {
     }
 
     pub fn store_cached<'a>(&self, accounts: impl StorableAccounts<'a>) {
-        self.store(
-            accounts,
-            None,
-            UpdateIndexThreadSelection::PoolWithThreshold,
-        );
+        self.store(accounts, None);
     }
 
     pub(crate) fn store_cached_inline_update_index<'a>(
@@ -6255,14 +6264,13 @@ impl AccountsDb {
         accounts: impl StorableAccounts<'a>,
         transactions: Option<&'a [&'a SanitizedTransaction]>,
     ) {
-        self.store(accounts, transactions, UpdateIndexThreadSelection::Inline);
+        self.store(accounts, transactions);
     }
 
     fn store<'a>(
         &self,
         accounts: impl StorableAccounts<'a>,
         transactions: Option<&'a [&'a SanitizedTransaction]>,
-        update_index_thread_selection: UpdateIndexThreadSelection,
     ) {
         // If all transactions in a batch are errored,
         // it's possible to get a store with no accounts.
@@ -6279,7 +6287,7 @@ impl AccountsDb {
             .store_total_data
             .fetch_add(total_data as u64, Ordering::Relaxed);
 
-        self.store_accounts_unfrozen(accounts, transactions, update_index_thread_selection);
+        self.store_accounts_unfrozen(accounts, transactions);
         self.report_store_timings();
     }
 
@@ -6425,7 +6433,6 @@ impl AccountsDb {
         &self,
         accounts: impl StorableAccounts<'a>,
         transactions: Option<&'a [&'a SanitizedTransaction]>,
-        update_index_thread_selection: UpdateIndexThreadSelection,
     ) {
         let slot = accounts.target_slot();
 
@@ -6440,13 +6447,7 @@ impl AccountsDb {
         // Update the index
         let mut update_index_time = Measure::start("update_index");
 
-        self.update_index(
-            infos,
-            &accounts,
-            UpsertReclaim::PreviousSlotEntryWasCached,
-            update_index_thread_selection,
-            &self.thread_pool,
-        );
+        self.cache_accounts(infos, &accounts);
 
         update_index_time.stop();
         self.stats
@@ -7476,11 +7477,7 @@ impl AccountsDb {
 
     /// callers used to call store_uncached. But, this is not allowed anymore.
     pub fn store_for_tests(&self, slot: Slot, accounts: &[(&Pubkey, &AccountSharedData)]) {
-        self.store(
-            (slot, accounts),
-            None,
-            UpdateIndexThreadSelection::PoolWithThreshold,
-        );
+        self.store((slot, accounts), None);
     }
 
     #[allow(clippy::needless_range_loop)]
