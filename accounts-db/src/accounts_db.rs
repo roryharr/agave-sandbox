@@ -36,7 +36,8 @@ use {
         accounts_cache::{AccountsCache, CachedAccount, SlotCache},
         accounts_db::stats::{
             AccountsStats, CleanAccountsStats, FlushStats, ObsoleteAccountsStats, PurgeStats,
-            ShrinkAncientStats, ShrinkStats, ShrinkStatsSub, StoreAccountsTiming,
+            ShrinkAncientStats, ShrinkStats, ShrinkStatsSub, StoreAccountsTiming, AgeBuckets,
+            AgeBucketsNonAtomic,
         },
         accounts_file::{
             AccountsFile, AccountsFileError, AccountsFileProvider, MatchAccountOwnerError,
@@ -1313,6 +1314,7 @@ pub struct AccountsDb {
     pub thread_pool_hash: ThreadPool,
 
     pub stats: AccountsStats,
+    pub age_bucket: AgeBuckets,
 
     clean_accounts_stats: CleanAccountsStats,
 
@@ -1592,6 +1594,7 @@ impl AccountsDb {
             thread_pool_hash,
             verify_accounts_hash_in_bg: VerifyAccountsHashInBackground::default(),
             active_stats: ActiveStats::default(),
+            age_bucket: AgeBuckets::default(),
             storage: AccountStorage::default(),
             accounts_cache: AccountsCache::default(),
             uncleaned_pubkeys: DashMap::default(),
@@ -5842,14 +5845,31 @@ impl AccountsDb {
     fn cache_accounts<'a>(&self, infos: Vec<AccountInfo>, accounts: &impl StorableAccounts<'a>) {
         let target_slot = accounts.target_slot();
         let len = std::cmp::min(accounts.len(), infos.len());
+        let mut slot_diff_metrics = AgeBucketsNonAtomic::default();
 
         (0..len).for_each(|i| {
             let info = infos[i];
             accounts.account(i, |account| {
-                self.accounts_index
+                let slot_diff = self.accounts_index
                     .cache(target_slot, account.pubkey(), info);
+
+                if slot_diff == target_slot {
+                    slot_diff_metrics.new_accounts +=  1; // First bucket for new (slot_diff == target_slot)
+                } else if slot_diff == 0 {
+                    slot_diff_metrics.buckets[1]  +=1; // Second bucket for slot_diff == 0
+                } else {
+                    let mut bucket = 2;
+                    let mut value = slot_diff;
+                    while value >= 10 && bucket < 10 {
+                        value /= 10;
+                        bucket += 1;
+                    }
+                    slot_diff_metrics.buckets[bucket]  +=1;
+                };
             });
         });
+        self.age_bucket.accumulate(&slot_diff_metrics);
+        self.age_bucket.report();
     }
 
     fn update_index<'a>(

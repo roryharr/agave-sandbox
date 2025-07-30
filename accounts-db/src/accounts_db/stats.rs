@@ -33,6 +33,47 @@ pub struct AccountsStats {
 }
 
 #[derive(Debug, Default)]
+pub struct AgeBuckets {
+    pub last_report: AtomicInterval,
+    pub new_accounts: AtomicU64,
+    pub buckets: [AtomicU64; 10],
+}
+
+impl AgeBuckets {
+    pub fn report(&self) {
+        if self.last_report.should_update(1000) {
+            datapoint_info!(
+                "accounts_age_store_cached",
+                ("new_accounts", self.new_accounts.load(Ordering::Relaxed), i64),
+                ("bucket_0", self.buckets[0].load(Ordering::Relaxed), i64),
+                ("bucket_1", self.buckets[1].load(Ordering::Relaxed), i64),
+                ("bucket_2", self.buckets[2].load(Ordering::Relaxed), i64),
+                ("bucket_3", self.buckets[3].load(Ordering::Relaxed), i64),
+                ("bucket_4", self.buckets[4].load(Ordering::Relaxed), i64),
+                ("bucket_5", self.buckets[5].load(Ordering::Relaxed), i64),
+                ("bucket_6", self.buckets[6].load(Ordering::Relaxed), i64),
+                ("bucket_7", self.buckets[7].load(Ordering::Relaxed), i64),
+                ("bucket_8", self.buckets[8].load(Ordering::Relaxed), i64),
+                ("bucket_9", self.buckets[9].load(Ordering::Relaxed), i64)
+            );
+        }
+    }
+
+    pub fn accumulate(&self, other: &AgeBucketsNonAtomic) {
+        self.new_accounts.fetch_add(other.new_accounts, Ordering::Relaxed);
+        for (self_bucket, other_bucket) in self.buckets.iter().zip(other.buckets.iter()) {
+            self_bucket.fetch_add(*other_bucket, Ordering::Relaxed);
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct AgeBucketsNonAtomic {
+    pub new_accounts: u64,
+    pub buckets: [u64; 10],
+}
+
+#[derive(Debug, Default)]
 pub struct PurgeStats {
     pub last_report: AtomicInterval,
     pub safety_checks_elapsed: AtomicU64,
