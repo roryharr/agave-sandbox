@@ -83,7 +83,7 @@ fn stored_size_checked(data_len: usize) -> Option<usize> {
     STORE_META_OVERHEAD.checked_add(data_len)
 }
 
-pub const MAXIMUM_APPEND_VEC_FILE_SIZE: u64 = 16 * 1024 * 1024 * 1024; // 16 GiB
+pub const MAXIMUM_APPEND_VEC_FILE_SIZE: u64 = 8 * 1024 * 1024 * 1024; // 4 GiB
 
 /// An enum for AppendVec related errors.
 #[derive(Error, Debug)]
@@ -1461,7 +1461,7 @@ pub mod tests {
     #[test]
     fn test_append_vec_sanitize_len_and_size_maximum() {
         const LEN: usize = 0;
-        const SIZE: usize = 16 * 1024 * 1024 * 1024;
+        const SIZE: usize = 8 * 1024 * 1024 * 1024;
         let result = AppendVec::sanitize_len_and_size(LEN, SIZE);
         assert_matches!(result, Ok(_));
     }

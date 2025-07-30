@@ -5,7 +5,7 @@
 use {
     crate::{
         accounts_db::AccountsFileId, accounts_file::ALIGN_BOUNDARY_OFFSET,
-        accounts_index::IsCached, is_zero_lamport::IsZeroLamport,
+        accounts_index::IsCached, is_zero_lamport::IsZeroLamport, accounts_index::NewThisEpoch,
     },
     modular_bitfield::prelude::*,
 };
@@ -69,14 +69,15 @@ pub type OffsetReduced = u32;
 /// Realistically, a max offset is (1<<31 - 156) bytes or so for an account with zero data length. Of course, this
 /// depends on the layout on disk, compression, etc. But, 8 bytes per account will never be possible.
 /// So, we use this last value as a sentinel to say that the account info refers to an entry in the write cache.
-const CACHED_OFFSET: OffsetReduced = (1 << (OffsetReduced::BITS - 1)) - 1;
+const CACHED_OFFSET: OffsetReduced = (1 << (OffsetReduced::BITS - 2)) - 1;
 
 #[bitfield(bits = 32)]
 #[repr(C)]
 #[derive(Debug, Default, Copy, Clone, Eq, PartialEq)]
 pub struct PackedOffsetAndFlags {
     /// this provides 2^31 bits, which when multiplied by 8 (sizeof(u64)) = 16G, which is the maximum size of an append vec
-    offset_reduced: B31,
+    offset_reduced: B30,
+    new_this_epoch: bool,
     /// use 1 bit to specify that the entry is zero lamport
     is_zero_lamport: bool,
 }
@@ -102,6 +103,18 @@ impl IsCached for AccountInfo {
         self.account_offset_and_flags.offset_reduced() == CACHED_OFFSET
     }
 }
+
+impl NewThisEpoch for AccountInfo {
+    fn is_new_this_epoch(&self) -> bool {
+        self.account_offset_and_flags.new_this_epoch()
+    }
+
+    fn set_is_new_this_epoch(&mut self)
+    {
+        self.account_offset_and_flags.set_new_this_epoch(true);
+    }
+}
+
 
 impl IsCached for StorageLocation {
     fn is_cached(&self) -> bool {

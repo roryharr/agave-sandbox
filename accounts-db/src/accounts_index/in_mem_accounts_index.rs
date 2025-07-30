@@ -520,8 +520,20 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
     /// Insert a cached entry into the accounts index
     /// If the entry is already present, just mark dirty and set the age to the future
     /// Code is required just for test for now, but will be used in future PRs so not putting in the test area
-    fn cache_entry_at_slot(&self, entry: &AccountMapEntry<T>, slot: Slot, account_info: T) {
+    fn cache_entry_at_slot(&self, entry: &AccountMapEntry<T>, slot: Slot, mut account_info: T, last_snapshot: Slot) {
         let mut slot_list = entry.slot_list.write().unwrap();
+
+        // Get the maximum slot in the slot list
+        let max_slot_entry = slot_list.iter().max_by_key(|(slot, _)| slot);
+
+        // Get the entry for the maximum slot if it exists
+        if let Some((sub_slot, max_account_info)) = max_slot_entry {
+            // If the entry exists, check the flag is_new_this_epoch. If it's true, then set it in account_info
+            if *sub_slot >= last_snapshot && max_account_info.is_new_this_epoch()  {
+                account_info.set_is_new_this_epoch();
+            }
+        }
+
         if !slot_list
             .iter()
             .any(|(existing_slot, _)| *existing_slot == slot)
@@ -532,9 +544,9 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
         self.set_age_to_future(entry, true);
     }
 
-    pub fn cache(&self, pubkey: &Pubkey, slot: Slot, account_info: T) {
+    pub fn cache(&self, pubkey: &Pubkey, slot: Slot, account_info: T, last_snapshot: Slot) {
         self.get_or_create_index_entry_for_pubkey(pubkey, |entry| {
-            self.cache_entry_at_slot(entry, slot, account_info)
+            self.cache_entry_at_slot(entry, slot, account_info, last_snapshot)
         });
     }
 
@@ -1432,7 +1444,7 @@ mod tests {
             assert!(entry.slot_list.read().unwrap().is_empty());
             assert_eq!(entry.ref_count(), 0);
             assert!(entry.dirty());
-            accounts_index.cache_entry_at_slot(entry, slot, 0);
+            accounts_index.cache_entry_at_slot(entry, slot, 0, 0);
             callback_called = true;
         });
 
@@ -1501,7 +1513,7 @@ mod tests {
             assert_eq!(entry.slot_list.read().unwrap().len(), 1);
             assert_eq!(entry.ref_count(), 1);
             assert!(!entry.dirty()); // Entry loaded from disk should not be dirty
-            accounts_index.cache_entry_at_slot(entry, slot, 0);
+            accounts_index.cache_entry_at_slot(entry, slot, 0, 0);
             callback_called = true;
         });
 

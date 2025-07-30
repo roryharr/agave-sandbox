@@ -48,6 +48,7 @@ use {
             AccountsIndexConfig, AccountsIndexRootsStats, AccountsIndexScanResult, DiskIndexValue,
             IndexKey, IndexValue, IsCached, RefCount, ScanConfig, ScanFilter, ScanResult, SlotList,
             UpsertReclaim, ACCOUNTS_INDEX_CONFIG_FOR_BENCHMARKS, ACCOUNTS_INDEX_CONFIG_FOR_TESTING,
+            NewThisEpoch,
         },
         accounts_index_storage::Startup,
         accounts_update_notifier_interface::AccountsUpdateNotifier,
@@ -2818,7 +2819,7 @@ impl AccountsDb {
                 // not get purged here are added to a list so they be considered for purging later
                 // (i.e. after the next full snapshot).
                 assert!(account_info.is_zero_lamport());
-                let cannot_purge = *slot > latest_full_snapshot_slot.unwrap();
+                let cannot_purge = *slot > latest_full_snapshot_slot.unwrap() && !account_info.is_new_this_epoch();
                 if cannot_purge {
                     self.zero_lamport_accounts_to_purge_after_full_snapshot
                         .insert((*slot, *pubkey));
@@ -5847,7 +5848,7 @@ impl AccountsDb {
             let info = infos[i];
             accounts.account(i, |account| {
                 self.accounts_index
-                    .cache(target_slot, account.pubkey(), info);
+                    .cache(target_slot, account.pubkey(), info, self.latest_full_snapshot_slot().unwrap_or(0));
             });
         });
     }

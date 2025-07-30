@@ -189,7 +189,13 @@ pub trait IsCached {
     fn is_cached(&self) -> bool;
 }
 
-pub trait IndexValue: 'static + IsCached + IsZeroLamport + DiskIndexValue {}
+pub trait NewThisEpoch {
+    fn is_new_this_epoch(&self) -> bool;
+
+    fn set_is_new_this_epoch(&mut self);
+}
+
+pub trait IndexValue: 'static + IsCached + IsZeroLamport + DiskIndexValue + NewThisEpoch{}
 
 pub trait DiskIndexValue:
     'static + Clone + Debug + PartialEq + Copy + Default + Sync + Send
@@ -1459,7 +1465,7 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> AccountsIndex<T, U> {
             .for_each(f);
     }
     /// Caches the given pubkey at the given slot with the new account information.
-    pub fn cache(&self, new_slot: Slot, pubkey: &Pubkey, account_info: T) {
+    pub fn cache(&self, new_slot: Slot, pubkey: &Pubkey, account_info: T, last_snapshot: Slot) {
         // We don't atomically update both primary index and secondary index together.
         // This certainly creates a small time window with inconsistent state across the two indexes.
         // However, this is acceptable because:
@@ -1473,7 +1479,7 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> AccountsIndex<T, U> {
         //  account operations.
         let map = self.get_bin(pubkey);
 
-        map.cache(pubkey, new_slot, account_info);
+        map.cache(pubkey, new_slot, account_info, last_snapshot);
         //self.update_secondary_indexes(pubkey, account, account_indexes);
     }
 
@@ -1985,6 +1991,16 @@ pub mod tests {
     impl IsCached for AccountInfoTest {
         fn is_cached(&self) -> bool {
             true
+        }
+    }
+
+    impl NewThisEpoch for AccountInfoTest {
+        fn is_new_this_epoch(&self) -> bool {
+            false
+        }
+
+        fn set_is_new_this_epoch(&mut self) {
+
         }
     }
 
@@ -3512,9 +3528,27 @@ pub mod tests {
             false
         }
     }
+    impl NewThisEpoch for bool {
+        fn is_new_this_epoch(&self) -> bool {
+            false
+        }
+
+        fn set_is_new_this_epoch(&mut self) {
+
+        }
+    }
     impl IsCached for u64 {
         fn is_cached(&self) -> bool {
             false
+        }
+    }
+    impl NewThisEpoch for u64 {
+        fn is_new_this_epoch(&self) -> bool {
+            false
+        }
+
+        fn set_is_new_this_epoch(&mut self) {
+
         }
     }
     impl IsZeroLamport for bool {
