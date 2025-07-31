@@ -4593,6 +4593,7 @@ impl Bank {
                                 accounts_db.calculate_accounts_lt_hash_at_startup_from_storages(
                                     snapshot_storages.0.as_slice(),
                                     &duplicates_lt_hash.unwrap(),
+                                    slot
                                 )
                             }));
                         let is_ok = calculated_accounts_lt_hash == expected_accounts_lt_hash;
@@ -4629,6 +4630,7 @@ impl Bank {
                     .calculate_accounts_lt_hash_at_startup_from_storages(
                         snapshot_storages.0.as_slice(),
                         &duplicates_lt_hash,
+                        slot
                     )
             } else {
                 accounts

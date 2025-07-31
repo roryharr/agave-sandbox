@@ -789,6 +789,7 @@ mod tests {
     fn test_calculate_accounts_lt_hash_at_startup_from_storages(features: Features) {
         let (genesis_config, mint_keypair) = genesis_config_with(features);
         let (mut bank, bank_forks) = Bank::new_with_bank_forks_for_tests(&genesis_config);
+        let num_slots = 7;
 
         let amount = cmp::max(
             bank.get_minimum_balance_for_rent_exemption(0),
@@ -800,7 +801,7 @@ mod tests {
 
         // create some banks with some modified accounts so that there are stored accounts
         // (note: the number of banks and transfers are arbitrary)
-        for _ in 0..7 {
+        for _ in 0..num_slots {
             let slot = bank.slot() + 1;
             bank =
                 new_bank_from_parent_with_bank_forks(&bank_forks, bank, &Pubkey::default(), slot);
@@ -867,7 +868,7 @@ mod tests {
             .rc
             .accounts
             .accounts_db
-            .calculate_accounts_lt_hash_at_startup_from_storages(&storages, &duplicates_lt_hash);
+            .calculate_accounts_lt_hash_at_startup_from_storages(&storages, &duplicates_lt_hash, num_slots);
         assert_eq!(
             expected_accounts_lt_hash,
             calculated_accounts_lt_hash_from_storages
