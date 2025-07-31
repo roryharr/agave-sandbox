@@ -1127,7 +1127,7 @@ mod tests {
 
         // Create a few accounts
         let (genesis_config, mint_keypair) = create_genesis_config(sol_to_lamports(1_000_000.));
-        let (bank0, _bank_forks) = Bank::new_with_bank_forks_for_tests(&genesis_config);
+        let (bank0, bank_forks) = Bank::new_with_bank_forks_for_tests(&genesis_config);
         bank0
             .transfer(sol_to_lamports(1.), &mint_keypair, &key1.pubkey())
             .unwrap();
@@ -1142,47 +1142,11 @@ mod tests {
         // Force flush the bank to create the account storage entry
         bank0.squash();
         bank0.force_flush_accounts_cache();
+        bank0.freeze();
 
+        let snapshot_storages = get_snapshot_storages(&bank0);
 
-        let (_tmp_dir, accounts_dir) = create_tmp_accounts_dir_for_tests();
-        let bank_snapshots_dir = tempfile::TempDir::new().unwrap();
-        let snapshot_archives_dir = tempfile::TempDir::new().unwrap();
-        let snapshot_archive_format = SnapshotConfig::default().archive_format;
-
-        let full_snapshot_archive_info = bank_to_full_snapshot_archive(
-            bank_snapshots_dir.path(),
-            &bank0,
-            None,
-            snapshot_archives_dir.path(),
-            snapshot_archives_dir.path(),
-            snapshot_archive_format,
-        )
-        .unwrap();
-
-        let (roundtrip_bank, _) = bank_from_snapshot_archives(
-            &[accounts_dir],
-            bank_snapshots_dir.path(),
-            &full_snapshot_archive_info,
-            None,
-            &genesis_config,
-            &RuntimeConfig::default(),
-            None,
-            None,
-            None,
-            false,
-            false,
-            false,
-            Some(ACCOUNTS_DB_CONFIG_FOR_TESTING),
-            None,
-            Arc::default(),
-        )
-        .unwrap();
-        let bank_forks = BankForks::new_rw_arc(roundtrip_bank);
-        let bank = &bank_forks.read().unwrap().working_bank();
-
-        let snapshot_storages = get_snapshot_storages(&bank);
-
-        let hash1 = bank.accounts()
+        let hash1 = bank0.accounts()
         .accounts_db
         .calculate_accounts_lt_hash_at_startup_from_storages(
             snapshot_storages.as_slice(),
@@ -1190,7 +1154,7 @@ mod tests {
             0
         );
 
-        let new_bank = new_bank_from_parent_with_bank_forks(bank_forks.as_ref(), bank.clone(), &collector, 1);
+        let new_bank = new_bank_from_parent_with_bank_forks(bank_forks.as_ref(), bank0.clone(), &collector, 1);
 
         new_bank
             .transfer(sol_to_lamports(1.),  &key3, &key1.pubkey())
@@ -1199,11 +1163,10 @@ mod tests {
         new_bank.squash();
         new_bank.force_flush_accounts_cache();
 
-        bank.wait_for_initial_accounts_hash_verification_completed_for_tests();
 
-        let snapshot_storages = get_snapshot_storages(&bank);
+        let snapshot_storages = get_snapshot_storages(&bank0);
 
-        let hash = bank.accounts()
+        let hash = bank0.accounts()
         .accounts_db
         .calculate_accounts_lt_hash_at_startup_from_storages(
             snapshot_storages.as_slice(),
