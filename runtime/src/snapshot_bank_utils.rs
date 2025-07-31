@@ -901,7 +901,7 @@ mod tests {
             },
             status_cache::Status,
         },
-        solana_accounts_db::accounts_db::ACCOUNTS_DB_CONFIG_FOR_TESTING,
+        solana_accounts_db::accounts_db::{ DuplicatesLtHash, ACCOUNTS_DB_CONFIG_FOR_TESTING},
         solana_genesis_config::create_genesis_config,
         solana_keypair::Keypair,
         solana_native_token::{sol_to_lamports, LAMPORTS_PER_SOL},
@@ -1127,7 +1127,7 @@ mod tests {
 
         // Create a few accounts
         let (genesis_config, mint_keypair) = create_genesis_config(sol_to_lamports(1_000_000.));
-        let (bank0, bank_forks) = Bank::new_with_bank_forks_for_tests(&genesis_config);
+        let (bank0, _bank_forks) = Bank::new_with_bank_forks_for_tests(&genesis_config);
         bank0
             .transfer(sol_to_lamports(1.), &mint_keypair, &key1.pubkey())
             .unwrap();
@@ -1143,15 +1143,6 @@ mod tests {
         bank0.squash();
         bank0.force_flush_accounts_cache();
 
-        // Create a new slot, and invalidate the account for key1 in slot0
-        let slot = 1;
-        let bank1 =
-            new_bank_from_parent_with_bank_forks(bank_forks.as_ref(), bank0, &collector, slot);
-        bank1
-            .transfer(sol_to_lamports(1.), &key3, &key1.pubkey())
-            .unwrap();
-
-        bank1.fill_bank_with_ticks_for_tests();
 
         let (_tmp_dir, accounts_dir) = create_tmp_accounts_dir_for_tests();
         let bank_snapshots_dir = tempfile::TempDir::new().unwrap();
@@ -1160,7 +1151,7 @@ mod tests {
 
         let full_snapshot_archive_info = bank_to_full_snapshot_archive(
             bank_snapshots_dir.path(),
-            &bank1,
+            &bank0,
             None,
             snapshot_archives_dir.path(),
             snapshot_archives_dir.path(),
@@ -1188,23 +1179,39 @@ mod tests {
         .unwrap();
         let bank_forks = BankForks::new_rw_arc(roundtrip_bank);
         let bank = &bank_forks.read().unwrap().working_bank();
-        let new_bank = new_bank_from_parent_with_bank_forks(bank_forks.as_ref(), bank.clone(), &collector, 2);
-        //let roundtrip_bank = Arc::new(roundtrip_bank);
 
-        //let slot =2;
-        //let new_bank = Bank::new_from_parent(bank, &collector, slot);
+        let snapshot_storages = get_snapshot_storages(&bank);
 
-        println!("Creating new transactions");
+        let hash1 = bank.accounts()
+        .accounts_db
+        .calculate_accounts_lt_hash_at_startup_from_storages(
+            snapshot_storages.as_slice(),
+            &DuplicatesLtHash::default(),
+            0
+        );
+
+        let new_bank = new_bank_from_parent_with_bank_forks(bank_forks.as_ref(), bank.clone(), &collector, 1);
+
         new_bank
-            .transfer(sol_to_lamports(1.), &key1, &key3.pubkey())
+            .transfer(sol_to_lamports(1.),  &key3, &key1.pubkey())
             .unwrap();
         new_bank.fill_bank_with_ticks_for_tests();
-        println!("Flushing transactions");
+        new_bank.squash();
         new_bank.force_flush_accounts_cache();
 
         bank.wait_for_initial_accounts_hash_verification_completed_for_tests();
-        assert_eq!(bank1.slot(), bank.slot());
-        assert_eq!(bank1.hash(), bank.hash());
+
+        let snapshot_storages = get_snapshot_storages(&bank);
+
+        let hash = bank.accounts()
+        .accounts_db
+        .calculate_accounts_lt_hash_at_startup_from_storages(
+            snapshot_storages.as_slice(),
+            &DuplicatesLtHash::default(),
+            0
+        );
+
+        assert_eq!(hash1, hash);
     }
 
     /// Test roundtrip of bank to a full snapshot, then back again.  This test is more involved

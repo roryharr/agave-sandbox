@@ -4597,6 +4597,7 @@ impl Bank {
                                 )
                             }));
                         let is_ok = calculated_accounts_lt_hash == expected_accounts_lt_hash;
+                        println!("is ok! {}", is_ok);
                         if !is_ok {
                             let expected = expected_accounts_lt_hash.0.checksum();
                             let calculated = calculated_accounts_lt_hash.0.checksum();
@@ -4623,6 +4624,7 @@ impl Bank {
             });
             true // initial result is true. We haven't failed yet. If verification fails, we'll panic from bg thread.
         } else {
+            println!("Running in fg\n");
             let expected_accounts_lt_hash = self.accounts_lt_hash.lock().unwrap().clone();
             let calculated_accounts_lt_hash = if let Some(duplicates_lt_hash) = duplicates_lt_hash {
                 accounts
@@ -4690,7 +4692,7 @@ impl Bank {
         assert!(self.is_frozen());
         let calculated_hash = self.hash_internal_state();
         let expected_hash = self.hash();
-
+        println!("Verifying bank hash: slot: {}, {} (calculated) == {} (expected)", self.slot(), calculated_hash, expected_hash);
         if calculated_hash == expected_hash {
             true
         } else {
@@ -4816,6 +4818,7 @@ impl Bank {
         // clean/shrink until *after* we've gotten Arcs to the storages (this prevents their
         // untimely removal).  Simply, we call `verify_accounts_hash()` before we call `clean` or
         // `shrink`.
+        println!("Verifying snapshot with slot {}...", self.slot());
         let (verified_accounts, verify_accounts_time_us) = measure_us!({
             let should_verify_accounts = !self.rc.accounts.accounts_db.skip_initial_hash_calc;
             if should_verify_accounts {
