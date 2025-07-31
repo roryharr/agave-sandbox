@@ -519,7 +519,6 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
 
     /// Insert a cached entry into the accounts index
     /// If the entry is already present, just mark dirty and set the age to the future
-    /// Code is required just for test for now, but will be used in future PRs so not putting in the test area
     fn cache_entry_at_slot(&self, entry: &AccountMapEntry<T>, slot: Slot, account_info: T) {
         let mut slot_list = entry.slot_list.write().unwrap();
         if !slot_list
@@ -532,6 +531,8 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
         self.set_age_to_future(entry, true);
     }
 
+    /// Finds or creates an entry in the accounts index for pubkey and  
+    /// adds a cached entry at slot to the slot_list if not present
     pub fn cache(&self, pubkey: &Pubkey, slot: Slot, account_info: T) {
         self.get_or_create_index_entry_for_pubkey(pubkey, |entry| {
             self.cache_entry_at_slot(entry, slot, account_info)

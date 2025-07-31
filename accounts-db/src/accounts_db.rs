@@ -5839,17 +5839,49 @@ impl AccountsDb {
         }
     }
 
-    fn cache_accounts<'a>(&self, infos: Vec<AccountInfo>, accounts: &impl StorableAccounts<'a>) {
+    fn update_index_for_cached_accounts<'a>(
+        &self,
+        infos: Vec<AccountInfo>,
+        accounts: &impl StorableAccounts<'a>,
+        update_index_thread_selection: UpdateIndexThreadSelection,
+        thread_pool: &ThreadPool,
+    ) {
         let target_slot = accounts.target_slot();
         let len = std::cmp::min(accounts.len(), infos.len());
 
-        (0..len).for_each(|i| {
-            let info = infos[i];
-            accounts.account(i, |account| {
-                self.accounts_index
-                    .cache(target_slot, account.pubkey(), info);
+        let update = |start, end| {
+            (start..end).for_each(|i| {
+                let info = infos[i];
+                accounts.account(i, |account| {
+                    self.accounts_index.index_cached_pubkey(
+                        target_slot,
+                        account.pubkey(),
+                        &account,
+                        &self.account_indexes,
+                        info,
+                    );
+                });
             });
-        });
+        };
+
+        let threshold = 1;
+        if matches!(
+            update_index_thread_selection,
+            UpdateIndexThreadSelection::PoolWithThreshold,
+        ) && len > threshold
+        {
+            let chunk_size = std::cmp::max(1, len / quarter_thread_count()); // # pubkeys/thread
+            let batches = 1 + len / chunk_size;
+            thread_pool.install(|| {
+                (0..batches).into_par_iter().for_each(|batch| {
+                    let start = batch * chunk_size;
+                    let end = std::cmp::min(start + chunk_size, len);
+                    update(start, end)
+                })
+            })
+        } else {
+            update(0, len)
+        }
     }
 
     fn update_index<'a>(
@@ -6256,7 +6288,11 @@ impl AccountsDb {
     }
 
     pub fn store_cached<'a>(&self, accounts: impl StorableAccounts<'a>) {
-        self.store(accounts, None);
+        self.store(
+            accounts,
+            None,
+            UpdateIndexThreadSelection::PoolWithThreshold,
+        );
     }
 
     pub(crate) fn store_cached_inline_update_index<'a>(
@@ -6264,13 +6300,14 @@ impl AccountsDb {
         accounts: impl StorableAccounts<'a>,
         transactions: Option<&'a [&'a SanitizedTransaction]>,
     ) {
-        self.store(accounts, transactions);
+        self.store(accounts, transactions, UpdateIndexThreadSelection::Inline);
     }
 
     fn store<'a>(
         &self,
         accounts: impl StorableAccounts<'a>,
         transactions: Option<&'a [&'a SanitizedTransaction]>,
+        update_index_thread_selection: UpdateIndexThreadSelection,
     ) {
         // If all transactions in a batch are errored,
         // it's possible to get a store with no accounts.
@@ -6287,7 +6324,7 @@ impl AccountsDb {
             .store_total_data
             .fetch_add(total_data as u64, Ordering::Relaxed);
 
-        self.store_accounts_unfrozen(accounts, transactions);
+        self.store_accounts_unfrozen(accounts, transactions, update_index_thread_selection);
         self.report_store_timings();
     }
 
@@ -6433,6 +6470,7 @@ impl AccountsDb {
         &self,
         accounts: impl StorableAccounts<'a>,
         transactions: Option<&'a [&'a SanitizedTransaction]>,
+        update_index_thread_selection: UpdateIndexThreadSelection,
     ) {
         let slot = accounts.target_slot();
 
@@ -6447,7 +6485,12 @@ impl AccountsDb {
         // Update the index
         let mut update_index_time = Measure::start("update_index");
 
-        self.cache_accounts(infos, &accounts);
+        self.update_index_for_cached_accounts(
+            infos,
+            &accounts,
+            update_index_thread_selection,
+            &self.thread_pool,
+        );
 
         update_index_time.stop();
         self.stats
@@ -7477,7 +7520,11 @@ impl AccountsDb {
 
     /// callers used to call store_uncached. But, this is not allowed anymore.
     pub fn store_for_tests(&self, slot: Slot, accounts: &[(&Pubkey, &AccountSharedData)]) {
-        self.store((slot, accounts), None);
+        self.store(
+            (slot, accounts),
+            None,
+            UpdateIndexThreadSelection::PoolWithThreshold,
+        );
     }
 
     #[allow(clippy::needless_range_loop)]
