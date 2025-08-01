@@ -531,7 +531,7 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
         self.set_age_to_future(entry, true);
     }
 
-    /// Finds or creates an entry in the accounts index for pubkey and  
+    /// Finds or creates an entry in the accounts index for pubkey and
     /// adds a cached entry at slot to the slot_list if not present
     pub fn cache(&self, pubkey: &Pubkey, slot: Slot, account_info: T) {
         self.get_or_create_index_entry_for_pubkey(pubkey, |entry| {
