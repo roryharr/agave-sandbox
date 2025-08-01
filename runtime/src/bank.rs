@@ -4628,13 +4628,11 @@ impl Bank {
             true // initial result is true. We haven't failed yet. If verification fails, we'll panic from bg thread.
         } else {
             let calculated_accounts_lt_hash = if let Some(duplicates_lt_hash) = duplicates_lt_hash {
-
-                accounts_db
-                    .calculate_accounts_lt_hash_at_startup_from_storages(
-                        snapshot_storages.0.as_slice(),
-                        &duplicates_lt_hash,
-                        slot,
-                    )
+                accounts_db.calculate_accounts_lt_hash_at_startup_from_storages(
+                    snapshot_storages.0.as_slice(),
+                    &duplicates_lt_hash,
+                    slot,
+                )
             } else {
                 accounts_db.calculate_accounts_lt_hash_at_startup_from_index(&self.ancestors, slot)
             };
