@@ -789,7 +789,6 @@ mod tests {
     fn test_calculate_accounts_lt_hash_at_startup_from_storages(features: Features) {
         let (genesis_config, mint_keypair) = genesis_config_with(features);
         let (mut bank, bank_forks) = Bank::new_with_bank_forks_for_tests(&genesis_config);
-        let max_slot = 7;
 
         let amount = cmp::max(
             bank.get_minimum_balance_for_rent_exemption(0),
@@ -801,7 +800,7 @@ mod tests {
 
         // create some banks with some modified accounts so that there are stored accounts
         // (note: the number of banks and transfers are arbitrary)
-        for _ in 0..max_slot {
+        for _ in 0..7 {
             let slot = bank.slot() + 1;
             bank =
                 new_bank_from_parent_with_bank_forks(&bank_forks, bank, &Pubkey::default(), slot);
@@ -871,7 +870,7 @@ mod tests {
             .calculate_accounts_lt_hash_at_startup_from_storages(
                 &storages,
                 &duplicates_lt_hash,
-                max_slot,
+                bank.slot(),
             );
         assert_eq!(
             expected_accounts_lt_hash,
@@ -1102,15 +1101,15 @@ mod tests {
         assert_eq!(roundtrip_bank, *bank);
     }
 
-    // Obsolete accounts add metadata to storage entries that can effect the lt hash calculation
-    // This test ensures that the lt hash is not effected by updates in storages that are not being
-    // considered for the lt hash calculation.
+    /// Obsolete accounts add metadata to storage entries that can effect the accounts_lt_hash
+    /// calculation. This test ensures that the accounts_lt_hash is not effected by updates in
+    /// storages that are not being considered for the accounts_lt_hash calculation.
     #[test]
-    fn test_lt_hash_with_obsolete_accounts() {
+    fn test_accounts_lt_hash_with_obsolete_accounts() {
         let key1 = Keypair::new();
         let key2 = Keypair::new();
         let key3 = Keypair::new();
-        let lt_hash_slot = 0;
+        let accounts_lt_hash_slot = 0;
 
         // Create a few accounts
         let (genesis_config, mint_keypair) =
@@ -1127,18 +1126,17 @@ mod tests {
         // Force flush the bank to create the account storage entry
         bank.squash();
         bank.force_flush_accounts_cache();
-        bank.freeze();
 
         let (storages, _slots) = bank.rc.accounts.accounts_db.get_storages(RangeFull);
 
-        // Calculate the current lt hash
+        // Calculate the current accounts_lt_hash
         let hash1 = bank
             .accounts()
             .accounts_db
             .calculate_accounts_lt_hash_at_startup_from_storages(
                 storages.as_slice(),
                 &DuplicatesLtHash::default(),
-                lt_hash_slot,
+                accounts_lt_hash_slot,
             );
 
         // Find the account storage entry for slot 0
@@ -1165,8 +1163,8 @@ mod tests {
             .expect("Pubkey1 is present in Slot0");
 
         // Mark pubkey1 as obsolete in slot 1
-        // This is a valid scenario that the lt_hash verification could see if slot1 transfers
-        // the balance of pubkey1 to a new pubkey.
+        // This is a valid scenario that the accounts_lt_hash verification could see if slot1
+        // transfers the balance of pubkey1 to a new pubkey.
         account_storage_entry.mark_accounts_obsolete(vec![(offset, 0)].into_iter(), 1);
 
         // Recalculate the hash from storages, calculating the hash as of slot 0 like before
@@ -1176,7 +1174,7 @@ mod tests {
             .calculate_accounts_lt_hash_at_startup_from_storages(
                 storages.as_slice(),
                 &DuplicatesLtHash::default(),
-                lt_hash_slot,
+                accounts_lt_hash_slot,
             );
 
         // Ensure that the hash is the same as before since the obsolete account updates in slot0
@@ -1190,7 +1188,7 @@ mod tests {
             .calculate_accounts_lt_hash_at_startup_from_storages(
                 storages.as_slice(),
                 &DuplicatesLtHash::default(),
-                lt_hash_slot + 1,
+                accounts_lt_hash_slot + 1,
             );
 
         // The hashes should be different now as pubkey1 account will not be included in the hash
