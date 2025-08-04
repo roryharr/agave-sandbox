@@ -680,7 +680,7 @@ mod test {
             );
         }
 
-        thread::sleep(Duration::from_secs(2));
+        thread::sleep(Duration::from_millis(1500));
 
         agent.flush();
 
