@@ -1139,7 +1139,7 @@ mod tests {
         let accounts = bank
             .accounts()
             .accounts_db
-            .get_unique_accounts_from_storage(&account_storage_entry);
+            .get_unique_accounts_from_storage(account_storage_entry);
 
         // Find the offset of pubkey `key1` in the accounts db slot0 and save the offset.
         let offset = accounts
