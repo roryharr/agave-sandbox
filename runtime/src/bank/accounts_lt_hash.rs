@@ -1167,7 +1167,7 @@ mod tests {
 
         // Ensure that the hash is the same as before since the obsolete account updates in slot0
         // marked at slot1 should be ignored
-        assert_eq!(expected_accounts_lt_hash, calculated_accounts_lt_hash);
+        assert_eq!(calculated_accounts_lt_hash, expected_accounts_lt_hash);
 
         // Recalculate the hash from storages, but include obsolete account updates marked in slot1
         let recalculated_accounts_lt_hash = bank
