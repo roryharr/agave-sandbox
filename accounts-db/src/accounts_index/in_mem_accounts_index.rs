@@ -1903,20 +1903,14 @@ mod tests {
 
                     // calculate expected reclaims
                     let mut expected_reclaims = Vec::default();
-                    expected
-                        .iter()
-                        .any(|(slot, _info)| slot == &new_slot || Some(*slot) == other_slot);
-                    {
-                        // this is the logical equivalent of 'InMemAccountsIndex::update_slot_list', but slower (and ignoring addref)
-                        expected.retain(|(slot, info)| {
-                            let retain = slot != &new_slot && Some(*slot) != other_slot;
-                            if !retain {
-                                expected_reclaims.push((*slot, *info));
-                            }
-                            retain
-                        });
-                        expected.push((new_slot, info));
-                    }
+                    expected.retain(|(slot, info)| {
+                        let retain = slot != &new_slot && Some(*slot) != other_slot;
+                        if !retain {
+                            expected_reclaims.push((*slot, *info));
+                        }
+                        retain
+                    });
+                    expected.push((new_slot, info));
 
                     // Calculate the expected ref count change. It is expected to be 1 - the number of reclaims
                     let expected_result = 1 - expected_reclaims.len() as i64;
