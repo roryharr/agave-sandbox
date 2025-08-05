@@ -3493,7 +3493,7 @@ pub mod tests {
     impl DiskIndexValue for u64 {}
     impl IsCached for bool {
         fn is_cached(&self) -> bool {
-            !*self
+            false
         }
     }
     impl IsCached for u64 {
