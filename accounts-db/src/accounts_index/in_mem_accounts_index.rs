@@ -669,15 +669,14 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
         slot_list.len()
     }
 
-    /// modifies slot_list
-    /// any entry at 'slot' or slot 'other_slot' is replaced with 'account_info'.
-    /// or, 'account_info' is appended to the slot list if the slot did not exist previously.
-    /// returns true if caller should addref
-    /// conditions when caller should addref:
-    ///   'account_info' does NOT represent a cached storage (the slot is being flushed from the cache)
-    /// AND
-    ///   previous slot_list entry AT 'slot' did not exist (this is the first time this account was modified in this "slot"), or was previously cached (the storage is now being flushed from the cache)
-    /// Note that even if entry DID exist at 'other_slot', the above conditions apply.
+    /// Modifies the slot_list by replacing or appending entries.
+    ///
+    /// - Replaces any entry at `slot` or `other_slot` with `account_info`.
+    /// - Appends `account_info` to the slot list if `slot` did not exist previously.
+    ///
+    /// Returns the reference count change as an `i64`. The reference account change
+    /// is the number of entries added (1) - the number of uncached entries removed
+    /// or replaced
     fn update_slot_list(
         slot_list: &mut SlotList<T>,
         slot: Slot,
@@ -687,6 +686,8 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
         reclaim: UpsertReclaim,
     ) -> i64 {
         let mut ref_change = 1;
+
+        assert!(!account_info.is_cached());
 
         let old_slot = other_slot.unwrap_or(slot);
 
@@ -1897,9 +1898,8 @@ mod tests {
                         reclaim,
                     );
 
-                    // calculate expected results
+                    // calculate expected reclaims
                     let mut expected_reclaims = Vec::default();
-                    // addref iff the slot_list did NOT previously contain an entry at 'new_slot' and it also did not contain an entry at 'other_slot'
                     expected
                         .iter()
                         .any(|(slot, _info)| slot == &new_slot || Some(*slot) == other_slot);
@@ -1914,6 +1914,8 @@ mod tests {
                         });
                         expected.push((new_slot, info));
                     }
+
+                    // Calculate the expected ref count change. It is expected to be 1 - the number of reclaims
                     let expected_result = 1 - expected_reclaims.len() as i64;
                     assert_eq!(
                         expected_result, result,
