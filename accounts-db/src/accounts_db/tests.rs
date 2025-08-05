@@ -2576,7 +2576,7 @@ fn test_select_candidates_by_total_usage_all_clean() {
     assert_eq!(0, next_candidates.len());
 }
 
-const UPSERT_POPULATE_RECLAIMS: UpsertReclaim = UpsertReclaim::PopulateReclaims;
+const UPSERT_RECLAIMS_TEST_DEFAULT: UpsertReclaim = UpsertReclaim::IgnoreReclaims;
 
 #[test]
 fn test_delete_dependencies() {
@@ -2598,7 +2598,7 @@ fn test_delete_dependencies() {
         &AccountSecondaryIndexes::default(),
         info0,
         &mut reclaims,
-        UPSERT_POPULATE_RECLAIMS,
+        UPSERT_RECLAIMS_TEST_DEFAULT,
     );
     accounts_index.upsert(
         1,
@@ -2608,7 +2608,7 @@ fn test_delete_dependencies() {
         &AccountSecondaryIndexes::default(),
         info1,
         &mut reclaims,
-        UPSERT_POPULATE_RECLAIMS,
+        UPSERT_RECLAIMS_TEST_DEFAULT,
     );
     accounts_index.upsert(
         1,
@@ -2618,7 +2618,7 @@ fn test_delete_dependencies() {
         &AccountSecondaryIndexes::default(),
         info1,
         &mut reclaims,
-        UPSERT_POPULATE_RECLAIMS,
+        UPSERT_RECLAIMS_TEST_DEFAULT,
     );
     accounts_index.upsert(
         2,
@@ -2628,7 +2628,7 @@ fn test_delete_dependencies() {
         &AccountSecondaryIndexes::default(),
         info2,
         &mut reclaims,
-        UPSERT_POPULATE_RECLAIMS,
+        UPSERT_RECLAIMS_TEST_DEFAULT,
     );
     accounts_index.upsert(
         2,
@@ -2638,7 +2638,7 @@ fn test_delete_dependencies() {
         &AccountSecondaryIndexes::default(),
         info2,
         &mut reclaims,
-        UPSERT_POPULATE_RECLAIMS,
+        UPSERT_RECLAIMS_TEST_DEFAULT,
     );
     accounts_index.upsert(
         3,
@@ -2648,7 +2648,7 @@ fn test_delete_dependencies() {
         &AccountSecondaryIndexes::default(),
         info3,
         &mut reclaims,
-        UPSERT_POPULATE_RECLAIMS,
+        UPSERT_RECLAIMS_TEST_DEFAULT,
     );
     accounts_index.add_root(0);
     accounts_index.add_root(1);
