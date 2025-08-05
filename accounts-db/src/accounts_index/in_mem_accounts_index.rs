@@ -687,6 +687,7 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
     ) -> i64 {
         let mut ref_change = 1;
 
+        // Cached accounts are not supported by this function, use cache_entry_at_slot instead
         assert!(!account_info.is_cached());
 
         let old_slot = other_slot.unwrap_or(slot);
