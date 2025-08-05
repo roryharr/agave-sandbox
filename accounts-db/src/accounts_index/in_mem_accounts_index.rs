@@ -509,9 +509,9 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
         reclaim: UpsertReclaim,
     ) {
         let slot_list_length =
-            Self::lock_and_update_slot_list(entry, new_value, other_slot, reclaims, reclaim) > 1;
+            Self::lock_and_update_slot_list(entry, new_value, other_slot, reclaims, reclaim);
         // if slot list > 1, then we are going to hold this entry in memory until it gets set back to 1
-        self.set_age_to_future(entry, slot_list_length);
+        self.set_age_to_future(entry, slot_list_length > 1);
     }
 
     /// Insert a cached entry into the accounts index
@@ -644,7 +644,7 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
     ) -> usize {
         let mut slot_list = current.slot_list.write().unwrap();
         let (slot, new_entry) = new_value;
-        let ref_change = Self::update_slot_list(
+        let ref_count_change = Self::update_slot_list(
             &mut slot_list,
             slot,
             new_entry,
@@ -653,16 +653,19 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
             reclaim,
         );
 
-        match ref_change.cmp(&0) {
+        match ref_count_change.cmp(&0) {
             std::cmp::Ordering::Equal => {
                 // Do nothing
             }
             std::cmp::Ordering::Greater => {
-                assert_eq!(ref_change, 1, "Unexpected ref_change value: {}", ref_change);
+                assert_eq!(
+                    ref_count_change, 1,
+                    "Unexpected ref_count_change value: {ref_count_change}"
+                );
                 current.addref();
             }
             std::cmp::Ordering::Less => {
-                current.unref_by_count(ref_change.unsigned_abs());
+                current.unref_by_count(ref_count_change.unsigned_abs());
             }
         }
         current.set_dirty(true);
@@ -674,7 +677,7 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
     /// - Replaces any entry at `slot` or `other_slot` with `account_info`.
     /// - Appends `account_info` to the slot list if `slot` did not exist previously.
     ///
-    /// Returns the reference count change as an `i64`. The reference account change
+    /// Returns the reference count change as an `i64`. The reference count change
     /// is the number of entries added (1) - the number of uncached entries removed
     /// or replaced
     fn update_slot_list(
@@ -685,9 +688,9 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
         reclaims: &mut SlotList<T>,
         reclaim: UpsertReclaim,
     ) -> i64 {
-        let mut ref_change = 1;
+        let mut ref_count_change = 1;
 
-        // Cached accounts are not supported by this function, use cache_entry_at_slot instead
+        // Cached accounts are not expected by this function, use cache_entry_at_slot instead
         assert!(!account_info.is_cached());
 
         let old_slot = other_slot.unwrap_or(slot);
@@ -727,7 +730,7 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
 
                     if !is_cur_account_cached {
                         // current info at 'slot' is NOT cached, so we should NOT addref. This slot already has a ref count for this pubkey.
-                        ref_change -= 1
+                        ref_count_change -= 1
                     }
                 } else {
                     // Slot is new item that is being added to the slot list
@@ -743,7 +746,7 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
             // if we make it here, we did not find the slot in the list
             slot_list.push((slot, account_info));
         }
-        ref_change
+        ref_count_change
     }
 
     // convert from raw data on disk to AccountMapEntry, set to age in future
