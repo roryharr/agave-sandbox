@@ -622,6 +622,7 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
     /// already exists in the list, remove the older item, add it to `reclaims`, and insert
     /// the new item.
     /// if 'other_slot' is some, then remove any entries in the slot list at 'other_slot' instead
+    /// if UpsertReclaim is RemoveOldSlots, remove all uncached slots older than 'slot'
     /// Note:: This function only supports uncached types `T`.
     fn lock_and_update_slot_list(
         current: &AccountMapEntry<T>,
@@ -662,6 +663,7 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
     ///
     /// - Replaces any entry at `slot` or `other_slot` with `account_info`.
     /// - Appends `account_info` to the slot list if `slot` did not exist previously.
+    /// - If UpsertReclaim is ReclaimOldSlots, remove all uncached entries older than `slot`
     ///
     /// Returns the reference count change as an `i64`. The reference count change
     /// is the number of entries added (1) - the number of uncached entries removed
@@ -696,7 +698,7 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
                     let reclaim_item =
                         std::mem::replace(&mut slot_list[slot_list_index], (slot, account_info));
                     match reclaim {
-                        UpsertReclaim::PopulateReclaims => {
+                        UpsertReclaim::ReclaimOldSlots | UpsertReclaim::PopulateReclaims => {
                             // Reclaims are used to reclaim other versions of accounts when they are
                             // rewritten elsewhere. Cached accounts are not in storage, so there is
                             // no reason to store the reclaim.
@@ -717,6 +719,14 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
                     if !is_cur_account_cached {
                         // current info at 'slot' is NOT cached, so we should NOT addref. This slot already has a ref count for this pubkey.
                         ref_count_change -= 1
+                    }
+                } else if reclaim == UpsertReclaim::ReclaimOldSlots {
+                    let is_cur_account_cached = cur_account_info.is_cached();
+                    if !is_cur_account_cached && *cur_slot < slot {
+                        let reclaim_item = slot_list[slot_list_index];
+                        slot_list.remove(slot_list_index);
+                        reclaims.push(reclaim_item);
+                        ref_count_change -= 1;
                     }
                 } else {
                     // Slot is new item that is being added to the slot list
@@ -1766,7 +1776,7 @@ mod tests {
     #[test]
     fn test_update_slot_list_other() {
         solana_logger::setup();
-        let reclaim = UpsertReclaim::PopulateReclaims;
+        let reclaim = UpsertReclaim::ReclaimOldSlots;
         let new_slot = 5;
         let info = 1;
         let other_value = info + 1;
@@ -1819,6 +1829,8 @@ mod tests {
         let missing_other_slot = unique_other_slot + 1;
         let ignored_slot = 10; // bigger than is used elsewhere in the test
         let ignored_value = info + 10;
+        let reclaimed_slot = 1; // less than is used elsewhere in the test
+        let relcaimed_value = info + 10;
 
         // build a list of possible contents in the slot_list prior to calling 'update_slot_list'
         let possible_initial_slot_list_contents = {
@@ -1827,6 +1839,10 @@ mod tests {
             // Add ignored slot account_info entries (slots with larger slot #s than 'new_slot' or 'other_slot')
             possible_initial_slot_list_contents
                 .extend((0..3).map(|i| (ignored_slot + i, ignored_value + i)));
+
+            // Add reclaimed slot account_info entries (slots with smaller slot #s than 'new_slot' or 'other_slot')
+            possible_initial_slot_list_contents
+                .extend((0..3).map(|i| (reclaimed_slot + i, relcaimed_value + i)));
 
             // Add account_info for 'new_slot'
             possible_initial_slot_list_contents.push(at_new_slot);
@@ -1893,7 +1909,7 @@ mod tests {
                     // calculate expected reclaims
                     let mut expected_reclaims = Vec::default();
                     expected.retain(|(slot, info)| {
-                        let retain = slot != &new_slot && Some(*slot) != other_slot;
+                        let retain = slot > &new_slot;
                         if !retain {
                             expected_reclaims.push((*slot, *info));
                         }
@@ -1927,7 +1943,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!(attempts, 652); // complicated permutations, so make sure we ran the right #
+        assert_eq!(attempts, 219202); // complicated permutations, so make sure we ran the right #
     }
 
     #[should_panic(expected = "slot_list has slot in slot_list but is not replacing it")]
