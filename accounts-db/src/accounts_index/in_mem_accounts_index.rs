@@ -16,6 +16,7 @@ use {
     solana_measure::measure::Measure,
     solana_pubkey::Pubkey,
     std::{
+        cmp,
         collections::{hash_map::Entry, HashMap, HashSet},
         fmt::Debug,
         sync::{
@@ -654,17 +655,15 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
         );
 
         match ref_count_change.cmp(&0) {
-            std::cmp::Ordering::Equal => {
+            cmp::Ordering::Equal => {
                 // Do nothing
             }
-            std::cmp::Ordering::Greater => {
-                assert_eq!(
-                    ref_count_change, 1,
-                    "Unexpected ref_count_change value: {ref_count_change}"
-                );
+            cmp::Ordering::Greater => {
+                // If the ref count change is positive, it must be 1 as only one entry is being added
+                assert_eq!(ref_count_change, 1);
                 current.addref();
             }
-            std::cmp::Ordering::Less => {
+            cmp::Ordering::Less => {
                 current.unref_by_count(ref_count_change.unsigned_abs());
             }
         }
