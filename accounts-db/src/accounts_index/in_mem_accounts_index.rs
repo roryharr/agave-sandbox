@@ -1817,7 +1817,7 @@ mod tests {
 
         // nothing will exist at this slot
         let missing_other_slot = unique_other_slot + 1;
-        let ignored_slot = 1; // less than is used elsewhere in the test
+        let ignored_slot = 10; // less than is used elsewhere in the test
         let ignored_value = info + 10;
 
         // build a list of possible contents in the slot_list prior to calling 'update_slot_list'
