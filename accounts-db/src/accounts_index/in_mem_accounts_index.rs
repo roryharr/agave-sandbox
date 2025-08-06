@@ -1830,7 +1830,7 @@ mod tests {
 
             // Add account_info for 'new_slot'
             possible_initial_slot_list_contents.push(at_new_slot);
-            // account_info that already exists in the slot_list AT 'other_slot'
+            // Add account_info for 'other_slot'
             possible_initial_slot_list_contents.push((unique_other_slot, other_value));
             possible_initial_slot_list_contents
         };
