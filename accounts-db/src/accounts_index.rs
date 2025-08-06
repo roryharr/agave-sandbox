@@ -2944,9 +2944,10 @@ pub mod tests {
     }
 
     #[test]
-    fn test_upsert_reclaims( ) {
+    fn test_upsert_reclaims() {
         let key = solana_pubkey::new_rand();
-        let index = AccountsIndex::<CacheableIndexValueTest, CacheableIndexValueTest>::default_for_tests();
+        let index =
+            AccountsIndex::<CacheableIndexValueTest, CacheableIndexValueTest>::default_for_tests();
         let mut reclaims = Vec::new();
         index.upsert(
             0,
@@ -3000,8 +3001,6 @@ pub mod tests {
         let entry = index.get_cloned(&key).unwrap();
         let slot_list = entry.slot_list.read().unwrap();
         assert_eq!(slot_list.len(), 1);
-
-
     }
 
     fn account_maps_stats_len<T: IndexValue>(index: &AccountsIndex<T, T>) -> usize {
@@ -3574,14 +3573,15 @@ pub mod tests {
         }
     }
 
-    /// Type that supports caching for tests. Can be used to test the caching
-    /// behaviour of update slot list
+    /// Type that supports caching for tests. Used to test upsert behaviour
+    /// when the slot list has mixed cached and uncached items.
     #[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
     struct CacheableIndexValueTest(bool);
     impl IndexValue for CacheableIndexValueTest {}
     impl DiskIndexValue for CacheableIndexValueTest {}
     impl IsCached for CacheableIndexValueTest {
         fn is_cached(&self) -> bool {
+            // Return self value as whether the item is cached or not
             self.0
         }
     }
