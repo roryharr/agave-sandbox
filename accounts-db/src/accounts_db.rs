@@ -6248,8 +6248,7 @@ impl AccountsDb {
 
     /// Stores accounts in the storage and updates the index.
     /// This function is intended for accounts that are rooted (frozen).
-    /// - `UpsertReclaims` should be set to `IgnoreReclaims` at this time.
-    ///   Other values are experimental and may not work as expected.
+    /// - `UpsertReclaims` must be set to `IgnoreReclaims` at this time
     fn store_accounts_to_storage<'a>(
         &self,
         accounts: impl StorableAccounts<'a>,
@@ -6259,6 +6258,9 @@ impl AccountsDb {
     ) -> StoreAccountsTiming {
         let slot = accounts.target_slot();
         let mut store_accounts_time = Measure::start("store_accounts");
+
+        // Other values for UpsertReclaim are not supported yet
+        assert_eq!(reclaim_handling, UpsertReclaim::IgnoreReclaims);
 
         // Flush the read cache if necessary. This will occur during shrink or clean
         if self.read_only_accounts_cache.can_slot_be_in_cache(slot) {
