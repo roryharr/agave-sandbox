@@ -3324,7 +3324,7 @@ pub mod tests {
             UpsertReclaim::ReclaimOldSlots,
         );
 
-        // Verify that the slot list is length two and consists of the cached account at slot 0
+        // Verify that the slot list is length two and consists of the cached account at slot 1
         // and the uncached account at slot 2
         let entry = index.get_cloned(&key).unwrap();
         assert_eq!(entry.slot_list.read().unwrap().len(), 2);
@@ -3348,7 +3348,7 @@ pub mod tests {
             )
             .into()
         );
-        // Verify that the uncached account at slot 1 was reclaimed
+        // Verify that the uncached account at slot 0 was reclaimed
         assert_eq!(gc.len(), 1);
         assert_eq!(gc[0], (0, CacheableIndexValueTest(false)));
     }
