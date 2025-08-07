@@ -6235,6 +6235,18 @@ impl AccountsDb {
         storage: &Arc<AccountStorageEntry>,
         update_index_thread_selection: UpdateIndexThreadSelection,
     ) -> StoreAccountsTiming {
+        self.store_accounts_flush(accounts, storage, UpsertReclaim::IgnoreReclaims, update_index_thread_selection)
+    }
+
+    /// Stores accounts in the storage and updates the index.
+    /// This should only be used on accounts that are rooted (frozen)
+    pub fn store_accounts_flush<'a>(
+        &self,
+        accounts: impl StorableAccounts<'a>,
+        storage: &Arc<AccountStorageEntry>,
+        handle_reclaims: UpsertReclaim,
+        update_index_thread_selection: UpdateIndexThreadSelection,
+    ) -> StoreAccountsTiming {
         let slot = accounts.target_slot();
         let mut store_accounts_time = Measure::start("store_accounts");
 
@@ -6256,7 +6268,6 @@ impl AccountsDb {
             .fetch_add(store_accounts_time.as_us(), Ordering::Relaxed);
         let mut update_index_time = Measure::start("update_index");
 
-        let reclaim = UpsertReclaim::IgnoreReclaims;
 
         // if we are squashing a single slot, then we can expect a single dead slot
         let expected_single_dead_slot =
@@ -6269,7 +6280,7 @@ impl AccountsDb {
         let reclaims = self.update_index(
             infos,
             &accounts,
-            UpsertReclaim::IgnoreReclaims,
+            handle_reclaims,
             update_index_thread_selection,
             &self.thread_pool_clean,
         );
