@@ -6231,7 +6231,7 @@ impl AccountsDb {
     /// This function is intended for accounts that are rooted (frozen).
     /// - `UpsertReclaims` is set to `IgnoreReclaims`. If the slot in `accounts` differs from the new slot,
     ///   accounts may be removed from the account index. In such cases, the caller must ensure that alive
-    ///   accounts are decremented for the older storage or that the old storage is freed entirely
+    ///   accounts are decremented for the older storage or that the old storage is removed entirely
     pub fn store_accounts_frozen<'a>(
         &self,
         accounts: impl StorableAccounts<'a>,
