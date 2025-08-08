@@ -6238,7 +6238,7 @@ impl AccountsDb {
         storage: &Arc<AccountStorageEntry>,
         update_index_thread_selection: UpdateIndexThreadSelection,
     ) -> StoreAccountsTiming {
-        self.store_accounts_to_storage(
+        self._store_accounts_frozen(
             accounts,
             storage,
             UpsertReclaim::IgnoreReclaims,
@@ -6249,7 +6249,7 @@ impl AccountsDb {
     /// Stores accounts in the storage and updates the index.
     /// This function is intended for accounts that are rooted (frozen).
     /// - `UpsertReclaims` must be set to `IgnoreReclaims` at this time
-    fn store_accounts_to_storage<'a>(
+    fn _store_accounts_frozen<'a>(
         &self,
         accounts: impl StorableAccounts<'a>,
         storage: &Arc<AccountStorageEntry>,
