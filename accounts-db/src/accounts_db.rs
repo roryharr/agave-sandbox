@@ -5314,8 +5314,17 @@ impl AccountsDb {
 
             // If the above sizing function is correct, just one AppendVec is enough to hold
             // all the data for the slot
-            assert!(self.storage.get_slot_storage_entry(slot).is_some());
+            let storage = self
+                .storage
+                .get_slot_storage_entry(slot)
+                .expect("Storage entry exists after flush");
+
             self.reopen_storage_as_readonly_shrinking_in_progress_ok(slot);
+
+            // Zero lamport single refs may have been added. Check if this is a candidate for shrink
+            if self.is_candidate_for_shrink(&storage) {
+                self.shrink_candidate_slots.lock().unwrap().insert(slot);
+            }
         }
 
         // Remove this slot from the cache, which will to AccountsDb's new readers should look like an
