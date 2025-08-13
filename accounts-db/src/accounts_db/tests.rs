@@ -649,7 +649,7 @@ define_accounts_db_test!(test_accounts_unsquashed, |db0| {
 /// Test to verify that reclaiming old storages during flush works correctly.
 /// Creates multiple storages with accounts, flushes them, and then creates a new storage
 /// that invalidates some of the old accounts. The test checks that one of the old storages
-/// is reclaimed as is fully invalidated
+/// is reclaimed as the storage is fully invalidated
 #[test]
 fn test_flush_slots_with_reclaim_old_slots() {
     let accounts = AccountsDb::new_single_for_tests();
