@@ -2384,7 +2384,7 @@ pub mod tests {
 
         // There should be reclaims if entries are uncached and old slots are being reclaimed
         let should_have_reclaims =
-            matches!(upsert_method, Some(UpsertReclaim::ReclaimOldSlots)) && !is_cached;
+            upsert_method == Some(UpsertReclaim::ReclaimOldSlots) && !is_cached;
 
         if should_have_reclaims {
             assert!(!gc.is_empty());
