@@ -2681,23 +2681,20 @@ impl AccountsDb {
                 mark_accounts_obsolete,
             );
             reclaim_result.1 = reclaimed_offsets;
-
-            if !dead_slots.is_empty() {
-                let HandleReclaims::ProcessDeadSlots(purge_stats) = handle_reclaims;
-                if let Some(expected_single_dead_slot) = expected_single_dead_slot {
-                    assert!(dead_slots.len() <= 1);
-                    if dead_slots.len() == 1 {
-                        assert!(dead_slots.contains(&expected_single_dead_slot));
-                    }
+            let HandleReclaims::ProcessDeadSlots(purge_stats) = handle_reclaims;
+            if let Some(expected_single_dead_slot) = expected_single_dead_slot {
+                assert!(dead_slots.len() <= 1);
+                if dead_slots.len() == 1 {
+                    assert!(dead_slots.contains(&expected_single_dead_slot));
                 }
-
-                self.process_dead_slots(
-                    &dead_slots,
-                    Some(&mut reclaim_result.0),
-                    purge_stats,
-                    pubkeys_removed_from_accounts_index,
-                );
             }
+
+            self.process_dead_slots(
+                &dead_slots,
+                Some(&mut reclaim_result.0),
+                purge_stats,
+                pubkeys_removed_from_accounts_index,
+            );
         }
         reclaim_result
     }
@@ -6216,7 +6213,7 @@ impl AccountsDb {
             .store_num_accounts
             .fetch_add(accounts.len() as u64, Ordering::Relaxed);
 
-        // If there are any reclaims then they should be handled. Reclaims effect
+        // If there are any reclaims then they should be handled. Reclaims affect
         // all storages, and may result in the removal of dead storages.
         let mut handle_reclaims_elapsed = 0;
         if !reclaims.is_empty() {

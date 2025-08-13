@@ -679,15 +679,15 @@ fn test_flush_slots_with_reclaim_old_slots() {
     }
 
     // Get the accounts from the write cache slot
-    let accounts_list: Vec<(Pubkey, AccountSharedData)> = accounts
+    let accounts_list: Vec<(_, _)> = accounts
         .accounts_cache
         .slot_cache(new_slot)
         .unwrap()
         .iter()
         .map(|iter_item| {
-            let key = *iter_item.key();
+            let pubkey = *iter_item.key();
             let account = iter_item.value().account.clone();
-            (key, account)
+            (pubkey, account)
         })
         .collect();
 
@@ -698,7 +698,7 @@ fn test_flush_slots_with_reclaim_old_slots() {
         (new_slot, &accounts_list[..]),
         &storage,
         UpsertReclaim::ReclaimOldSlots,
-        UpdateIndexThreadSelection::PoolWithThreshold,
+        UpdateIndexThreadSelection::Inline,
     );
 
     // Verify that the storage for the first slot has been removed
