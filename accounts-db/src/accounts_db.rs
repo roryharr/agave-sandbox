@@ -5907,10 +5907,7 @@ impl AccountsDb {
         (dead_slots, reclaimed_offsets)
     }
 
-    fn remove_dead_slots_metadata<'a>(
-        &'a self,
-        dead_slots_iter: impl Iterator<Item = &'a Slot> + Clone,
-    ) {
+    fn remove_dead_slots_metadata<'a>(&'a self, dead_slots_iter: impl Iterator<Item = &'a Slot>) {
         let mut measure = Measure::start("remove_dead_slots_metadata-ms");
         self.clean_dead_slots_from_accounts_index(dead_slots_iter);
         measure.stop();
@@ -5989,7 +5986,7 @@ impl AccountsDb {
 
     fn clean_dead_slots_from_accounts_index<'a>(
         &'a self,
-        dead_slots_iter: impl Iterator<Item = &'a Slot> + Clone,
+        dead_slots_iter: impl Iterator<Item = &'a Slot>,
     ) {
         let mut accounts_index_root_stats = AccountsIndexRootsStats::default();
         let mut measure = Measure::start("clean_dead_slot");
