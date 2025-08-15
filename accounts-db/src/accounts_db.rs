@@ -7377,10 +7377,7 @@ impl AccountsDb {
 
     /// callers used to call store_uncached. But, this is not allowed anymore.
     pub fn store_for_tests<'a>(&self, accounts: impl StorableAccounts<'a>) {
-        self.store_accounts_unfrozen(
-            accounts,
-            UpdateIndexThreadSelection::PoolWithThreshold,
-        );
+        self.store_accounts_unfrozen(accounts, UpdateIndexThreadSelection::PoolWithThreshold);
     }
 
     #[allow(clippy::needless_range_loop)]

@@ -285,7 +285,7 @@ pub mod tests {
         let account1_lamports2 = 2;
         let slot1 = 1;
         let account1 = AccountSharedData::new(account1_lamports2, 1, account1.owner());
-        accounts.store_cached((slot1, &[(&key1, &account1)][..]),None);
+        accounts.store_cached((slot1, &[(&key1, &account1)][..]), None);
 
         let key3 = solana_pubkey::new_rand();
         let account3_lamports: u64 = 300;

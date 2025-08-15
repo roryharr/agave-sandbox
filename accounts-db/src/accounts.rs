@@ -583,24 +583,17 @@ impl Accounts {
             });
         }
 
-        self.accounts_db.store_accounts_unfrozen(
-            accounts,
-            UpdateIndexThreadSelection::Inline,
-        );
+        self.accounts_db
+            .store_accounts_unfrozen(accounts, UpdateIndexThreadSelection::Inline);
     }
 
     /// Store `accounts` into the DB
     ///
     /// This version updates the accounts index in parallel,
     /// using the foreground AccountsDb thread pool.
-    pub fn store_accounts_par<'a>(
-        &self,
-        accounts: impl StorableAccounts<'a>,
-    ) {
-        self.accounts_db.store_accounts_unfrozen(
-            accounts,
-            UpdateIndexThreadSelection::PoolWithThreshold,
-        );
+    pub fn store_accounts_par<'a>(&self, accounts: impl StorableAccounts<'a>) {
+        self.accounts_db
+            .store_accounts_unfrozen(accounts, UpdateIndexThreadSelection::PoolWithThreshold);
     }
 
     /// Add a slot to root.  Root slots cannot be purged
