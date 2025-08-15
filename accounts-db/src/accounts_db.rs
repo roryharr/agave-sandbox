@@ -6189,8 +6189,6 @@ impl AccountsDb {
             .store_num_accounts
             .fetch_add(accounts.len() as u64, Ordering::Relaxed);
 
-        // If there are any reclaims then they should be handled. Reclaims effect
-        // all storages, and may result in the removal of dead storages.
         // If there are any reclaims then they should be handled. Reclaims affect
         // all storages, and may result in the removal of dead storages.
         let mut handle_reclaims_elapsed = 0;
