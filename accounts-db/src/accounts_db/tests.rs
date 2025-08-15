@@ -701,6 +701,9 @@ fn test_flush_slots_with_reclaim_old_slots() {
         UpdateIndexThreadSelection::Inline,
     );
 
+    // Remove the flushed slot from the cache
+    assert!(accounts.accounts_cache.remove_slot(new_slot).is_some());
+
     // Verify that the storage for the first slot has been removed
     assert!(accounts.storage.get_slot_storage_entry(0).is_none());
     for slot in 1..5 {
