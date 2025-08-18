@@ -5668,7 +5668,7 @@ impl AccountsDb {
         // could lead to index corruption if the unrooted version is
         // discarded
         if reclaim == UpsertReclaim::ReclaimOldSlots {
-            assert!(self.accounts_index.is_alive_root(target_slot));
+            assert!(target_slot <= self.accounts_index.max_root_inclusive());
         }
 
         let update = |start, end| {
