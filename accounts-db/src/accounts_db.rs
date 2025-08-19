@@ -2796,15 +2796,17 @@ impl AccountsDb {
             return;
         }
         let mut clean_dead_slots = Measure::start("reclaims::clean_dead_slots");
+
         if clean_stored_dead_slots {
             self.clean_stored_dead_slots(
                 dead_slots,
                 purged_account_slots,
                 pubkeys_removed_from_accounts_index,
             );
-        } else {
-            self.remove_dead_slots_metadata(dead_slots.iter());
         }
+
+        // Remove dead slots from the accounts index root tracker
+        self.remove_dead_slots_metadata(dead_slots.iter());
 
         clean_dead_slots.stop();
 
@@ -6059,7 +6061,6 @@ impl AccountsDb {
             .latest_accounts_index_roots_stats
             .update(&accounts_index_root_stats);
 
-        self.remove_dead_slots_metadata(dead_slots.iter());
         measure.stop();
         self.clean_accounts_stats
             .clean_stored_dead_slots_us
@@ -7373,7 +7374,6 @@ enum HandleReclaims<'a> {
 /// Temporarily allow dead code until the feature is implemented
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 enum MarkAccountsObsolete {
-    #[allow(dead_code)]
     Yes(Slot),
     No,
 }
