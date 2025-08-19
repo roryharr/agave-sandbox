@@ -1503,6 +1503,18 @@ pub fn add_args<'a>(app: App<'a, 'a>, default_args: &'a DefaultArgs) -> App<'a, 
             ),
     )
     .arg(
+        Arg::with_name("accounts_db_mark_obsolete_accounts")
+            .long("accounts_db_mark_obsolete_accounts")
+            .help(
+                "Flag to indicate if the experimental obsolete account tracking feature is enabled.
+                This feature tracks obsolete accounts in the account storage entry allowing
+                for earlier cleaning of obsolete accounts in the storages and index.
+                Enabling this feature will disable fast-boot as they are not compatible at this
+                time"
+            )
+            .hidden(hidden_unless_forced()),
+    )
+    .arg(
         Arg::with_name("allow_private_addr")
             .long("allow-private-addr")
             .takes_value(false)
