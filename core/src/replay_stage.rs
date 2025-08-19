@@ -35,7 +35,6 @@ use {
     agave_votor::root_utils,
     crossbeam_channel::{Receiver, RecvTimeoutError, Sender},
     rayon::{prelude::*, ThreadPool},
-    solana_accounts_db::contains::Contains,
     solana_clock::{BankId, Slot, NUM_CONSECUTIVE_LEADER_SLOTS},
     solana_entry::entry::VerifyRecyclers,
     solana_geyser_plugin_manager::block_metadata_notifier_interface::BlockMetadataNotifierArc,
@@ -1355,7 +1354,7 @@ impl ReplayStage {
 
         // It is possible that bank corresponding to `start_slot` has been
         // dumped, so we need to double check it exists before proceeding
-        if !progress.contains(&start_slot) {
+        if !progress.contains_key(&start_slot) {
             warn!(
                 "Poh start slot {start_slot}, is missing from progress map. This indicates that \
                  we are in the middle of a dump and repair. Skipping retransmission of \

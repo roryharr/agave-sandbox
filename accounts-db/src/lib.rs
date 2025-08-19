@@ -24,7 +24,7 @@ pub mod blockhash_queue;
 mod bucket_map_holder;
 mod bucket_map_holder_stats;
 mod buffered_reader;
-pub mod contains;
+mod contains;
 mod file_io;
 pub mod hardened_unpack;
 mod io_uring;

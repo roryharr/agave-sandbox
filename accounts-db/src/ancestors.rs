@@ -123,7 +123,7 @@ impl Ancestors {
 #[cfg(test)]
 pub mod tests {
     use {
-        super::*, crate::contains::Contains, log::*, solana_measure::measure::Measure,
+        super::*, log::*, solana_measure::measure::Measure,
         std::collections::HashSet,
     };
 
@@ -153,7 +153,7 @@ pub mod tests {
         let mut time = Measure::start("");
         let mut count = 0;
         for slot in (min - 10)..max + 100 {
-            if hash.contains(&slot) {
+            if hash.contains_key(&slot) {
                 count += 1;
             }
         }
@@ -188,7 +188,7 @@ pub mod tests {
             assert!(ancestors.contains_key(key));
         }
         for slot in min - 1..max + 2 {
-            assert_eq!(ancestors.contains_key(&slot), hashset.contains(&slot));
+            assert_eq!(ancestors.contains_key(&slot), hashset.contains_key(&slot));
         }
     }
 

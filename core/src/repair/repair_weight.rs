@@ -988,7 +988,6 @@ mod test {
     use {
         super::*,
         itertools::Itertools,
-        solana_accounts_db::contains::Contains,
         solana_hash::Hash,
         solana_ledger::{
             blockstore::{make_chaining_slot_entries, Blockstore},
@@ -1020,7 +1019,7 @@ mod test {
                     .unwrap()
                     .is_pruned());
             } else {
-                assert!(!repair_weight.slot_to_tree.contains(old_slot));
+                assert!(!repair_weight.slot_to_tree.contains_key(old_slot));
             }
             let votes = vec![(*old_slot, vec![Pubkey::default()])];
             repair_weight.add_votes(
@@ -1912,12 +1911,12 @@ mod test {
             *repair_weight.pruned_trees.get(&10).unwrap(),
             HeaviestSubtreeForkChoice::new_from_tree(tr(10) / tr(11))
         );
-        assert!(!repair_weight.slot_to_tree.contains(&6));
+        assert!(!repair_weight.slot_to_tree.contains_key(&6));
         assert_eq!(
             *repair_weight.slot_to_tree.get(&23).unwrap(),
             TreeRoot::Root(9)
         );
-        assert!(!repair_weight.slot_to_tree.contains(&4));
+        assert!(!repair_weight.slot_to_tree.contains_key(&4));
         assert_eq!(
             *repair_weight.slot_to_tree.get(&11).unwrap(),
             TreeRoot::PrunedRoot(10)
@@ -1932,13 +1931,13 @@ mod test {
             *repair_weight.trees.get(&20).unwrap(),
             HeaviestSubtreeForkChoice::new_from_tree(tr(20) / (tr(22) / tr(23)))
         );
-        assert!(!repair_weight.slot_to_tree.contains(&6));
+        assert!(!repair_weight.slot_to_tree.contains_key(&6));
         assert_eq!(
             *repair_weight.slot_to_tree.get(&23).unwrap(),
             TreeRoot::Root(20)
         );
-        assert!(!repair_weight.slot_to_tree.contains(&4));
-        assert!(!repair_weight.slot_to_tree.contains(&11));
+        assert!(!repair_weight.slot_to_tree.contains_key(&4));
+        assert!(!repair_weight.slot_to_tree.contains_key(&11));
     }
 
     #[test]
