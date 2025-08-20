@@ -549,10 +549,10 @@ pub fn execute(
     {
         Err(format!(
             "The --accounts-db-mark-obsolete-accounts option requires \
-                 the --use-snapshot-archives-at-startup option to be set to {}. \
-                 Current value: {}",
-            UseSnapshotArchivesAtStartup::Always,
-            use_snapshot_archives_at_startup
+             the --use-snapshot-archives-at-startup option to be set to {}. \
+             Current value: {}",
+             UseSnapshotArchivesAtStartup::Always,
+             use_snapshot_archives_at_startup
         ))?;
     }
 
