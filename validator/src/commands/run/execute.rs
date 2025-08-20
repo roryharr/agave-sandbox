@@ -405,6 +405,8 @@ pub fn execute(
         })
         .unwrap_or_default();
 
+    let mark_obsolete_accounts = matches.is_present("accounts_db_mark_obsolete_accounts");
+
     let accounts_db_config = AccountsDbConfig {
         index: Some(accounts_index_config),
         account_indexes: Some(account_indexes.clone()),
@@ -429,7 +431,7 @@ pub fn execute(
         num_background_threads: Some(accounts_db_background_threads),
         num_foreground_threads: Some(accounts_db_foreground_threads),
         num_hash_threads: Some(accounts_db_hash_threads),
-        mark_obsolete_accounts: matches.is_present("accounts_db_mark_obsolete_accounts"),
+        mark_obsolete_accounts,
         ..AccountsDbConfig::default()
     };
 
@@ -542,9 +544,7 @@ pub fn execute(
         UseSnapshotArchivesAtStartup
     );
 
-    if accounts_db_config
-        .as_ref()
-        .is_some_and(|config| config.mark_obsolete_accounts)
+    if mark_obsolete_accounts
         && use_snapshot_archives_at_startup != UseSnapshotArchivesAtStartup::Always
     {
         Err(format!(
