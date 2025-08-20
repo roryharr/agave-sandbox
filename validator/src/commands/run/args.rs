@@ -1504,13 +1504,14 @@ pub fn add_args<'a>(app: App<'a, 'a>, default_args: &'a DefaultArgs) -> App<'a, 
     )
     .arg(
         Arg::with_name("accounts_db_mark_obsolete_accounts")
-            .long("accounts_db_mark_obsolete_accounts")
-            .help(
-                "Flag to indicate if the experimental obsolete account tracking feature is enabled.
+            .long("accounts-db-mark-obsolete-accounts")
+            .help("Enables experimental obsolete account tracking.")
+            .long_help(
+                "Enables experimental obsolete account tracking.
                 This feature tracks obsolete accounts in the account storage entry allowing
                 for earlier cleaning of obsolete accounts in the storages and index.
-                Enabling this feature will disable fast-boot as they are not compatible at this
-                time"
+                At this time this feature is not compatible with booting from local
+                snapshot state and must unpack from archives"
             )
             .hidden(hidden_unless_forced()),
     )
