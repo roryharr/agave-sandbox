@@ -7563,8 +7563,7 @@ impl AccountsDb {
     // With obsolete accounts marked, obsolete references are marked in the storage
     // and no longer need to be referenced. This leads to a static reference count
     // of 1. As referencing checking is common in tests, this test wrapper abstracts the behavior
-    #[cfg(feature = "dev-context-only-utils")]
-    pub fn assert_ref_count(&self, pubkey: &Pubkey, expected_ref_count: u64) {
+    pub fn assert_ref_count(&self, pubkey: &Pubkey, expected_ref_count: RefCount) {
         let expected_ref_count = if self.mark_obsolete_accounts {
             // Account for the case where expected_ref_count is 0 by setting it to the minimum of
             // current value or 1
