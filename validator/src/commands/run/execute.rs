@@ -551,8 +551,8 @@ pub fn execute(
             "The --accounts-db-mark-obsolete-accounts option requires \
              the --use-snapshot-archives-at-startup option to be set to {}. \
              Current value: {}",
-             UseSnapshotArchivesAtStartup::Always,
-             use_snapshot_archives_at_startup
+            UseSnapshotArchivesAtStartup::Always,
+            use_snapshot_archives_at_startup
         ))?;
     }
 
