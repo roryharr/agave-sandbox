@@ -979,14 +979,11 @@ fn test_lazy_gc_slot() {
     //slot is gone
     accounts.print_accounts_stats("pre-clean");
     accounts.add_root_and_flush_write_cache(1);
-    if accounts.mark_obsolete_accounts {
-        // Track dead accounts allows the write cache flush to
-        // remove fully dead slots
-        assert!(accounts.storage.get_slot_storage_entry(0).is_none());
-    } else {
+    if !accounts.mark_obsolete_accounts {
         assert!(accounts.storage.get_slot_storage_entry(0).is_some());
+        accounts.clean_accounts_for_tests();
     }
-    accounts.clean_accounts_for_tests();
+
     assert!(accounts.storage.get_slot_storage_entry(0).is_none());
 
     //new value is there
@@ -1096,10 +1093,7 @@ fn test_clean_dead_slot_with_obsolete_accounts() {
     accounts.add_root_and_flush_write_cache(2);
 
     // Pubkey1 should be in 3 slots, 0 and 1 and 2
-    if accounts.mark_obsolete_accounts {
-        accounts.assert_ref_count(&pubkey, 1);
-    } else {
-
+    if !accounts.mark_obsolete_accounts {
         accounts.assert_ref_count(&pubkey, 3);
         // Mark pubkey in slot 1 as obsolete, simulating obsolete accounts being enabled
         let old_storage = accounts
@@ -1113,10 +1107,11 @@ fn test_clean_dead_slot_with_obsolete_accounts() {
 
         // Pubkey1 should now have two references: Slot0 and Slot2.
         accounts.assert_ref_count(&pubkey, 2);
+
+        // Clean, remove slot0/1.
+        accounts.clean_accounts_for_tests();
     }
 
-    // Clean, remove slot0/1.
-    accounts.clean_accounts_for_tests();
     assert!(accounts.storage.get_slot_storage_entry(0).is_none());
     assert!(accounts.storage.get_slot_storage_entry(1).is_none());
 
@@ -1479,17 +1474,12 @@ fn test_clean_old_with_normal_account() {
     accounts.add_root_and_flush_write_cache(0);
     accounts.add_root_and_flush_write_cache(1);
 
-    if accounts.mark_obsolete_accounts {
-        // Old state can be cleared up with dead account tracking
-        assert_eq!(accounts.alive_account_count_in_slot(0), 0);
-    } else {
-        // even if rooted, old state isn't cleaned up
-        assert_eq!(accounts.alive_account_count_in_slot(0), 1);
-    }
-
     assert_eq!(accounts.alive_account_count_in_slot(1), 1);
 
-    accounts.clean_accounts_for_tests();
+    if !accounts.mark_obsolete_accounts {
+        assert_eq!(accounts.alive_account_count_in_slot(0), 1);
+        accounts.clean_accounts_for_tests();
+    }
 
     //now old state is cleaned up
     assert_eq!(accounts.alive_account_count_in_slot(0), 0);
@@ -1515,18 +1505,15 @@ fn test_clean_old_with_zero_lamport_account() {
     accounts.add_root_and_flush_write_cache(0);
     accounts.add_root_and_flush_write_cache(1);
 
-    if accounts.mark_obsolete_accounts {
-        // Old state can be cleared up with dead account tracking
-        assert_eq!(accounts.alive_account_count_in_slot(0), 0);
-    } else {
-        // even if rooted, old state isn't cleaned up
-        assert_eq!(accounts.alive_account_count_in_slot(0), 2);
-    }
     assert_eq!(accounts.alive_account_count_in_slot(1), 2);
 
     accounts.print_accounts_stats("");
 
-    accounts.clean_accounts_for_tests();
+    if !accounts.mark_obsolete_accounts {
+        // even if rooted, old state isn't cleaned up
+        assert_eq!(accounts.alive_account_count_in_slot(0), 2);
+        accounts.clean_accounts_for_tests();
+    }
 
     //Old state behind zero-lamport account is cleaned up
     assert_eq!(accounts.alive_account_count_in_slot(0), 0);
@@ -4107,15 +4094,11 @@ fn test_shrink_unref() {
     // Flushes all roots
     db.flush_accounts_cache(true, None);
 
-    if db.mark_obsolete_accounts {
-        // Store should be gone for slot 0 now due to being invalidated
-        assert_no_storages_at_slot(&db, 0);
-    } else {
+    if !db.mark_obsolete_accounts {
         // Should be one store before clean for slot 0
         db.get_and_assert_single_storage(0);
+        db.clean_accounts(Some(2), false, &EpochSchedule::default());
     }
-
-    db.clean_accounts(Some(2), false, &EpochSchedule::default());
 
     // No stores should exist for slot 0 after clean
     assert_no_storages_at_slot(&db, 0);

@@ -494,16 +494,8 @@ mod serde_snapshot_tests {
         accounts.print_accounts_stats("post_f");
 
         accounts.assert_load_account(current_slot, pubkey, some_lamport);
-
-        // With accounts marked obsolete in the storages, they will be entirely purged when the
-        // accounts are deserialized and serialized.
-        if accounts.mark_obsolete_accounts {
-            accounts.assert_not_load_account(current_slot, purged_pubkey1);
-            accounts.assert_not_load_account(current_slot, purged_pubkey2);
-        } else {
-            accounts.assert_load_account(current_slot, purged_pubkey1, 0);
-            accounts.assert_load_account(current_slot, purged_pubkey2, 0);
-        }
+        accounts.assert_load_account(current_slot, purged_pubkey1, 0);
+        accounts.assert_load_account(current_slot, purged_pubkey2, 0);
         accounts.assert_load_account(current_slot, dummy_pubkey, dummy_lamport);
 
         let calculated_capitalization =
@@ -530,6 +522,7 @@ mod serde_snapshot_tests {
             let accounts =
                 reconstruct_accounts_db_via_serialization(&accounts, current_slot, storage_access);
             accounts.print_accounts_stats("after_reconstruct");
+            accounts.set_latest_full_snapshot_slot(0);
             accounts.clean_accounts_for_tests();
             reconstruct_accounts_db_via_serialization(&accounts, current_slot, storage_access)
         });
@@ -595,20 +588,14 @@ mod serde_snapshot_tests {
         accounts.print_count_and_status("before reconstruct");
         let accounts =
             reconstruct_accounts_db_via_serialization(&accounts, current_slot, storage_access);
+        accounts.set_latest_full_snapshot_slot(0);
         accounts.print_count_and_status("before purge zero");
         accounts.clean_accounts_for_tests();
         accounts.print_count_and_status("after purge zero");
 
         accounts.assert_load_account(current_slot, pubkey, old_lamport);
-        // With accounts marked obsolete in the storages, accounts will be marked
-        // obsolete when deserializing
-        if accounts.mark_obsolete_accounts {
-            accounts.assert_not_load_account(current_slot, purged_pubkey1);
-            accounts.assert_not_load_account(current_slot, purged_pubkey2);
-        } else {
-            accounts.assert_load_account(current_slot, purged_pubkey1, 0);
-            accounts.assert_load_account(current_slot, purged_pubkey2, 0);
-        }
+        accounts.assert_load_account(current_slot, purged_pubkey1, 0);
+        accounts.assert_load_account(current_slot, purged_pubkey2, 0);
     }
 
     #[test_case(StorageAccess::Mmap)]
