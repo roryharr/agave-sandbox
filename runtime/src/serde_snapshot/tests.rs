@@ -616,11 +616,12 @@ mod serde_snapshot_tests {
 
         let pubkey1 = solana_pubkey::new_rand();
         let pubkey2 = solana_pubkey::new_rand();
-        let pubkey3 = solana_pubkey::new_rand();
         let dummy_pubkey = solana_pubkey::new_rand();
 
         let mut current_slot = 0;
         let accounts = AccountsDb::new_single_for_tests();
+
+        accounts.set_latest_full_snapshot_slot(0);
 
         // A: Initialize AccountsDb with pubkey1 and pubkey2
         current_slot += 1;
@@ -652,7 +653,6 @@ mod serde_snapshot_tests {
         current_slot += 1;
         accounts.assert_ref_count(&pubkey1, 3);
         accounts.store_for_tests((current_slot, [(&pubkey1, &zero_lamport_account)].as_slice()));
-        accounts.store_for_tests((current_slot, [(&pubkey3, &account2)].as_slice()));
         accounts.add_root_and_flush_write_cache(current_slot);
         // had to be a root to flush, but clean won't work as this test expects if it is a root
         // so, remove the root from alive_roots, then restore it after clean
@@ -694,6 +694,7 @@ mod serde_snapshot_tests {
         accounts.clean_accounts_for_tests();
         let accounts =
             reconstruct_accounts_db_via_serialization(&accounts, current_slot, storage_access);
+        accounts.set_latest_full_snapshot_slot(0);
         accounts.clean_accounts_for_tests();
 
         info!("pubkey: {pubkey1}");
@@ -709,13 +710,14 @@ mod serde_snapshot_tests {
 
         // Do clean
         accounts.flush_root_write_cache(current_slot);
+
+        accounts.set_latest_full_snapshot_slot(current_slot);
         accounts.clean_accounts_for_tests();
 
         // 2nd clean needed to clean-up pubkey1
         accounts.clean_accounts_for_tests();
 
-        // Shrink all slots to remove the unused pubkey
-        accounts.shrink_all_slots(false, &EpochSchedule::default(), None);
+
 
         // Ensure pubkey2 is cleaned from the index finally
         accounts.assert_not_load_account(current_slot, pubkey1);
