@@ -1953,7 +1953,7 @@ mod tests {
         assert_eq!(*bank3, deserialized_bank);
     }
 
-    /// Test that restoring from snapshot dir rather than archives correctly handle zero lamport accounts
+    /// Test that restoring from snapshot dir rather than archives correctly handles zero lamport accounts
     /// slot 0:
     ///     - send some lamports to Account2 (from mint) to bring it to life
     ///
