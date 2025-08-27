@@ -976,7 +976,12 @@ impl AccountStorageEntry {
         })
     }
 
-    pub fn new_existing(slot: Slot, id: AccountsFileId, accounts: AccountsFile) -> Self {
+    pub fn new_existing(
+        slot: Slot,
+        id: AccountsFileId,
+        accounts: AccountsFile,
+        obsolete_accounts: Vec<(Offset, usize, Slot)>,
+    ) -> Self {
         Self {
             id,
             slot,
@@ -984,7 +989,7 @@ impl AccountStorageEntry {
             count_and_status: SeqLock::new((0, AccountStorageStatus::Available)),
             alive_bytes: AtomicUsize::new(0),
             zero_lamport_single_ref_offsets: RwLock::default(),
-            obsolete_accounts: RwLock::default(),
+            obsolete_accounts: RwLock::new(obsolete_accounts),
         }
     }
 
@@ -6605,6 +6610,12 @@ impl AccountsDb {
             return SlotIndexGenerationInfo::default();
         }
 
+        let obsolete_accounts: HashSet<usize> = storage
+            .get_obsolete_accounts(None)
+            .iter()
+            .map(|(offset, _)| *offset)
+            .collect();
+
         let mut accounts_data_len = 0;
         let mut stored_size_alive = 0;
         let mut zero_lamport_pubkeys = vec![];
@@ -6647,17 +6658,20 @@ impl AccountsDb {
                             data_len,
                         },
                     };
-                    itemizer(info);
-                    if !self.account_indexes.is_empty() {
-                        self.accounts_index.update_secondary_indexes(
-                            account.pubkey,
-                            &account,
-                            &self.account_indexes,
-                        );
-                    }
 
-                    let account_lt_hash = Self::lt_hash_account(&account, account.pubkey());
-                    slot_lt_hash.0.mix_in(&account_lt_hash.0);
+                    if !obsolete_accounts.contains(&info.index_info.offset) {
+                        itemizer(info);
+                        if !self.account_indexes.is_empty() {
+                            self.accounts_index.update_secondary_indexes(
+                                account.pubkey,
+                                &account,
+                                &self.account_indexes,
+                            );
+                        }
+
+                        let account_lt_hash = Self::lt_hash_account(&account, account.pubkey());
+                        slot_lt_hash.0.mix_in(&account_lt_hash.0);
+                    }
                 })
                 .expect("must scan accounts storage");
             self.accounts_index

@@ -23,6 +23,7 @@ use {
     regex::Regex,
     semver::Version,
     solana_accounts_db::{
+        account_info::Offset,
         account_storage::{AccountStorageMap, AccountStoragesOrderer},
         account_storage_reader::AccountStorageReader,
         accounts_db::{AccountStorageEntry, AccountsDbConfig, AtomicAccountsFileId},
@@ -64,6 +65,7 @@ pub const SNAPSHOT_STATE_COMPLETE_FILENAME: &str = "state_complete_versioned";
 pub const SNAPSHOT_STORAGES_FLUSHED_FILENAME: &str = "storages_flushed";
 pub const SNAPSHOT_ACCOUNTS_HARDLINKS: &str = "accounts_hardlinks";
 pub const SNAPSHOT_ARCHIVE_DOWNLOAD_DIR: &str = "remote";
+pub const SNAPSHOT_OBSOLETE_ACCOUNTS_FILENAME: &str = "obsolete_accounts";
 pub const SNAPSHOT_FULL_SNAPSHOT_SLOT_FILENAME: &str = "full_snapshot_slot";
 /// When a snapshot is taken of a bank, the state is serialized under this directory.
 /// Specifically in `BANK_SNAPSHOTS_DIR/SLOT/`.
@@ -514,6 +516,9 @@ pub enum AddBankSnapshotError {
 
     #[error("failed to serialize status cache: {0}")]
     SerializeStatusCache(#[source] Box<SnapshotError>),
+
+    #[error("failed to serialize obsolete accounts: {0}")]
+    SerializeObsoleteAccounts(#[source] Box<SnapshotError>),
 
     #[error("failed to write snapshot version file '{1}': {0}")]
     WriteSnapshotVersionFile(#[source] IoError, PathBuf),
@@ -1054,6 +1059,13 @@ fn serialize_snapshot(
                 .map_err(|err| AddBankSnapshotError::SerializeStatusCache(Box::new(err)))?
         );
 
+        let obsolete_accounts_path = bank_snapshot_dir.join(SNAPSHOT_OBSOLETE_ACCOUNTS_FILENAME);
+        let (obsolete_accounts_file_size, obsolete_accounts_serialize_us) = measure_us!(
+            serialize_obsolete_accounts(&obsolete_accounts_path, snapshot_storages)
+                .map_err(|err| AddBankSnapshotError::SerializeObsoleteAccounts(Box::new(err)))?
+        );
+
+        let write_legacy_completer = obsolete_accounts_file_size != 0;
         let version_path = bank_snapshot_dir.join(SNAPSHOT_VERSION_FILENAME);
         let (_, write_version_file_us) = measure_us!(fs::write(
             &version_path,
@@ -1063,7 +1075,7 @@ fn serialize_snapshot(
 
         // Mark this directory complete so it can be used.  Check this flag first before selecting for deserialization.
         let (_, write_state_complete_file_us) = measure_us!({
-            write_snapshot_state_complete_file(&bank_snapshot_dir, true)
+            write_snapshot_state_complete_file(&bank_snapshot_dir, write_legacy_completer)
                 .map_err(AddBankSnapshotError::MarkSnapshotComplete)?
         });
 
@@ -1075,10 +1087,12 @@ fn serialize_snapshot(
             ("slot", slot, i64),
             ("bank_size", bank_snapshot_consumed_size, i64),
             ("status_cache_size", status_cache_consumed_size, i64),
+            ("obsolete_accounts_size", obsolete_accounts_file_size, i64),
             ("flush_storages_us", flush_storages_us, Option<i64>),
             ("hard_link_storages_us", hard_link_storages_us, Option<i64>),
             ("bank_serialize_us", bank_serialize.as_us(), i64),
             ("status_cache_serialize_us", status_cache_serialize_us, i64),
+            ("obsolete_accounts_serialize_us", obsolete_accounts_serialize_us, i64),
             ("write_version_file_us", write_version_file_us, i64),
             (
                 "write_state_complete_file_us",
@@ -1368,6 +1382,41 @@ fn do_get_highest_bank_snapshot(
 ) -> Option<BankSnapshotInfo> {
     bank_snapshots.sort_unstable();
     bank_snapshots.into_iter().next_back()
+}
+
+pub fn serialize_obsolete_accounts(
+    data_file_path: &Path,
+    snapshot_storages: &[Arc<AccountStorageEntry>],
+) -> Result<u64> {
+    let data_file = fs::File::create(data_file_path)?;
+    let mut data_file_stream = BufWriter::new(data_file);
+
+    snapshot_storages.iter().try_for_each(|storage| {
+        let obsolete_accounts = (storage.slot(), storage.get_obsolete_accounts(None));
+        bincode::serialize_into(&mut data_file_stream, &obsolete_accounts)
+            .map_err(|err| IoError::other(format!("Failed to serialize obsolete accounts: {err}")))
+    })?;
+
+    data_file_stream.flush()?;
+
+    let consumed_size = data_file_stream.stream_position()?;
+    Ok(consumed_size)
+}
+
+pub fn deserialize_obsolete_accounts(
+    data_file_path: &Path,
+) -> Result<HashMap<Slot, Vec<(Offset, usize)>>> {
+    let data_file = fs::File::open(data_file_path)?;
+    let mut data_file_stream = BufReader::new(data_file);
+
+    let mut obsolete_accounts = HashMap::new();
+    while let Ok(account_data) =
+        bincode::deserialize_from::<_, (Slot, Vec<(Offset, usize)>)>(&mut data_file_stream)
+    {
+        obsolete_accounts.insert(account_data.0, account_data.1);
+    }
+
+    Ok(obsolete_accounts)
 }
 
 pub fn serialize_snapshot_data_file<F>(data_file_path: &Path, serializer: F) -> Result<u64>
@@ -1969,6 +2018,7 @@ fn unarchive_snapshot(
                     next_append_vec_id,
                     SnapshotFrom::Archive,
                     accounts_db_config.storage_access,
+                    HashMap::new(),
                 )?,
                 measure_name
             );
@@ -2029,6 +2079,10 @@ pub fn rebuild_storages_from_snapshot_dir(
     let bank_snapshot_dir = &snapshot_info.snapshot_dir;
     let accounts_hardlinks = bank_snapshot_dir.join(SNAPSHOT_ACCOUNTS_HARDLINKS);
     let account_run_paths: HashSet<_> = HashSet::from_iter(account_paths);
+
+    // Read out the obsolete accounts
+    let obsolete_accounts_path = bank_snapshot_dir.join(SNAPSHOT_OBSOLETE_ACCOUNTS_FILENAME);
+    let obsolete_accounts = deserialize_obsolete_accounts(&obsolete_accounts_path)?;
 
     let read_dir = fs::read_dir(&accounts_hardlinks).map_err(|err| {
         IoError::other(format!(
@@ -2107,6 +2161,7 @@ pub fn rebuild_storages_from_snapshot_dir(
         next_append_vec_id,
         SnapshotFrom::Dir,
         storage_access,
+        obsolete_accounts,
     )?;
 
     Ok((storage, bank_fields, accounts_db_fields))

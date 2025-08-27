@@ -91,7 +91,13 @@ impl AccountsFile {
         path: impl Into<PathBuf>,
         current_len: usize,
         storage_access: StorageAccess,
+        obsolete_accounts: &[(Offset, usize, Slot)],
     ) -> Result<Self> {
+        let current_len = current_len
+            + obsolete_accounts
+                .iter()
+                .map(|(_, data_len, _)| AppendVec::calculate_stored_size(*data_len))
+                .sum::<usize>();
         let av = AppendVec::new_for_startup(path, current_len, storage_access)?;
         Ok(Self::AppendVec(av))
     }
@@ -339,7 +345,7 @@ impl AccountsFile {
     /// in data_len
     pub(crate) fn calculate_stored_size(&self, data_len: usize) -> usize {
         match self {
-            Self::AppendVec(av) => av.calculate_stored_size(data_len),
+            Self::AppendVec(_av) => AppendVec::calculate_stored_size(data_len),
             Self::TieredStorage(ts) => ts
                 .reader()
                 .expect("Reader must be initialized as stored size is specific to format")
