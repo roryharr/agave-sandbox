@@ -6621,6 +6621,9 @@ impl AccountsDb {
                     all_accounts_are_zero_lamports = false;
                 } else {
                     // zero lamport accounts
+                    if self.mark_obsolete_accounts == MarkObsoleteAccounts::Enabled {
+                        self.zero_lamport_single_ref_found(slot, info.index_info.offset);
+                    }
                     zero_lamport_pubkeys.push(info.index_info.pubkey);
                 }
                 keyed_account_infos.push((
@@ -7082,16 +7085,9 @@ impl AccountsDb {
         let stats: ObsoleteAccountsStats = pubkeys_with_duplicates_by_bin
             .par_iter()
             .map(|pubkeys_by_bin| {
-                let reclaims = self.accounts_index.clean_and_unref_rooted_entries_by_bin(
-                    pubkeys_by_bin,
-                    |slot, account_info| {
-                        // Since the unref makes every account a single ref account, all
-                        // zero lamport accounts should be tracked as zero_lamport_single_ref
-                        if account_info.is_zero_lamport() {
-                            self.zero_lamport_single_ref_found(slot, account_info.offset());
-                        }
-                    },
-                );
+                let reclaims = self
+                    .accounts_index
+                    .clean_and_unref_rooted_entries_by_bin(pubkeys_by_bin);
                 let stats = PurgeStats::default();
 
                 // Mark all the entries as obsolete, and remove any empty storages
