@@ -2089,8 +2089,7 @@ pub mod tests {
         let index: AccountsIndex<bool, bool> = AccountsIndex::<bool, bool>::default_for_tests();
         let pubkeys_by_bin: Vec<Pubkey> = vec![];
 
-        let reclaims =
-            index.clean_and_unref_rooted_entries_by_bin(&pubkeys_by_bin);
+        let reclaims = index.clean_and_unref_rooted_entries_by_bin(&pubkeys_by_bin);
 
         assert!(reclaims.is_empty());
     }

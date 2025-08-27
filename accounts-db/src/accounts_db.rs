@@ -6861,11 +6861,12 @@ impl AccountsDb {
                     }
 
                     if pass == 0 {
-                        if self.mark_obsolete_accounts == MarkObsoleteAccounts::Disabled
-                        {
-                            let mut zero_lamport_pubkeys_lock = zero_lamport_pubkeys.lock().unwrap();
+                        if self.mark_obsolete_accounts == MarkObsoleteAccounts::Disabled {
+                            let mut zero_lamport_pubkeys_lock =
+                                zero_lamport_pubkeys.lock().unwrap();
                             zero_lamport_pubkeys_lock.reserve(local_zero_lamport_pubkeys.len());
-                            zero_lamport_pubkeys_lock.extend(local_zero_lamport_pubkeys.into_iter());
+                            zero_lamport_pubkeys_lock
+                                .extend(local_zero_lamport_pubkeys.into_iter());
                             drop(zero_lamport_pubkeys_lock);
                         }
 
