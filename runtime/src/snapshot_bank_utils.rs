@@ -1978,7 +1978,8 @@ mod tests {
         let bank_snapshots_dir = tempfile::TempDir::new().unwrap();
         let full_snapshot_archives_dir = tempfile::TempDir::new().unwrap();
 
-        let (mut genesis_config, mint_keypair) = create_genesis_config(1_000_000 * LAMPORTS_PER_SOL);
+        let (mut genesis_config, mint_keypair) =
+            create_genesis_config(1_000_000 * LAMPORTS_PER_SOL);
 
         // Disable fees so fees don't need to be calculated
         genesis_config.fee_rate_governor = solana_fee_calculator::FeeRateGovernor::new(0, 0);
@@ -2052,7 +2053,8 @@ mod tests {
             full_snapshot_archives_dir.path(),
             SnapshotConfig::default().archive_format,
             true,
-        ).unwrap();
+        )
+        .unwrap();
 
         let account_paths = &bank3.rc.accounts.accounts_db.paths;
         let bank_snapshot = get_highest_bank_snapshot(&bank_snapshots_dir).unwrap();
