@@ -1103,7 +1103,7 @@ fn test_clean_dead_slot_with_obsolete_accounts() {
     let slot = accounts.storage.get_slot_storage_entry(1).unwrap();
 
     // Ensure that slot1 also still contains the obsolete account
-    assert!(slot.get_obsolete_accounts(None).len() == 1);
+    assert_eq!(slot.get_obsolete_accounts(None).len(), 1);
 
     // Ref count for pubkey1 should be 1 as obsolete accounts are enabled
     accounts.assert_ref_count(&pubkey, 1);
