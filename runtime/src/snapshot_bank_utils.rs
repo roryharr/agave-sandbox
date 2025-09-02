@@ -832,7 +832,7 @@ mod tests {
             },
             status_cache::Status,
         },
-        solana_accounts_db::accounts_db::ACCOUNTS_DB_CONFIG_FOR_TESTING,
+        solana_accounts_db::accounts_db::{MarkObsoleteAccounts, ACCOUNTS_DB_CONFIG_FOR_TESTING},
         solana_genesis_config::create_genesis_config,
         solana_keypair::Keypair,
         solana_native_token::LAMPORTS_PER_SOL,
@@ -962,7 +962,7 @@ mod tests {
 
         let bank_test_config = BankTestConfig {
             accounts_db_config: AccountsDbConfig {
-                mark_obsolete_accounts: true,
+                mark_obsolete_accounts: MarkObsoleteAccounts::Enabled,
                 ..ACCOUNTS_DB_CONFIG_FOR_TESTING
             },
         };
