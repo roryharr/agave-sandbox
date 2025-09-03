@@ -6608,6 +6608,7 @@ impl AccountsDb {
         let mut accounts_data_len = 0;
         let mut stored_size_alive = 0;
         let mut zero_lamport_pubkeys = vec![];
+        let mut zero_lamport_offsets = vec![];
         let mut all_accounts_are_zero_lamports = true;
         let mut slot_lt_hash = SlotLtHash::default();
 
@@ -6622,9 +6623,9 @@ impl AccountsDb {
                 } else {
                     // With obsolete accounts enabled, all zero lamport accounts
                     // are obsolete or single ref by the end of index generation
-                    // Safe to mark them here
+                    // Store the offsets here
                     if self.mark_obsolete_accounts == MarkObsoleteAccounts::Enabled {
-                        self.zero_lamport_single_ref_found(slot, info.index_info.offset);
+                        zero_lamport_offsets.push(info.index_info.offset);
                     }
                     zero_lamport_pubkeys.push(info.index_info.pubkey);
                 }
@@ -6696,11 +6697,12 @@ impl AccountsDb {
             assert!(old.is_none());
         }
 
-        // Reset the zero lamport pubkeys here after adding to the clean list
-        // They do not need to be visited later, because with obsolete accounts
-        // enabled, they were already marked as single ref while generating
-        // the index for the slot
+        // If obsolete accounts are enabled, add them as single ref accounts here
+        // to avoid having to revisit them later
+        // This is safe with obsolete accounts as all zero lamport accounts will be single ref
+        // or obsolete by the end of index generation
         if self.mark_obsolete_accounts == MarkObsoleteAccounts::Enabled {
+            storage.batch_insert_zero_lamport_single_ref_account_offsets(&zero_lamport_offsets);
             zero_lamport_pubkeys = Vec::new();
         }
         SlotIndexGenerationInfo {
