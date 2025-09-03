@@ -6620,7 +6620,9 @@ impl AccountsDb {
                     accounts_data_len += info.index_info.data_len;
                     all_accounts_are_zero_lamports = false;
                 } else {
-                    // zero lamport accounts
+                    // With obsolete accounts enabled, all zero lamport accounts
+                    // are obsolete or single ref by the end of index generation
+                    // Safe to mark them here
                     if self.mark_obsolete_accounts == MarkObsoleteAccounts::Enabled {
                         self.zero_lamport_single_ref_found(slot, info.index_info.offset);
                     }
@@ -6692,6 +6694,14 @@ impl AccountsDb {
                 .uncleaned_pubkeys
                 .insert(slot, zero_lamport_pubkeys.clone());
             assert!(old.is_none());
+        }
+
+        // Reset the zero lamport pubkeys here after adding to the clean list
+        // They do not need to be visited later, because with obsolete accounts
+        // enabled, they were already marked as single ref while generating
+        // the index for the slot
+        if self.mark_obsolete_accounts == MarkObsoleteAccounts::Enabled {
+            zero_lamport_pubkeys = Vec::new();
         }
         SlotIndexGenerationInfo {
             insert_time_us,
