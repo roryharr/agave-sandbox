@@ -3378,10 +3378,6 @@ fn test_flush_cache_dont_clean_zero_lamport_account() {
         AccountSharedData::new(original_lamports, 1, AccountSharedData::default().owner());
     let zero_lamport_account = AccountSharedData::new(0, 0, AccountSharedData::default().owner());
 
-    // Without snapshots, mark_obsolete_accounts can always discard dead_accounts
-    // Setting a full snapshot to 0 to ensure preservation
-    db.set_latest_full_snapshot_slot(0);
-
     // Store into slot 0, and then flush the slot to storage
     db.store_for_tests((0, &[(&zero_lamport_account_key, &slot0_account)][..]));
     // Second key keeps other lamport account entry for slot 0 alive,
