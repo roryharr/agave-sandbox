@@ -523,6 +523,9 @@ mod serde_snapshot_tests {
     fn test_accounts_purge_chained_purge_before_snapshot_restore(storage_access: StorageAccess) {
         solana_logger::setup();
         with_chained_zero_lamport_accounts(|accounts, current_slot| {
+            // When snapshots are not enabled, zero lamport accounts can be cleaned immediately
+            // Set snapshot slot to zero to avoid purging before saving the snapshot
+            accounts.set_latest_full_snapshot_slot(0);
             accounts.clean_accounts_for_tests();
             reconstruct_accounts_db_via_serialization(&accounts, current_slot, storage_access)
         });
