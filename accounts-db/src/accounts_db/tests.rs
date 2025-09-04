@@ -957,6 +957,8 @@ fn test_account_grow() {
 fn test_lazy_gc_slot() {
     solana_logger::setup();
 
+    // Only run this test with mark obsolete accounts disabled as garbage collection
+    // is not lazy with mark obsolete accounts enabled
     let accounts = AccountsDb::new_with_config(
         Vec::new(),
         AccountsDbConfig {
