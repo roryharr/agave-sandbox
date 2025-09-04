@@ -1709,7 +1709,7 @@ fn test_clean_max_slot_zero_lamport_account(mark_obsolete_accounts: MarkObsolete
     accounts.add_root_and_flush_write_cache(0);
     accounts.add_root_and_flush_write_cache(1);
 
-    // Clean is performed as part flush with obsolete accounts marked, so explicit clean isn't needed
+    // Clean is performed as part of flush with obsolete accounts marked, so explicit clean isn't needed
     if mark_obsolete_accounts == MarkObsoleteAccounts::Disabled {
         // Only clean up to account 0, should not purge slot 0 based on
         // updates in later slots in slot 1
