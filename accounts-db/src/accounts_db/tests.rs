@@ -6265,6 +6265,8 @@ fn test_handle_dropped_roots_for_ancient_assert(storage_access: StorageAccess) {
 /// `clean`.  In this case, `clean` should still reclaim the old versions of these accounts.
 #[test]
 fn test_clean_old_storages_with_reclaims_rooted() {
+    // Test is testing clean behaviour that is specific to obsolete accounts disabled
+    // Only run in obsolete accounts disabled mode
     let accounts_db = AccountsDb::new_with_config(
         Vec::new(),
         AccountsDbConfig {
