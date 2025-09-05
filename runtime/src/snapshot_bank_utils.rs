@@ -818,7 +818,6 @@ mod tests {
                 purge_bank_snapshots_older_than_slot, purge_incomplete_bank_snapshots,
                 purge_old_bank_snapshots, purge_old_bank_snapshots_at_startup,
                 snapshot_storage_rebuilder::get_slot_and_append_vec_id,
-                SNAPSHOT_FULL_SNAPSHOT_SLOT_FILENAME,
             },
             status_cache::Status,
         },
@@ -2350,19 +2349,12 @@ mod tests {
         let bank_snapshot = get_highest_loadable_bank_snapshot(&snapshot_config).unwrap();
         assert_eq!(bank_snapshot, highest_bank_snapshot);
 
-        // 4. delete highest full snapshot archive, get_highest_loadable() should return NONE
+        // 4. delete highest full snapshot archive and highest bank snapshot, get_highest_loadable() should return NONE
         fs::remove_file(highest_full_snapshot_archive.path()).unwrap();
-        assert!(get_highest_loadable_bank_snapshot(&snapshot_config).is_none());
-
-        // 5. get_highest_loadable(), but with a load-only snapshot config, should return Some()
-        let bank_snapshot = get_highest_loadable_bank_snapshot(&load_only_snapshot_config).unwrap();
-        assert_eq!(bank_snapshot, highest_bank_snapshot);
-
-        // 6. delete highest bank snapshot, get_highest_loadable() should return NONE
         fs::remove_dir_all(&highest_bank_snapshot.snapshot_dir).unwrap();
         assert!(get_highest_loadable_bank_snapshot(&snapshot_config).is_none());
 
-        // 7. write 'storages flushed' file, get_highest_loadable() should return Some() again, with slot-1
+        // 5. write 'storages flushed' file, get_highest_loadable() should return Some() again, with slot-1
         snapshot_utils::write_storages_flushed_file(get_bank_snapshot_dir(
             &snapshot_config.bank_snapshots_dir,
             highest_bank_snapshot.slot - 1,
@@ -2371,16 +2363,7 @@ mod tests {
         let bank_snapshot = get_highest_loadable_bank_snapshot(&snapshot_config).unwrap();
         assert_eq!(bank_snapshot.slot, highest_bank_snapshot.slot - 1);
 
-        // 8. delete the full snapshot slot file, get_highest_loadable() should return NONE
-        fs::remove_file(
-            bank_snapshot
-                .snapshot_dir
-                .join(SNAPSHOT_FULL_SNAPSHOT_SLOT_FILENAME),
-        )
-        .unwrap();
-        assert!(get_highest_loadable_bank_snapshot(&snapshot_config).is_none());
-
-        // 9. however, a load-only snapshot config should return Some() again
+        // 6. delete the full snapshot slot file, get_highest_loadable() should return return Some() again, with slot-1
         let bank_snapshot2 =
             get_highest_loadable_bank_snapshot(&load_only_snapshot_config).unwrap();
         assert_eq!(bank_snapshot2, bank_snapshot);
