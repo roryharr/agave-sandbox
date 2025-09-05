@@ -1376,7 +1376,7 @@ fn test_clean_multiple_zero_lamport_decrements_index_ref_count() {
     let zero_lamport_account = AccountSharedData::new(0, 0, AccountSharedData::default().owner());
 
     // When snapshots are not enabled, zero lamport accounts can be cleaned and removed immediately
-    // Set snapshot slot to zero to avoid cleaning zero lamport accounts
+    // Set latest full snapshot slot to zero to avoid cleaning zero lamport accounts
     accounts.set_latest_full_snapshot_slot(0);
 
     // Store 2 accounts in slot 0, then update account 1 in two more slots
