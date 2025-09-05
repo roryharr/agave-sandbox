@@ -1676,7 +1676,7 @@ mod tests {
 
         fs::write(&complete_flag_file, new_version.to_string()).unwrap();
 
-        // With an invalid version and no legacy file, the snapshot will be conidered invalid
+        // With an invalid version and no legacy file, the snapshot will be considered invalid
         let snapshot = get_highest_bank_snapshot(&bank_snapshots_dir).unwrap();
         assert_eq!(snapshot.slot, 2);
 
