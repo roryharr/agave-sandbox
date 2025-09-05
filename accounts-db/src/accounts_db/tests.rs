@@ -1375,8 +1375,8 @@ fn test_clean_multiple_zero_lamport_decrements_index_ref_count() {
     let pubkey2 = solana_pubkey::new_rand();
     let zero_lamport_account = AccountSharedData::new(0, 0, AccountSharedData::default().owner());
 
-    // If there's not a latest full snapshot, zero lamport accounts can be cleaned and removed immediately
-    // Set latest full snapshot slot to zero to avoid cleaning zero lamport accounts
+    // If there is no latest full snapshot, zero lamport accounts can be cleaned and removed 
+    // immediately. Set latest full snapshot slot to zero to avoid cleaning zero lamport accounts
     accounts.set_latest_full_snapshot_slot(0);
 
     // Store 2 accounts in slot 0, then update account 1 in two more slots
@@ -1764,8 +1764,8 @@ fn test_accounts_db_purge_keep_live() {
     let accounts = AccountsDb::new_single_for_tests();
     accounts.add_root_and_flush_write_cache(0);
 
-    // When snapshots are not enabled, zero lamport accounts can be purged immediately
-    // Set snapshot slot to zero to avoid purging zero lamport accounts
+    // If there is no latest full snapshot, zero lamport accounts can be cleaned and removed 
+    // immediately. Set latest full snapshot slot to zero to avoid cleaning zero lamport accounts
     accounts.set_latest_full_snapshot_slot(0);
 
     // Step A
