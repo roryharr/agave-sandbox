@@ -1375,7 +1375,7 @@ fn test_clean_multiple_zero_lamport_decrements_index_ref_count() {
     let pubkey2 = solana_pubkey::new_rand();
     let zero_lamport_account = AccountSharedData::new(0, 0, AccountSharedData::default().owner());
 
-    // When snapshots are not enabled, zero lamport accounts can be cleaned and removed immediately
+    // If there's not a latest full snapshot, zero lamport accounts can be cleaned and removed immediately
     // Set latest full snapshot slot to zero to avoid cleaning zero lamport accounts
     accounts.set_latest_full_snapshot_slot(0);
 
