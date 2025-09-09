@@ -201,7 +201,6 @@ impl BankSnapshotInfo {
             .or(Err(SnapshotNewFromDirError::InvalidVersion(version_str)))?;
 
         let bank_snapshot_path = bank_snapshot_dir.join(get_snapshot_file_name(slot));
-
         if !bank_snapshot_path.is_file() {
             return Err(SnapshotNewFromDirError::MissingSnapshotFile(
                 bank_snapshot_dir,
