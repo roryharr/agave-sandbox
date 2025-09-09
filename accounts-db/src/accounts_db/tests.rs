@@ -3369,7 +3369,15 @@ fn test_flush_cache_clean() {
 
 #[test]
 fn test_flush_cache_dont_clean_zero_lamport_account() {
-    let db = Arc::new(AccountsDb::new_single_for_tests());
+    let db = AccountsDb::new_with_config(
+        Vec::new(),
+        AccountsDbConfig {
+            mark_obsolete_accounts: MarkObsoleteAccounts::Disabled,
+            ..ACCOUNTS_DB_CONFIG_FOR_TESTING
+        },
+        None,
+        Arc::default(),
+    );
 
     let zero_lamport_account_key = Pubkey::new_unique();
     let other_account_key = Pubkey::new_unique();
@@ -3429,6 +3437,75 @@ fn test_flush_cache_dont_clean_zero_lamport_account() {
         .0
         .lamports(),
         0
+    );
+}
+
+/// Ensure that zero lamport accounts are marked obsolete and eligible for shrink
+/// when a newer version of the account is written
+#[test]
+fn test_flush_cache_mark_zero_lamport_account_obsolete() {
+    let db = AccountsDb::new_with_config(
+        Vec::new(),
+        AccountsDbConfig {
+            mark_obsolete_accounts: MarkObsoleteAccounts::Enabled,
+            ..ACCOUNTS_DB_CONFIG_FOR_TESTING
+        },
+        None,
+        Arc::default(),
+    );
+
+    // If there is no latest full snapshot, zero lamport accounts can be cleaned and removed
+    // immediately. Set latest full snapshot slot to zero to avoid cleaning zero lamport accounts
+    db.set_latest_full_snapshot_slot(0);
+
+    let zero_lamport_account_key = Pubkey::new_unique();
+    let other_account_key = Pubkey::new_unique();
+
+    let original_lamports = 1;
+    let some_lamports_account =
+        AccountSharedData::new(original_lamports, 1, AccountSharedData::default().owner());
+    let zero_lamport_account = AccountSharedData::new(0, 0, AccountSharedData::default().owner());
+
+    // Store into slot 0, and then flush the slot to storage
+    db.store_for_tests((
+        0,
+        &[(&zero_lamport_account_key, &some_lamports_account)][..],
+    ));
+    db.add_root(0);
+    db.flush_accounts_cache(true, None);
+    assert!(db.storage.get_slot_storage_entry(0).is_some());
+
+    // Store zero lamport version of account into slot0
+    db.store_for_tests((1, &[(&zero_lamport_account_key, &zero_lamport_account)][..]));
+    // Second key keeps other lamport account entry for slot 1 alive,
+    // preventing clean of the zero_lamport_account in slot 2.
+    db.store_for_tests((1, &[(&other_account_key, &some_lamports_account)][..]));
+    db.add_root(1);
+    db.flush_accounts_cache(true, None);
+
+    // Store into slot 2, which should mark the zero lamport verison in slot1 as obsolete
+    db.store_for_tests((
+        2,
+        &[(&zero_lamport_account_key, &some_lamports_account)][..],
+    ));
+    db.add_root(2);
+
+    // Flush
+    db.flush_accounts_cache(true, None);
+
+    // The `zero_lamport_account_key` should only be alive in slot 2
+    db.assert_ref_count(&zero_lamport_account_key, 1);
+    // The 'other_account_key' should still be alive in slot1
+    db.assert_ref_count(&other_account_key, 1);
+
+    // Assert that there is an obsolete account in slot0, which will be the zero lamport account
+    assert_eq!(
+        db.storage
+            .get_slot_storage_entry(1)
+            .unwrap()
+            .get_obsolete_accounts(Some(2))
+            .len(),
+        1
     );
 }
 
