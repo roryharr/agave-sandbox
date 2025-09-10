@@ -420,11 +420,11 @@ mod serde_snapshot_tests {
             daccounts.check_accounts(&pubkeys1, 1, 10, 1);
 
             // If accounts are marked obsolete at initial save time, then the accounts will be
-            // shrunk by snapshot save
+            // shrunk during snapshot archive
             if mark_obsolete_accounts_initial == MarkObsoleteAccounts::Enabled {
                 daccounts.check_storage(0, 78, 78);
                 daccounts.check_storage(1, 11, 11);
-            // If accoutns are marked obsolete at restore time, then the accounts will be be marked
+            // If accounts are marked obsolete at restore time, then the accounts will be marked
             // obsolete and cleaned during snapshot restore but not removed from the storages until
             // the next shrink
             } else if mark_obsolete_accounts_restore == MarkObsoleteAccounts::Enabled {
