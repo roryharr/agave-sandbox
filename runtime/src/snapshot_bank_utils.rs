@@ -2290,23 +2290,17 @@ mod tests {
         }
     }
 
-    #[test_case(true; "Load Only")]
-    #[test_case(false; "Default")]
-    fn test_get_highest_loadable_bank_snapshot(load_only: bool) {
+    #[test_case(SnapshotConfig::new_load_only())]
+    #[test_case(SnapshotConfig::default())]
+    fn test_get_highest_loadable_bank_snapshot(snapshot_config: SnapshotConfig) {
         let bank_snapshots_dir = TempDir::new().unwrap();
         let snapshot_archives_dir = TempDir::new().unwrap();
-
-        let init_function = if load_only {
-            SnapshotConfig::new_load_only()
-        } else {
-            SnapshotConfig::default()
-        };
 
         let snapshot_config = SnapshotConfig {
             bank_snapshots_dir: bank_snapshots_dir.as_ref().to_path_buf(),
             full_snapshot_archives_dir: snapshot_archives_dir.as_ref().to_path_buf(),
             incremental_snapshot_archives_dir: snapshot_archives_dir.as_ref().to_path_buf(),
-            ..init_function
+            ..snapshot_config
         };
 
         let genesis_config = GenesisConfig::default();
