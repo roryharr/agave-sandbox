@@ -2333,9 +2333,6 @@ mod tests {
             )
             .unwrap();
         }
-
-        let highest_full_snapshot_archive =
-            get_highest_full_snapshot_archive_info(&snapshot_archives_dir).unwrap();
         let highest_bank_snapshot = get_highest_bank_snapshot(&bank_snapshots_dir).unwrap();
 
         // 1. call get_highest_loadable() but bad snapshot dir, so returns None
@@ -2350,7 +2347,6 @@ mod tests {
         assert_eq!(bank_snapshot, highest_bank_snapshot);
 
         // 4. delete highest full snapshot archive and highest bank snapshot, get_highest_loadable() should return NONE
-        fs::remove_file(highest_full_snapshot_archive.path()).unwrap();
         fs::remove_dir_all(&highest_bank_snapshot.snapshot_dir).unwrap();
         assert!(get_highest_loadable_bank_snapshot(&snapshot_config).is_none());
 
