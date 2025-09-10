@@ -818,6 +818,7 @@ mod tests {
                 purge_bank_snapshots_older_than_slot, purge_incomplete_bank_snapshots,
                 purge_old_bank_snapshots, purge_old_bank_snapshots_at_startup,
                 snapshot_storage_rebuilder::get_slot_and_append_vec_id,
+                SNAPSHOT_FULL_SNAPSHOT_SLOT_FILENAME,
             },
             status_cache::Status,
         },
@@ -2289,24 +2290,23 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_get_highest_loadable_bank_snapshot() {
+    #[test_case(true; "Load Only")]
+    #[test_case(false; "Default")]
+    fn test_get_highest_loadable_bank_snapshot(load_only: bool) {
         let bank_snapshots_dir = TempDir::new().unwrap();
         let snapshot_archives_dir = TempDir::new().unwrap();
+
+        let init_function = if load_only {
+            SnapshotConfig::new_load_only()
+        } else {
+            SnapshotConfig::default()
+        };
 
         let snapshot_config = SnapshotConfig {
             bank_snapshots_dir: bank_snapshots_dir.as_ref().to_path_buf(),
             full_snapshot_archives_dir: snapshot_archives_dir.as_ref().to_path_buf(),
             incremental_snapshot_archives_dir: snapshot_archives_dir.as_ref().to_path_buf(),
-            ..Default::default()
-        };
-        let load_only_snapshot_config = SnapshotConfig {
-            bank_snapshots_dir: snapshot_config.bank_snapshots_dir.clone(),
-            full_snapshot_archives_dir: snapshot_config.full_snapshot_archives_dir.clone(),
-            incremental_snapshot_archives_dir: snapshot_config
-                .incremental_snapshot_archives_dir
-                .clone(),
-            ..SnapshotConfig::new_load_only()
+            ..init_function
         };
 
         let genesis_config = GenesisConfig::default();
@@ -2360,8 +2360,13 @@ mod tests {
         assert_eq!(bank_snapshot.slot, highest_bank_snapshot.slot - 1);
 
         // 6. delete the full snapshot slot file, get_highest_loadable() should return return Some() again, with slot-1
-        let bank_snapshot2 =
-            get_highest_loadable_bank_snapshot(&load_only_snapshot_config).unwrap();
+        fs::remove_file(
+            bank_snapshot
+                .snapshot_dir
+                .join(SNAPSHOT_FULL_SNAPSHOT_SLOT_FILENAME),
+        )
+        .unwrap();
+        let bank_snapshot2 = get_highest_loadable_bank_snapshot(&snapshot_config).unwrap();
         assert_eq!(bank_snapshot2, bank_snapshot);
     }
 }
