@@ -186,9 +186,9 @@ impl BankSnapshotInfo {
         // filled.  Check the version file as it is the last file written to avoid using a highest
         // found slot directory with missing content
         let version_path = bank_snapshot_dir.join(SNAPSHOT_VERSION_FILENAME);
-        let version_str = snapshot_version_from_file(&version_path).or(Err(
-            SnapshotNewFromDirError::IncompleteDir(bank_snapshot_dir.clone()),
-        ))?;
+        let version_str = snapshot_version_from_file(&version_path).map_err(|err| {
+            SnapshotNewFromDirError::IncompleteDir(err, bank_snapshot_dir.clone())
+        })?;
 
         let snapshot_version = SnapshotVersion::from_str(version_str.as_str())
             .or(Err(SnapshotNewFromDirError::InvalidVersion(version_str)))?;
@@ -382,8 +382,8 @@ pub enum SnapshotNewFromDirError {
     #[error("invalid snapshot version '{0}'")]
     InvalidVersion(String),
 
-    #[error("snapshot directory incomplete '{0}'")]
-    IncompleteDir(PathBuf),
+    #[error("snapshot directory incomplete '{1}': {0}")]
+    IncompleteDir(#[source] IoError, PathBuf),
 
     #[error("missing snapshot file '{0}'")]
     MissingSnapshotFile(PathBuf),
@@ -929,7 +929,7 @@ fn serialize_snapshot(
             }
 
             // Mark this directory complete. Used in older versions to check if the snapshot is complete
-            // Never read in 3.1, can be removed in 3.2
+            // Never read in v3.1, can be removed in v3.2
             write_snapshot_state_complete_file(&bank_snapshot_dir)
                 .map_err(AddBankSnapshotError::MarkSnapshotComplete)?;
 
@@ -1953,7 +1953,7 @@ pub fn rebuild_storages_from_snapshot_dir(
 /// Reads the `snapshot_version` from a file. Before opening the file, its size
 /// is compared to `MAX_SNAPSHOT_VERSION_FILE_SIZE`. If the size exceeds this
 /// threshold, it is not opened and an error is returned.
-fn snapshot_version_from_file(path: impl AsRef<Path>) -> Result<String> {
+fn snapshot_version_from_file(path: impl AsRef<Path>) -> std::result::Result<String, IoError> {
     // Check file size.
     let file_metadata = fs::metadata(&path).map_err(|err| {
         IoError::other(format!(
@@ -1969,7 +1969,7 @@ fn snapshot_version_from_file(path: impl AsRef<Path>) -> Result<String> {
             file_size,
             MAX_SNAPSHOT_VERSION_FILE_SIZE,
         );
-        return Err(IoError::other(error_message).into());
+        return Err(IoError::other(error_message));
     }
 
     // Read snapshot_version from file.
@@ -2644,7 +2644,7 @@ mod tests {
         file.write_all(&file_content).unwrap();
         assert_matches!(
             snapshot_version_from_file(file.path()),
-            Err(SnapshotError::Io(ref message)) if message.to_string().starts_with("snapshot version file too large")
+            Err(ref message) if message.to_string().starts_with("snapshot version file too large")
         );
     }
 
