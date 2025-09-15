@@ -4250,6 +4250,9 @@ fn test_clean_drop_dead_storage_handle_zero_lamport_single_ref_accounts() {
     assert!(db.shrink_candidate_slots.lock().unwrap().contains(&1));
 }
 
+/// Tests that shrink correctly marks newly single ref zero lamport accounts and sends them to clean
+/// This test is still relevant with obsolete accounts enabled, but can be removed if all
+/// scenarios where flush_write_cache doesn't clean are eliminated.
 #[test]
 fn test_shrink_unref_handle_zero_lamport_single_ref_accounts() {
     let db = AccountsDb::new_single_for_tests();
