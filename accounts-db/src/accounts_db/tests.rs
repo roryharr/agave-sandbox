@@ -4172,7 +4172,9 @@ fn test_shrink_unref() {
     db.get_and_assert_single_storage(0);
     db.clean_accounts(Some(2), false, &EpochSchedule::default());
 
-    // No stores should exist for slot 0 after clean
+    // No stores should exist for slot 0. If obsolete accounts are enabled, slot 0 stores are
+    // cleaned when slot 2 is flushed. If obsolete accounts are disabled, slot 0 stores are
+    // cleaned during the clean_accounts function call.
     assert_no_storages_at_slot(&db, 0);
 
     // Ref count for `account_key1` (account removed earlier by shrink)
