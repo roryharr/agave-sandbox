@@ -4305,7 +4305,9 @@ fn test_shrink_unref_handle_zero_lamport_single_ref_accounts() {
     db.get_and_assert_single_storage(1);
     db.clean_accounts(Some(2), false, &EpochSchedule::default());
 
-    // No stores should exist for slot 0 after clean
+    // No stores should exist for slot 0. If obsolete accounts are enabled, slot 0 stores are
+    // cleaned when slot 2 is flushed. If obsolete accounts are disabled, slot 0 stores are
+    // cleaned during the clean_accounts function call.
     assert_no_storages_at_slot(&db, 0);
     // No store should exit for slot 1 too as it has only a zero lamport single ref account.
     assert_no_storages_at_slot(&db, 1);
