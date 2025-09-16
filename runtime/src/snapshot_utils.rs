@@ -927,12 +927,6 @@ fn serialize_snapshot(
                     AddBankSnapshotError::FlushStorage(err, storage.path().to_path_buf())
                 })?;
             }
-
-            // Mark this directory complete. Used in older versions to check if the snapshot is complete
-            // Never read in v3.1, can be removed in v3.2
-            write_snapshot_state_complete_file(&bank_snapshot_dir)
-                .map_err(AddBankSnapshotError::MarkSnapshotComplete)?;
-
             let flush_us = flush_measure.end_as_us();
             let (_, hard_link_us) = measure_us!(hard_link_storages_to_snapshot(
                 &bank_snapshot_dir,
@@ -940,6 +934,13 @@ fn serialize_snapshot(
                 snapshot_storages
             )
             .map_err(AddBankSnapshotError::HardLinkStorages)?);
+            
+            // Mark this directory complete. Used in older versions to check if the snapshot is complete
+            // Never read in v3.1, can be removed in v3.2
+            write_snapshot_state_complete_file(&bank_snapshot_dir)
+                .map_err(AddBankSnapshotError::MarkSnapshotComplete)?;
+            
+            // Write the storages flushed file     
             write_storages_flushed_file(&bank_snapshot_dir)
                 .map_err(AddBankSnapshotError::MarkStoragesFlushed)?;
             Some((flush_us, hard_link_us))
