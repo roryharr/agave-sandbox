@@ -934,13 +934,13 @@ fn serialize_snapshot(
                 snapshot_storages
             )
             .map_err(AddBankSnapshotError::HardLinkStorages)?);
-            
+
             // Mark this directory complete. Used in older versions to check if the snapshot is complete
             // Never read in v3.1, can be removed in v3.2
             write_snapshot_state_complete_file(&bank_snapshot_dir)
                 .map_err(AddBankSnapshotError::MarkSnapshotComplete)?;
-            
-            // Write the storages flushed file     
+
+            // Write the storages flushed file
             write_storages_flushed_file(&bank_snapshot_dir)
                 .map_err(AddBankSnapshotError::MarkStoragesFlushed)?;
             Some((flush_us, hard_link_us))
