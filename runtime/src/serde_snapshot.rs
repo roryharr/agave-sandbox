@@ -856,11 +856,12 @@ pub(crate) fn reconstruct_single_storage(
     storage_access: StorageAccess,
 ) -> Result<Arc<AccountStorageEntry>, SnapshotError> {
     let accounts_file =
-        AccountsFile::new_for_startup(append_vec_path, current_len, storage_access)?;
+        AccountsFile::new_for_startup(append_vec_path, current_len, storage_access, &[])?;
     Ok(Arc::new(AccountStorageEntry::new_existing(
         *slot,
         append_vec_id,
         accounts_file,
+        &[],
     )))
 }
 
