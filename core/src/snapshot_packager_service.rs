@@ -203,7 +203,7 @@ impl SnapshotPackagerService {
         if let Err(err) = result {
             warn!("Failed to hard link account storages: {err}");
             // If hard linking the storages failed, we do *NOT* want to write
-            // the "storages flushed" file, so return early.
+            // the "bank snapshot loadable" files, so return early.
             return;
         }
         info!(
