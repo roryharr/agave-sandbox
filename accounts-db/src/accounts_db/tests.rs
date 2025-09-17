@@ -1213,7 +1213,7 @@ fn test_remove_zero_lamport_single_ref_accounts_after_shrink() {
                 // This test pass is still relevant with obsolete accounts enabled, but can be
                 // removed if all scenarios where flush_write_cache doesn't clean are eliminated.
 
-                // add root and flush without clean  (causing ref count to increase)
+                // add root and flush without clean (causing ref count to increase)
                 accounts.add_root(slot + 1);
                 accounts.flush_rooted_accounts_cache(None, false);
             }
