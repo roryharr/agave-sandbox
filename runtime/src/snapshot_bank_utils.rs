@@ -2329,11 +2329,11 @@ mod tests {
         // 1. call get_highest_loadable() but bad snapshot dir, so returns None
         assert!(get_highest_loadable_bank_snapshot(&SnapshotConfig::default()).is_none());
 
-        // 2. the 'bank snapshot loadable' files haven't been written yet, so get_highest_loadable() should return NONE
+        // 2. the bank snapshot has not been marked as loadable, so get_highest_loadable() should return NONE
         assert!(get_highest_loadable_bank_snapshot(&snapshot_config).is_none());
 
-        // 3. write 'bank snapshot loadable' files, get_highest_loadable(), should return highest_bank_snapshot_slot
-        snapshot_utils::write_bank_snapshot_loadable_files(&highest_bank_snapshot.snapshot_dir)
+        // 3. Mark the bank snapshot as loadable, get_highest_loadable() should return highest_bank_snapshot_slot
+        snapshot_utils::mark_bank_snapshot_as_loadable(&highest_bank_snapshot.snapshot_dir)
             .unwrap();
         let bank_snapshot = get_highest_loadable_bank_snapshot(&snapshot_config).unwrap();
         assert_eq!(bank_snapshot, highest_bank_snapshot);
@@ -2342,8 +2342,8 @@ mod tests {
         fs::remove_dir_all(&highest_bank_snapshot.snapshot_dir).unwrap();
         assert!(get_highest_loadable_bank_snapshot(&snapshot_config).is_none());
 
-        // 5. write 'bank snapshot loadable' files, get_highest_loadable() should return Some() again, with slot-1
-        snapshot_utils::write_bank_snapshot_loadable_files(get_bank_snapshot_dir(
+        // 5. Mark the bank snapshot as loadable, get_highest_loadable() should return Some() again, with slot-1
+        snapshot_utils::mark_bank_snapshot_as_loadable(get_bank_snapshot_dir(
             &snapshot_config.bank_snapshots_dir,
             highest_bank_snapshot.slot - 1,
         ))

@@ -202,8 +202,8 @@ impl SnapshotPackagerService {
         );
         if let Err(err) = result {
             warn!("Failed to hard link account storages: {err}");
-            // If hard linking the storages failed, we do *NOT* want to write
-            // the "bank snapshot loadable" files, so return early.
+            // If hard linking the storages failed, we do *NOT* want to mark the bank snapshot as
+            // loadable so return early.
             return;
         }
         info!(
@@ -211,10 +211,9 @@ impl SnapshotPackagerService {
             start.elapsed(),
         );
 
-        // Write files that indicate that the bank snapshot is loadable
-        let result = snapshot_utils::write_bank_snapshot_loadable_files(&bank_snapshot_dir);
+        let result = snapshot_utils::mark_bank_snapshot_as_loadable(&bank_snapshot_dir);
         if let Err(err) = result {
-            warn!("Failed to mark snapshot loadable: {err}");
+            warn!("Failed to mark bank snapshot as loadable: {err}");
         }
     }
 }
