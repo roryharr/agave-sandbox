@@ -1629,11 +1629,11 @@ mod tests {
         assert!(hardlink_dirs.iter().all(|dir| fs::metadata(dir).is_err()));
     }
 
-    /// Test versioning when booting from directories
-    /// If the storages flushed file is present, booting from directories should always pass
-    /// If the loadable version file is present, the version should be checked for compatibility
+    /// Test versioning when fastbooting
+    /// If the storages flushed file is present, fastboot should always pass
+    /// If only the fastboot version file is present, the version should be checked for compatibility
     #[test]
-    fn test_snapshot_versioning() {
+    fn test_fastboot_versioning() {
         let genesis_config = GenesisConfig::default();
         let bank_snapshots_dir = tempfile::TempDir::new().unwrap();
         let _bank = create_snapshot_dirs_for_tests(&genesis_config, &bank_snapshots_dir, 3, true);
@@ -1645,7 +1645,7 @@ mod tests {
             ..Default::default()
         };
 
-        // Verify the snapshot is found with all the version files present
+        // Verify the snapshot is found with all files present
         let snapshot = get_highest_loadable_bank_snapshot(&snapshot_config).unwrap();
         assert_eq!(snapshot.slot, 3);
 
@@ -1660,18 +1660,18 @@ mod tests {
         let snapshot = get_highest_loadable_bank_snapshot(&snapshot_config).unwrap();
         assert_eq!(snapshot.slot, 3);
 
-        // Test 2: Modify the version in the loadable bank snapshot version file to something newer
+        // Test 2: Modify the version in the fastboot version file to something newer
         // than current
         let complete_flag_file = snapshot
             .snapshot_dir
-            .join(snapshot_utils::SNAPSHOT_LOADABLE_BANK_SNAPSHOT_VERSION_FILENAME);
+            .join(snapshot_utils::SNAPSHOT_FASTBOOT_VERSION_FILENAME);
         let version = fs::read_to_string(&complete_flag_file).unwrap();
         let version = Version::parse(&version).unwrap();
         let new_version = Version::new(version.major + 1, version.minor, version.patch);
 
         fs::write(&complete_flag_file, new_version.to_string()).unwrap();
 
-        // With an invalid version and no legacy file, the snapshot will be considered invalid
+        // With an invalid version and no flush file, the snapshot will be considered invalid
         let new_snapshot = get_highest_loadable_bank_snapshot(&snapshot_config);
         assert!(new_snapshot.is_none());
 
@@ -1685,11 +1685,11 @@ mod tests {
         let snapshot = get_highest_loadable_bank_snapshot(&snapshot_config).unwrap();
         assert_eq!(snapshot.slot, 2);
 
-        // Test 4: Remove the loadable bank snapshot file
-        let complete_flag_file = snapshot
+        // Test 4: Remove the fastboot version file
+        let fastboot_version_file = snapshot
             .snapshot_dir
-            .join(snapshot_utils::SNAPSHOT_LOADABLE_BANK_SNAPSHOT_VERSION_FILENAME);
-        fs::remove_file(complete_flag_file).unwrap();
+            .join(snapshot_utils::SNAPSHOT_FASTBOOT_VERSION_FILENAME);
+        fs::remove_file(fastboot_version_file).unwrap();
 
         // The flush file will still be found, making this a valid snapshot
         let snapshot = get_highest_loadable_bank_snapshot(&snapshot_config).unwrap();

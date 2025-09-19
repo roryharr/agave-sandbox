@@ -59,7 +59,7 @@ pub use {archive_format::*, snapshot_interval::SnapshotInterval};
 
 pub const SNAPSHOT_STATUS_CACHE_FILENAME: &str = "status_cache";
 pub const SNAPSHOT_VERSION_FILENAME: &str = "version";
-pub const SNAPSHOT_LOADABLE_BANK_SNAPSHOT_VERSION_FILENAME: &str = "loadable_bank_snapshot_version";
+pub const SNAPSHOT_FASTBOOT_VERSION_FILENAME: &str = "fastboot_version";
 /// No longer checked in version v3.1. Can be removed in v3.2
 pub const SNAPSHOT_STATE_COMPLETE_FILENAME: &str = "state_complete";
 pub const SNAPSHOT_STORAGES_FLUSHED_FILENAME: &str = "storages_flushed";
@@ -73,7 +73,7 @@ pub const SNAPSHOT_FULL_SNAPSHOT_SLOT_FILENAME: &str = "full_snapshot_slot";
 pub const BANK_SNAPSHOTS_DIR: &str = "snapshots";
 pub const MAX_SNAPSHOT_DATA_FILE_SIZE: u64 = 32 * 1024 * 1024 * 1024; // 32 GiB
 const MAX_SNAPSHOT_VERSION_FILE_SIZE: u64 = 8; // byte
-const LOADABLE_BANK_SNAPSHOT_VERSION: Version = Version::new(1, 0, 0);
+const SNAPSHOT_FASTBOOT_VERSION: Version = Version::new(1, 0, 0);
 const VERSION_STRING_V1_2_0: &str = "1.2.0";
 pub const TMP_SNAPSHOT_ARCHIVE_PREFIX: &str = "tmp-snapshot-archive-";
 pub const DEFAULT_FULL_SNAPSHOT_ARCHIVE_INTERVAL_SLOTS: NonZeroU64 =
@@ -372,11 +372,11 @@ pub enum SnapshotError {
 }
 
 #[derive(Error, Debug)]
-pub enum LoadableBankSnapshotError {
-    #[error("invalid version string for loadable bank snapshot '{0}'")]
+pub enum SnapshotFastbootError {
+    #[error("invalid version string for fastboot '{0}'")]
     InvalidVersion(String),
 
-    #[error("incompatible loadable bank snapshot version '{0}'")]
+    #[error("incompatible fastboot version '{0}'")]
     IncompatibleVersion(Version),
 }
 
@@ -659,16 +659,14 @@ fn is_bank_snapshot_complete(bank_snapshot_dir: impl AsRef<Path>) -> bool {
     version_path.is_file()
 }
 
-/// Is the loadable bank snapshot version compatible?
-fn is_loadable_bank_snapshot_compatible(
+/// Is the fastboot snapshot version compatible?
+fn is_snapshot_fastboot_compatible(
     version: &Version,
-) -> std::result::Result<bool, LoadableBankSnapshotError> {
-    if version.major <= LOADABLE_BANK_SNAPSHOT_VERSION.major {
+) -> std::result::Result<bool, SnapshotFastbootError> {
+    if version.major <= SNAPSHOT_FASTBOOT_VERSION.major {
         Ok(true)
     } else {
-        Err(LoadableBankSnapshotError::IncompatibleVersion(
-            version.clone(),
-        ))
+        Err(SnapshotFastbootError::IncompatibleVersion(version.clone()))
     }
 }
 
@@ -715,13 +713,7 @@ pub fn read_full_snapshot_slot_file(bank_snapshot_dir: impl AsRef<Path>) -> io::
     Ok(slot)
 }
 
-/// Writes files that indicate the bank snapshot is loadable
-/// Prior to marking the snapshot loadable, the bank snapshot can be saved to an archive, but the
-/// snapshot directory that contains the bank snapshot can't directly be loaded from. After these
-/// files are written, the snapshot dir can be loaded from or can still be written to an archive.
-/// 1. After all the storages are flushed and hardlinked during teardown. This allows booting from
-///    the snapshot dir without unpacking the archive (making booting faster)
-/// 2. After unarchiving a snapshot.
+/// Writes files that indicate the bank snapshot is loadable by fastboot
 pub fn mark_bank_snapshot_as_loadable(bank_snapshot_dir: impl AsRef<Path>) -> io::Result<()> {
     // Mark this directory complete. Used in older versions to check if the snapshot is complete
     // Never read in v3.1, can be removed in v3.2
@@ -747,17 +739,17 @@ pub fn mark_bank_snapshot_as_loadable(bank_snapshot_dir: impl AsRef<Path>) -> io
         ))
     })?;
 
-    let loadable_bank_snapshot_version_path = bank_snapshot_dir
+    let snapshot_fastboot_version_path = bank_snapshot_dir
         .as_ref()
-        .join(SNAPSHOT_LOADABLE_BANK_SNAPSHOT_VERSION_FILENAME);
+        .join(SNAPSHOT_FASTBOOT_VERSION_FILENAME);
     fs::write(
-        &loadable_bank_snapshot_version_path,
-        LOADABLE_BANK_SNAPSHOT_VERSION.to_string(),
+        &snapshot_fastboot_version_path,
+        SNAPSHOT_FASTBOOT_VERSION.to_string(),
     )
     .map_err(|err| {
         IoError::other(format!(
-            "failed to write loadable bank snapshot version file '{}': {err}",
-            loadable_bank_snapshot_version_path.display(),
+            "failed to write fastboot version file '{}': {err}",
+            snapshot_fastboot_version_path.display(),
         ))
     })?;
     Ok(())
@@ -766,7 +758,7 @@ pub fn mark_bank_snapshot_as_loadable(bank_snapshot_dir: impl AsRef<Path>) -> io
 /// Is this bank snapshot loadable?
 fn is_bank_snapshot_loadable(
     bank_snapshot_dir: impl AsRef<Path>,
-) -> std::result::Result<bool, LoadableBankSnapshotError> {
+) -> std::result::Result<bool, SnapshotFastbootError> {
     // Legacy storages flushed file
     // Read in v3.1 for backwards compatibility, can be removed in v3.2
     let flushed_storages = bank_snapshot_dir
@@ -776,18 +768,18 @@ fn is_bank_snapshot_loadable(
         return Ok(true);
     }
 
-    let loadable_bank_snapshot_version_path = bank_snapshot_dir
+    let snapshot_fastboot_version_path = bank_snapshot_dir
         .as_ref()
-        .join(SNAPSHOT_LOADABLE_BANK_SNAPSHOT_VERSION_FILENAME);
+        .join(SNAPSHOT_FASTBOOT_VERSION_FILENAME);
 
-    if let Ok(version_string) = fs::read_to_string(&loadable_bank_snapshot_version_path) {
+    if let Ok(version_string) = fs::read_to_string(&snapshot_fastboot_version_path) {
         if let Ok(version) = Version::from_str(version_string.trim()) {
-            is_loadable_bank_snapshot_compatible(&version)
+            is_snapshot_fastboot_compatible(&version)
         } else {
-            Err(LoadableBankSnapshotError::InvalidVersion(version_string))
+            Err(SnapshotFastbootError::InvalidVersion(version_string))
         }
     } else {
-        // No loadable bank snapshot version file, so this is not a loadable bank snapshot
+        // No fastboot version file, so this is not a fastbootable
         Ok(false)
     }
 }
