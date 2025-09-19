@@ -659,17 +659,6 @@ fn is_bank_snapshot_complete(bank_snapshot_dir: impl AsRef<Path>) -> bool {
     version_path.is_file()
 }
 
-/// Is the fastboot snapshot version compatible?
-fn is_snapshot_fastboot_compatible(
-    version: &Version,
-) -> std::result::Result<bool, SnapshotFastbootError> {
-    if version.major <= SNAPSHOT_FASTBOOT_VERSION.major {
-        Ok(true)
-    } else {
-        Err(SnapshotFastbootError::IncompatibleVersion(version.clone()))
-    }
-}
-
 /// Writes the full snapshot slot file into the bank snapshot dir
 pub fn write_full_snapshot_slot_file(
     bank_snapshot_dir: impl AsRef<Path>,
@@ -784,6 +773,17 @@ fn is_bank_snapshot_loadable(
     }
 }
 
+/// Is the fastboot snapshot version compatible?
+fn is_snapshot_fastboot_compatible(
+    version: &Version,
+) -> std::result::Result<bool, SnapshotFastbootError> {
+    if version.major <= SNAPSHOT_FASTBOOT_VERSION.major {
+        Ok(true)
+    } else {
+        Err(SnapshotFastbootError::IncompatibleVersion(version.clone()))
+    }
+}
+
 /// Gets the highest, loadable, bank snapshot
 ///
 /// The highest bank snapshot is the one with the highest slot.
@@ -798,7 +798,10 @@ pub fn get_highest_loadable_bank_snapshot(
         Ok(true) => Some(highest_bank_snapshot),
         Ok(false) => None,
         Err(err) => {
-            warn!("Error checking if bank snapshot is loadable: {err}");
+            warn!(
+                "Bank snapshot is not loadable '{}': {err}",
+                highest_bank_snapshot.snapshot_dir.display()
+            );
             None
         }
     }
