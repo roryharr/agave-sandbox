@@ -962,7 +962,7 @@ impl AccountStorageEntry {
         slot: Slot,
         id: AccountsFileId,
         accounts: AccountsFile,
-        obsolete_accounts: &[(Offset, usize, Slot)],
+        obsolete_accounts: Vec<(Offset, usize, Slot)>,
     ) -> Self {
         Self {
             id,
@@ -971,7 +971,7 @@ impl AccountStorageEntry {
             count: AtomicUsize::new(0),
             alive_bytes: AtomicUsize::new(0),
             zero_lamport_single_ref_offsets: RwLock::default(),
-            obsolete_accounts: RwLock::new(obsolete_accounts.to_vec()),
+            obsolete_accounts: RwLock::new(obsolete_accounts),
         }
     }
 
