@@ -3,6 +3,7 @@ use {
         account_info::Offset,
         accounts_db::AccountStorageEntry,
         accounts_file::{AccountsFile, InternalsForArchive},
+        obsolete_accounts::ObsoleteAccount,
     },
     solana_clock::Slot,
     std::{
@@ -30,8 +31,9 @@ impl<'a> AccountStorageReader<'a> {
         let num_total_bytes = storage.accounts.len();
         let num_alive_bytes = num_total_bytes - storage.get_obsolete_bytes(snapshot_slot);
 
-        let mut sorted_obsolete_accounts = storage.get_obsolete_accounts(snapshot_slot);
-
+        let mut sorted_obsolete_accounts: Vec<_> = storage
+            .obsolete_accounts()
+            .filter_obsolete_accounts(snapshot_slot);
         // Tiered storage is not compatible with obsolete accounts at this time
         if matches!(storage.accounts, AccountsFile::TieredStorage(_)) {
             assert!(
@@ -181,7 +183,9 @@ mod tests {
         let offset = 0;
         // Mark the obsolete accounts in storage
         let mut size = storage.accounts.get_account_data_lens(&[0]);
-        storage.mark_accounts_obsolete(vec![(offset, size.pop().unwrap())].into_iter(), 0);
+        storage
+            .obsolete_accounts_mut()
+            .mark_accounts_obsolete(vec![(offset, size.pop().unwrap())].into_iter(), 0);
 
         _ = AccountStorageReader::new(&storage, None).unwrap();
     }
@@ -271,7 +275,9 @@ mod tests {
         let data_lens = storage
             .accounts
             .get_account_data_lens(&obsolete_account_offset);
-        storage.mark_accounts_obsolete(obsolete_account_offset.into_iter().zip(data_lens), 0);
+        storage
+            .obsolete_accounts_mut()
+            .mark_accounts_obsolete(obsolete_account_offset.into_iter().zip(data_lens), 0);
 
         let storage = storage
             .reopen_as_readonly(storage_access)
@@ -384,7 +390,7 @@ mod tests {
         let mut slot_marked_dead = 0;
         obsolete_account_offset.into_iter().for_each(|offset| {
             let mut size = storage.accounts.get_account_data_lens(&[offset]);
-            storage.mark_accounts_obsolete(
+            storage.obsolete_accounts().mark_accounts_obsolete(
                 vec![(offset, size.pop().unwrap())].into_iter(),
                 slot_marked_dead,
             );

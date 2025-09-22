@@ -21,11 +21,10 @@
 mod geyser_plugin_utils;
 pub mod stats;
 pub mod tests;
-
-#[cfg(test)]
-use crate::append_vec::StoredAccountMeta;
 #[cfg(feature = "dev-context-only-utils")]
 use qualifier_attr::qualifiers;
+#[cfg(test)]
+use {crate::append_vec::StoredAccountMeta, std::sync::RwLockWriteGuard};
 use {
     crate::{
         account_info::{AccountInfo, Offset, StorageLocation},
@@ -54,6 +53,7 @@ use {
         buffered_reader::RequiredLenBufFileRead,
         contains::Contains,
         is_zero_lamport::IsZeroLamport,
+        obsolete_accounts::{ObsoleteAccount, ObsoleteAccounts},
         partitioned_rewards::{
             PartitionedEpochRewardsConfig, DEFAULT_PARTITIONED_EPOCH_REWARDS_CONFIG,
         },
@@ -909,7 +909,7 @@ pub struct AccountStorageEntry {
     /// 1. The account was rewritten to a newer slot
     /// 2. The account was set to zero lamports and is older than the last
     ///    full snapshot. In this case, slot is set to the snapshot slot
-    obsolete_accounts: RwLock<Vec<(Offset, usize, Slot)>>,
+    obsolete_accounts: RwLock<ObsoleteAccounts>,
 }
 
 impl AccountStorageEntry {
@@ -978,44 +978,21 @@ impl AccountStorageEntry {
         self.alive_bytes.load(Ordering::Acquire)
     }
 
-    /// Marks the accounts at the given offsets as obsolete
-    pub fn mark_accounts_obsolete(
-        &self,
-        newly_obsolete_accounts: impl ExactSizeIterator<Item = (Offset, usize)>,
-        slot: Slot,
-    ) {
-        let mut obsolete_accounts_list = self.obsolete_accounts.write().unwrap();
-        obsolete_accounts_list.reserve(newly_obsolete_accounts.len());
-
-        for (offset, data_len) in newly_obsolete_accounts {
-            obsolete_accounts_list.push((offset, data_len, slot));
-        }
-    }
-
-    /// Returns the accounts that were marked obsolete as of the passed in slot
-    /// or earlier. If slot is None, then slot will be assumed to be the max root
-    /// and all obsolete accounts will be returned.
-    pub fn get_obsolete_accounts(&self, slot: Option<Slot>) -> Vec<(Offset, usize)> {
-        self.obsolete_accounts
-            .read()
-            .unwrap()
-            .iter()
-            .filter(|(_, _, obsolete_slot)| slot.is_none_or(|s| *obsolete_slot <= s))
-            .map(|(offset, data_len, _)| (*offset, *data_len))
-            .collect()
+    pub fn obsolete_accounts(&self) -> ObsoleteAccounts {
+        self.obsolete_accounts.read().unwrap().clone()
     }
 
     /// Returns the number of bytes that were marked obsolete as of the passed
     /// in slot or earlier. If slot is None, then slot will be assumed to be the
     /// max root, and all obsolete bytes will be returned.
     pub fn get_obsolete_bytes(&self, slot: Option<Slot>) -> usize {
-        let obsolete_accounts = self.obsolete_accounts.read().unwrap();
-        let obsolete_bytes = obsolete_accounts
-            .iter()
-            .filter(|(_, _, obsolete_slot)| slot.is_none_or(|s| *obsolete_slot <= s))
-            .map(|(offset, data_len, _)| {
+        let obsolete_bytes: usize = self
+            .obsolete_accounts()
+            .filter_obsolete_accounts(slot)
+            .into_iter()
+            .map(|(offset, data_len)| {
                 self.accounts
-                    .calculate_stored_size(*data_len)
+                    .calculate_stored_size(data_len)
                     .min(self.accounts.len() - offset)
             })
             .sum();
@@ -2933,7 +2910,8 @@ impl AccountsDb {
         // Slot is not needed, as all obsolete accounts can be considered
         // dead for shrink. Zero lamport accounts are not marked obsolete
         let obsolete_offsets: IntSet<_> = store
-            .get_obsolete_accounts(None)
+            .obsolete_accounts()
+            .filter_obsolete_accounts(None)
             .into_iter()
             .map(|(offset, _)| offset)
             .collect();
@@ -5624,10 +5602,14 @@ impl AccountsDb {
                         if let MarkAccountsObsolete::Yes(slot_marked_obsolete) =
                             mark_accounts_obsolete
                         {
-                            store.mark_accounts_obsolete(
-                                offsets.into_iter().zip(data_lens),
-                                slot_marked_obsolete,
-                            );
+                            store
+                                .obsolete_accounts
+                                .write()
+                                .unwrap()
+                                .mark_accounts_obsolete(
+                                    offsets.into_iter().zip(data_lens),
+                                    slot_marked_obsolete,
+                                );
                         }
                         remaining_accounts
                     });
@@ -5822,7 +5804,8 @@ impl AccountsDb {
                         let mut pubkeys = Vec::with_capacity(store.count());
                         // Obsolete accounts are already unreffed before this point, so do not add
                         // them to the pubkeys list.
-                        let obsolete_accounts = store.get_obsolete_accounts(None);
+                        let obsolete_accounts =
+                            store.obsolete_accounts().filter_obsolete_accounts(None);
                         store
                             .accounts
                             .scan_accounts_without_data(|offset, account| {
@@ -7205,6 +7188,13 @@ impl AccountStorageEntry {
             })
             .expect("must scan accounts storage");
         count
+    }
+}
+
+#[cfg(test)]
+impl AccountStorageEntry {
+    pub fn obsolete_accounts_mut(&self) -> RwLockWriteGuard<'_, ObsoleteAccounts> {
+        self.obsolete_accounts.write().unwrap()
     }
 }
 
