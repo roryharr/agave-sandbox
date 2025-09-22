@@ -747,6 +747,7 @@ fn test_flush_slots_with_reclaim_old_slots() {
             storage
                 .obsolete_accounts()
                 .filter_obsolete_accounts(Some(new_slot))
+                .collect::<Vec<_>>()
                 .len() as u64,
             5 - slot
         );
@@ -1145,6 +1146,7 @@ fn test_clean_dead_slot_with_obsolete_accounts() {
     assert_eq!(
         slot.obsolete_accounts()
             .filter_obsolete_accounts(None)
+            .collect::<Vec<_>>()
             .len(),
         1
     );
@@ -3722,6 +3724,7 @@ define_accounts_db_test!(test_alive_bytes, |accounts_db| {
                     storage0
                         .obsolete_accounts()
                         .filter_obsolete_accounts(None)
+                        .collect::<Vec<_>>()
                         .len(),
                     num_obsolete_accounts
                 );

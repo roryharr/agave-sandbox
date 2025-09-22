@@ -21,10 +21,11 @@
 mod geyser_plugin_utils;
 pub mod stats;
 pub mod tests;
+
+#[cfg(test)]
+use crate::append_vec::StoredAccountMeta;
 #[cfg(feature = "dev-context-only-utils")]
 use qualifier_attr::qualifiers;
-#[cfg(test)]
-use {crate::append_vec::StoredAccountMeta, std::sync::RwLockWriteGuard};
 use {
     crate::{
         account_info::{AccountInfo, Offset, StorageLocation},
@@ -53,7 +54,7 @@ use {
         buffered_reader::RequiredLenBufFileRead,
         contains::Contains,
         is_zero_lamport::IsZeroLamport,
-        obsolete_accounts::{ObsoleteAccount, ObsoleteAccounts},
+        obsolete_accounts::ObsoleteAccounts,
         partitioned_rewards::{
             PartitionedEpochRewardsConfig, DEFAULT_PARTITIONED_EPOCH_REWARDS_CONFIG,
         },
@@ -86,7 +87,7 @@ use {
         path::{Path, PathBuf},
         sync::{
             atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering},
-            Arc, Condvar, Mutex, RwLock,
+            Arc, Condvar, Mutex, RwLock, RwLockReadGuard,
         },
         thread::{self, sleep},
         time::{Duration, Instant},
@@ -978,8 +979,8 @@ impl AccountStorageEntry {
         self.alive_bytes.load(Ordering::Acquire)
     }
 
-    pub fn obsolete_accounts(&self) -> ObsoleteAccounts {
-        self.obsolete_accounts.read().unwrap().clone()
+    pub(crate) fn obsolete_accounts(&self) -> RwLockReadGuard<ObsoleteAccounts> {
+        self.obsolete_accounts.read().unwrap()
     }
 
     /// Returns the number of bytes that were marked obsolete as of the passed
@@ -989,7 +990,6 @@ impl AccountStorageEntry {
         let obsolete_bytes: usize = self
             .obsolete_accounts()
             .filter_obsolete_accounts(slot)
-            .into_iter()
             .map(|(offset, data_len)| {
                 self.accounts
                     .calculate_stored_size(data_len)
@@ -2912,7 +2912,6 @@ impl AccountsDb {
         let obsolete_offsets: IntSet<_> = store
             .obsolete_accounts()
             .filter_obsolete_accounts(None)
-            .into_iter()
             .map(|(offset, _)| offset)
             .collect();
 
@@ -5804,8 +5803,10 @@ impl AccountsDb {
                         let mut pubkeys = Vec::with_capacity(store.count());
                         // Obsolete accounts are already unreffed before this point, so do not add
                         // them to the pubkeys list.
-                        let obsolete_accounts =
-                            store.obsolete_accounts().filter_obsolete_accounts(None);
+                        let obsolete_accounts: Vec<_> = store
+                            .obsolete_accounts()
+                            .filter_obsolete_accounts(None)
+                            .collect();
                         store
                             .accounts
                             .scan_accounts_without_data(|offset, account| {
@@ -7193,8 +7194,8 @@ impl AccountStorageEntry {
 
 #[cfg(test)]
 impl AccountStorageEntry {
-    pub fn obsolete_accounts_mut(&self) -> RwLockWriteGuard<'_, ObsoleteAccounts> {
-        self.obsolete_accounts.write().unwrap()
+    pub fn obsolete_accounts_for_test(&self) -> &RwLock<ObsoleteAccounts> {
+        &self.obsolete_accounts
     }
 }
 
