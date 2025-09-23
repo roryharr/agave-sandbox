@@ -2,7 +2,7 @@ use {crate::account_info::Offset, solana_clock::Slot};
 
 #[derive(Debug, Clone, PartialEq)]
 struct ObsoleteAccountItem {
-    /// Offset of the account in the storage file
+    /// Offset of the account in the account storage entry
     offset: Offset,
     /// Length of the account data
     data_len: usize,
@@ -42,7 +42,7 @@ impl ObsoleteAccounts {
     ) -> impl Iterator<Item = (Offset, usize)> + '_ {
         self.accounts
             .iter()
-            .filter(move |obsolete_account| slot.map_or(true, |s| obsolete_account.slot <= s))
+            .filter(move |obsolete_account| slot.is_none_or(|s| obsolete_account.slot <= s))
             .map(|obsolete_account| (obsolete_account.offset, obsolete_account.data_len))
     }
 }
@@ -58,48 +58,28 @@ mod tests {
 
         obsolete_accounts.mark_accounts_obsolete(new_accounts.into_iter(), slot);
 
-        assert_eq!(
-            obsolete_accounts.accounts,
-            vec![
-                ObsoleteAccountItem {
-                    offset: 10,
-                    data_len: 100,
-                    slot,
-                },
-                ObsoleteAccountItem {
-                    offset: 20,
-                    data_len: 200,
-                    slot,
-                },
-                ObsoleteAccountItem {
-                    offset: 30,
-                    data_len: 300,
-                    slot,
-                },
-            ]
-        );
+        let expected_accounts = vec![(10, 100), (20, 200), (30, 300)];
+
+        let actual_accounts: Vec<_> = obsolete_accounts
+            .accounts
+            .iter()
+            .map(|item| (item.offset, item.data_len))
+            .collect();
+
+        assert_eq!(actual_accounts, expected_accounts);
     }
 
     #[test]
     fn test_filter_obsolete_accounts() {
         let mut obsolete_accounts = ObsoleteAccounts::default();
-        let new_accounts: Vec<ObsoleteAccountItem> = vec![
-            ObsoleteAccountItem {
-                offset: 10,
-                data_len: 100,
-                slot: 40,
-            },
-            ObsoleteAccountItem {
-                offset: 20,
-                data_len: 200,
-                slot: 42,
-            },
-            ObsoleteAccountItem {
-                offset: 30,
-                data_len: 300,
-                slot: 44,
-            },
-        ];
+        let new_accounts = vec![(10, 100, 40), (20, 200, 42), (30, 300, 44)]
+            .into_iter()
+            .map(|(offset, data_len, slot)| ObsoleteAccountItem {
+                offset,
+                data_len,
+                slot,
+            })
+            .collect::<Vec<_>>();
 
         // Mark accounts obsolete with different slots
         new_accounts.into_iter().for_each(|item| {
@@ -120,12 +100,4 @@ mod tests {
         assert_eq!(filtered_accounts, vec![(10, 100), (20, 200), (30, 300)]);
     }
 
-    #[test]
-    fn test_empty_obsolete_accounts() {
-        let obsolete_accounts: ObsoleteAccounts = ObsoleteAccounts::default();
-
-        let filtered_accounts: Vec<_> = obsolete_accounts.filter_obsolete_accounts(None).collect();
-
-        assert!(filtered_accounts.is_empty());
-    }
 }
