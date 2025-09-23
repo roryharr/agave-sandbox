@@ -22,10 +22,10 @@ mod geyser_plugin_utils;
 pub mod stats;
 pub mod tests;
 
+#[cfg(test)]
+use crate::append_vec::StoredAccountMeta;
 #[cfg(feature = "dev-context-only-utils")]
 use qualifier_attr::qualifiers;
-#[cfg(test)]
-use {crate::append_vec::StoredAccountMeta, std::sync::RwLockWriteGuard};
 use {
     crate::{
         account_info::{AccountInfo, Offset, StorageLocation},
@@ -7196,8 +7196,8 @@ impl AccountStorageEntry {
 #[cfg(test)]
 impl AccountStorageEntry {
     // Function to modify the list in the account storage entry directly. Only intended for use in testing
-    pub(crate) fn obsolete_accounts_write_lock(&self) -> RwLockWriteGuard<ObsoleteAccounts> {
-        self.obsolete_accounts.write().unwrap()
+    pub(crate) fn obsolete_accounts(&self) -> &RwLock<ObsoleteAccounts> {
+        &self.obsolete_accounts
     }
 }
 
