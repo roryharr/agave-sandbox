@@ -99,5 +99,4 @@ mod tests {
 
         assert_eq!(filtered_accounts, vec![(10, 100), (20, 200), (30, 300)]);
     }
-
 }
