@@ -962,7 +962,7 @@ impl AccountStorageEntry {
         slot: Slot,
         id: AccountsFileId,
         accounts: AccountsFile,
-        obsolete_accounts: Vec<(Offset, usize, Slot)>,
+        obsolete_accounts: ObsoleteAccounts,
     ) -> Self {
         Self {
             id,

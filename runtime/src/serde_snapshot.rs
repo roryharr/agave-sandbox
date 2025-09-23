@@ -14,7 +14,6 @@ use {
     log::*,
     serde::{de::DeserializeOwned, Deserialize, Serialize},
     solana_accounts_db::{
-        account_info::Offset,
         accounts::Accounts,
         accounts_db::{
             AccountStorageEntry, AccountsDb, AccountsDbConfig, AccountsFileId,
@@ -25,6 +24,7 @@ use {
         accounts_update_notifier_interface::AccountsUpdateNotifier,
         ancestors::AncestorsForSerialization,
         blockhash_queue::BlockhashQueue,
+        ObsoleteAccounts,
     },
     solana_clock::{Epoch, Slot, UnixTimestamp},
     solana_epoch_schedule::EpochSchedule,
@@ -849,20 +849,48 @@ where
     ))
 }
 
+/// This structure handles the load/store of obsolete accounts during snapshot restoration.
+#[derive(Debug, Default)]
+pub(crate) struct SerdesObsoleteAccounts {
+    /// The ID of the associated append_vec. Used for verification to ensure the restored obsolete
+    /// accounts correspond to the correct append_vec_id.
+    pub append_vec_id: AccountsFileId,
+    /// The number of obsolete bytes in the storage. These bytes are removed during archive
+    /// serialization/deserialization but are present when restoring from directories. This value
+    /// is used to validate the size when creating the accounts file.
+    pub bytes: usize,
+    /// A list of accounts that are obsolete in the storage being restored.
+    pub accounts: ObsoleteAccounts,
+}
+
 pub(crate) fn reconstruct_single_storage(
     slot: &Slot,
     append_vec_path: &Path,
     current_len: usize,
     append_vec_id: AccountsFileId,
     storage_access: StorageAccess,
-    obsolete_accounts: Vec<(Offset, usize, Slot)>,
+    obsolete_accounts: Option<SerdesObsoleteAccounts>,
 ) -> Result<Arc<AccountStorageEntry>, SnapshotError> {
-    let accounts_file = AccountsFile::new_for_startup(
-        append_vec_path,
-        current_len,
-        storage_access,
-        &obsolete_accounts,
-    )?;
+    // When restoring from an archive, obsolete accounts will always be `None` as they are removed during serialization.
+    // When restoring from directories, obsolete accounts will be present if the storage contained obsolete
+    // accounts at the time the snapshot was taken.
+    let (current_len, obsolete_accounts) = if let Some(obsolete_accounts) = obsolete_accounts {
+        let updated_len = current_len + obsolete_accounts.bytes;
+        if append_vec_id != obsolete_accounts.append_vec_id {
+            return Err(SnapshotError::MismatchedAccountsFileId(
+                append_vec_id,
+                obsolete_accounts.append_vec_id,
+            ));
+        }
+        assert_eq!(append_vec_id, obsolete_accounts.append_vec_id);
+
+        (updated_len, obsolete_accounts.accounts)
+    } else {
+        (current_len, ObsoleteAccounts::default())
+    };
+
+    let accounts_file =
+        AccountsFile::new_for_startup(append_vec_path, current_len, storage_access)?;
     Ok(Arc::new(AccountStorageEntry::new_existing(
         *slot,
         append_vec_id,
@@ -966,7 +994,7 @@ pub(crate) fn remap_and_reconstruct_single_storage(
         current_len,
         remapped_append_vec_id,
         storage_access,
-        Vec::new(),
+        None,
     )?;
     Ok(storage)
 }

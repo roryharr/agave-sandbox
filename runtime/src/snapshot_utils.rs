@@ -25,7 +25,9 @@ use {
     solana_accounts_db::{
         account_storage::{AccountStorageMap, AccountStoragesOrderer},
         account_storage_reader::AccountStorageReader,
-        accounts_db::{AccountStorageEntry, AccountsDbConfig, AtomicAccountsFileId},
+        accounts_db::{
+            AccountStorageEntry, AccountsDbConfig, AccountsFileId, AtomicAccountsFileId,
+        },
         accounts_file::{AccountsFile, AccountsFileError, StorageAccess},
         hardened_unpack::{self, UnpackError},
         utils::{move_and_async_delete_path, ACCOUNTS_RUN_DIR, ACCOUNTS_SNAPSHOT_DIR},
@@ -336,6 +338,12 @@ pub enum SnapshotError {
 
     #[error("snapshot hash mismatch: deserialized bank: {0:?}, snapshot archive: {1:?}")]
     MismatchedHash(SnapshotHash, SnapshotHash),
+
+    #[error(
+        "snapshot accounts file id mismatch: deserialized obsolete accounts file id: {0:?}, \
+         snapshot archive: {1:?}"
+    )]
+    MismatchedAccountsFileId(AccountsFileId, AccountsFileId),
 
     #[error("snapshot slot deltas are invalid: {0}")]
     VerifySlotDeltas(#[from] VerifySlotDeltasError),
