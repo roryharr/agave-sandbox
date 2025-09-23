@@ -23,7 +23,10 @@ pub mod stats;
 pub mod tests;
 
 #[cfg(test)]
-use crate::append_vec::StoredAccountMeta;
+use {
+    crate::append_vec::StoredAccountMeta,
+    std::sync::RwLockWriteGuard,
+};
 #[cfg(feature = "dev-context-only-utils")]
 use qualifier_attr::qualifiers;
 use {
@@ -979,7 +982,8 @@ impl AccountStorageEntry {
         self.alive_bytes.load(Ordering::Acquire)
     }
 
-    pub(crate) fn obsolete_accounts(&self) -> RwLockReadGuard<ObsoleteAccounts> {
+    /// Locks obsolete accounts with a read lock and returns the the accounts with the guard
+    pub(crate) fn obsolete_accounts_read_lock(&self) -> RwLockReadGuard<ObsoleteAccounts> {
         self.obsolete_accounts.read().unwrap()
     }
 
@@ -988,7 +992,7 @@ impl AccountStorageEntry {
     /// max root, and all obsolete bytes will be returned.
     pub fn get_obsolete_bytes(&self, slot: Option<Slot>) -> usize {
         let obsolete_bytes: usize = self
-            .obsolete_accounts()
+            .obsolete_accounts_read_lock()
             .filter_obsolete_accounts(slot)
             .map(|(offset, data_len)| {
                 self.accounts
@@ -2910,7 +2914,7 @@ impl AccountsDb {
         // Slot is not needed, as all obsolete accounts can be considered
         // dead for shrink. Zero lamport accounts are not marked obsolete
         let obsolete_offsets: IntSet<_> = store
-            .obsolete_accounts()
+            .obsolete_accounts_read_lock()
             .filter_obsolete_accounts(None)
             .map(|(offset, _)| offset)
             .collect();
@@ -5804,7 +5808,7 @@ impl AccountsDb {
                         // Obsolete accounts are already unreffed before this point, so do not add
                         // them to the pubkeys list.
                         let obsolete_accounts: Vec<_> = store
-                            .obsolete_accounts()
+                            .obsolete_accounts_read_lock()
                             .filter_obsolete_accounts(None)
                             .collect();
                         store
@@ -7194,8 +7198,9 @@ impl AccountStorageEntry {
 
 #[cfg(test)]
 impl AccountStorageEntry {
-    pub fn obsolete_accounts_for_test(&self) -> &RwLock<ObsoleteAccounts> {
-        &self.obsolete_accounts
+    // Function to modify the list in the account storage entry directly. Only intended for use in testing
+    pub (crate) fn obsolete_accounts_write_lock(&self) -> RwLockWriteGuard<ObsoleteAccounts> {
+        self.obsolete_accounts.write().unwrap()
     }
 }
 

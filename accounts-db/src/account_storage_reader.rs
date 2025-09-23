@@ -31,7 +31,7 @@ impl<'a> AccountStorageReader<'a> {
         let num_alive_bytes = num_total_bytes - storage.get_obsolete_bytes(snapshot_slot);
 
         let mut sorted_obsolete_accounts: Vec<_> = storage
-            .obsolete_accounts()
+            .obsolete_accounts_read_lock()
             .filter_obsolete_accounts(snapshot_slot)
             .collect();
         // Tiered storage is not compatible with obsolete accounts at this time
@@ -184,9 +184,7 @@ mod tests {
         // Mark the obsolete accounts in storage
         let mut size = storage.accounts.get_account_data_lens(&[0]);
         storage
-            .obsolete_accounts_for_test()
-            .write()
-            .unwrap()
+            .obsolete_accounts_write_lock()
             .mark_accounts_obsolete(vec![(offset, size.pop().unwrap())].into_iter(), 0);
 
         _ = AccountStorageReader::new(&storage, None).unwrap();
@@ -278,9 +276,7 @@ mod tests {
             .accounts
             .get_account_data_lens(&obsolete_account_offset);
         storage
-            .obsolete_accounts_for_test()
-            .write()
-            .unwrap()
+            .obsolete_accounts_write_lock()
             .mark_accounts_obsolete(obsolete_account_offset.into_iter().zip(data_lens), 0);
 
         let storage = storage
@@ -395,9 +391,7 @@ mod tests {
         obsolete_account_offset.into_iter().for_each(|offset| {
             let mut size = storage.accounts.get_account_data_lens(&[offset]);
             storage
-                .obsolete_accounts_for_test()
-                .write()
-                .unwrap()
+                .obsolete_accounts_write_lock()
                 .mark_accounts_obsolete(
                     vec![(offset, size.pop().unwrap())].into_iter(),
                     slot_marked_dead,
