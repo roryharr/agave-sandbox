@@ -864,10 +864,10 @@ pub(crate) fn reconstruct_single_storage(
     let (current_len, obsolete_accounts) = if let Some(obsolete_accounts) = obsolete_accounts {
         let updated_len = current_len + obsolete_accounts.bytes as usize;
         let append_vec_id = append_vec_id as SerializedAccountsFileId;
-        if obsolete_accounts.append_vec_id != append_vec_id {
+        if obsolete_accounts.id != append_vec_id {
             return Err(SnapshotError::MismatchedAccountsFileId(
                 append_vec_id,
-                obsolete_accounts.append_vec_id,
+                obsolete_accounts.id,
             ));
         }
 

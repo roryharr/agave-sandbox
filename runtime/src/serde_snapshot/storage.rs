@@ -50,9 +50,9 @@ impl SerializableStorage for SerializableAccountStorageEntry {
 /// This structure handles the load/store of obsolete accounts during snapshot restoration.
 #[derive(Debug, Default)]
 pub(crate) struct SerdeObsoleteAccounts {
-    /// The ID of the associated append_vec. Used for verification to ensure the restored obsolete
-    /// accounts correspond to the correct append_vec_id.
-    pub append_vec_id: SerializedAccountsFileId,
+    /// The ID of the associated account file. Used for verification to ensure the restored
+    /// obsolete accounts correspond to the correct account file
+    pub id: SerializedAccountsFileId,
     /// The number of obsolete bytes in the storage. These bytes are removed during archive
     /// serialization/deserialization but are present when restoring from directories. This value
     /// is used to validate the size when creating the accounts file.
