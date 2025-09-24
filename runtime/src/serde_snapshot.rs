@@ -6,6 +6,7 @@ use {
         epoch_stakes::VersionedEpochStakes,
         rent_collector::RentCollector,
         runtime_config::RuntimeConfig,
+        serde_snapshot::storage::SerdeObsoleteAccounts,
         snapshot_utils::{SnapshotError, StorageAndNextAccountsFileId},
         stake_account::StakeAccount,
         stakes::{serialize_stake_accounts_to_delegation_format, Stakes},
@@ -849,40 +850,26 @@ where
     ))
 }
 
-/// This structure handles the load/store of obsolete accounts during snapshot restoration.
-#[derive(Debug, Default)]
-pub(crate) struct SerdesObsoleteAccounts {
-    /// The ID of the associated append_vec. Used for verification to ensure the restored obsolete
-    /// accounts correspond to the correct append_vec_id.
-    pub append_vec_id: AccountsFileId,
-    /// The number of obsolete bytes in the storage. These bytes are removed during archive
-    /// serialization/deserialization but are present when restoring from directories. This value
-    /// is used to validate the size when creating the accounts file.
-    pub bytes: usize,
-    /// A list of accounts that are obsolete in the storage being restored.
-    pub accounts: ObsoleteAccounts,
-}
-
 pub(crate) fn reconstruct_single_storage(
     slot: &Slot,
     append_vec_path: &Path,
     current_len: usize,
     append_vec_id: AccountsFileId,
     storage_access: StorageAccess,
-    obsolete_accounts: Option<SerdesObsoleteAccounts>,
+    obsolete_accounts: Option<SerdeObsoleteAccounts>,
 ) -> Result<Arc<AccountStorageEntry>, SnapshotError> {
-    // When restoring from an archive, obsolete accounts will always be `None` as they are removed during serialization.
-    // When restoring from directories, obsolete accounts will be present if the storage contained obsolete
-    // accounts at the time the snapshot was taken.
+    // When restoring from an archive, obsolete accounts will always be `None`
+    // When restoring from directories, obsolete accounts will be 'Some' if the storage contained
+    // accounts marked obsolete at the time the snapshot was taken.
     let (current_len, obsolete_accounts) = if let Some(obsolete_accounts) = obsolete_accounts {
-        let updated_len = current_len + obsolete_accounts.bytes;
-        if append_vec_id != obsolete_accounts.append_vec_id {
+        let updated_len = current_len + obsolete_accounts.bytes as usize;
+        let append_vec_id = append_vec_id as SerializedAccountsFileId;
+        if obsolete_accounts.append_vec_id != append_vec_id {
             return Err(SnapshotError::MismatchedAccountsFileId(
                 append_vec_id,
                 obsolete_accounts.append_vec_id,
             ));
         }
-        assert_eq!(append_vec_id, obsolete_accounts.append_vec_id);
 
         (updated_len, obsolete_accounts.accounts)
     } else {
