@@ -854,7 +854,7 @@ pub(crate) fn reconstruct_single_storage(
     slot: &Slot,
     append_vec_path: &Path,
     current_len: usize,
-    append_vec_id: AccountsFileId,
+    id: AccountsFileId,
     storage_access: StorageAccess,
     obsolete_accounts: Option<SerdeObsoleteAccounts>,
 ) -> Result<Arc<AccountStorageEntry>, SnapshotError> {
@@ -863,10 +863,10 @@ pub(crate) fn reconstruct_single_storage(
     // accounts marked obsolete at the time the snapshot was taken.
     let (current_len, obsolete_accounts) = if let Some(obsolete_accounts) = obsolete_accounts {
         let updated_len = current_len + obsolete_accounts.bytes as usize;
-        let append_vec_id = append_vec_id as SerializedAccountsFileId;
-        if obsolete_accounts.id != append_vec_id {
+        let id = id as SerializedAccountsFileId;
+        if obsolete_accounts.id != id {
             return Err(SnapshotError::MismatchedAccountsFileId(
-                append_vec_id,
+                id,
                 obsolete_accounts.id,
             ));
         }
@@ -880,7 +880,7 @@ pub(crate) fn reconstruct_single_storage(
         AccountsFile::new_for_startup(append_vec_path, current_len, storage_access)?;
     Ok(Arc::new(AccountStorageEntry::new_existing(
         *slot,
-        append_vec_id,
+        id,
         accounts_file,
         obsolete_accounts,
     )))
