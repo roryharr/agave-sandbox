@@ -859,7 +859,7 @@ pub(crate) fn reconstruct_single_storage(
     obsolete_accounts: Option<SerdeObsoleteAccounts>,
 ) -> Result<Arc<AccountStorageEntry>, SnapshotError> {
     // When restoring from an archive, obsolete accounts will always be `None`
-    // When restoring from directories, obsolete accounts will be 'Some' if the storage contained
+    // When restoring from fastboot, obsolete accounts will be 'Some' if the storage contained
     // accounts marked obsolete at the time the snapshot was taken.
     let (current_len, obsolete_accounts) = if let Some(obsolete_accounts) = obsolete_accounts {
         let updated_len = current_len + obsolete_accounts.bytes as usize;
