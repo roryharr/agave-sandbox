@@ -984,6 +984,14 @@ impl AccountStorageEntry {
         self.alive_bytes.load(Ordering::Acquire)
     }
 
+    /// Returns the accounts that were marked obsolete as of the passed in slot
+    /// or earlier. If slot is None, then slot will be assumed to be the max root
+    /// and all obsolete accounts will be returned.
+    pub fn serialize_obsolete_accounts(&self, slot: Slot)
+    -> ObsoleteAccounts {
+        self.obsolete_accounts_read_lock()
+            .serialize_obsolete_accounts(slot)
+    }
     /// Locks obsolete accounts with a read lock and returns the the accounts with the guard
     pub(crate) fn obsolete_accounts_read_lock(&self) -> RwLockReadGuard<ObsoleteAccounts> {
         self.obsolete_accounts.read().unwrap()

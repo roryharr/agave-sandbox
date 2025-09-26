@@ -51,7 +51,7 @@ impl SerializableStorage for SerializableAccountStorageEntry {
 impl solana_frozen_abi::abi_example::TransparentAsHelper for SerializableAccountStorageEntry {}
 
 /// This structure handles the load/store of obsolete accounts during snapshot restoration.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub(crate) struct SerdeObsoleteAccounts {
     /// The ID of the associated account file. Used for verification to ensure the restored
     /// obsolete accounts correspond to the correct account file
