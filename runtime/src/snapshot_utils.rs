@@ -923,6 +923,8 @@ pub fn serialize_and_archive_snapshot_package(
     Ok(snapshot_archive_info)
 }
 
+//type FlushStoragesTiming = Option<(u64, u64, u64)>; // (flush_us, hard_link_us, serialize_obsolete_accounts_us)
+
 /// Serializes a snapshot into `bank_snapshots_dir`
 #[allow(clippy::too_many_arguments)]
 fn serialize_snapshot(
@@ -996,33 +998,42 @@ fn serialize_snapshot(
         )
         .map_err(|err| AddBankSnapshotError::WriteSnapshotVersionFile(err, version_path))?);
 
-        let (flush_storages_us, hard_link_storages_us) = if should_flush_and_hard_link_storages {
-            let flush_measure = Measure::start("");
-            for storage in snapshot_storages {
-                storage.flush().map_err(|err| {
-                    AddBankSnapshotError::FlushStorage(err, storage.path().to_path_buf())
-                })?;
-            }
-            let flush_us = flush_measure.end_as_us();
-            let (_, hard_link_us) = measure_us!(hard_link_storages_to_snapshot(
-                &bank_snapshot_dir,
-                slot,
-                snapshot_storages
-            )
-            .map_err(AddBankSnapshotError::HardLinkStorages)?);
+        let (flush_storages_us, hard_link_storages_us, serialize_obsolete_accounts_us) =
+            if should_flush_and_hard_link_storages {
+                let flush_measure = Measure::start("");
+                for storage in snapshot_storages {
+                    storage.flush().map_err(|err| {
+                        AddBankSnapshotError::FlushStorage(err, storage.path().to_path_buf())
+                    })?;
+                }
+                let flush_us = flush_measure.end_as_us();
+                let (_, hard_link_us) = measure_us!(hard_link_storages_to_snapshot(
+                    &bank_snapshot_dir,
+                    slot,
+                    snapshot_storages
+                )
+                .map_err(AddBankSnapshotError::HardLinkStorages)?);
 
-            serialize_obsolete_accounts(&bank_snapshot_dir, slot, snapshot_storages)
-                .map_err(|err| AddBankSnapshotError::SerializeObsoleteAccounts(Box::new(err)))?;
+                let (_, serialize_obsolete_accounts_us) = measure_us!(serialize_obsolete_accounts(
+                    &bank_snapshot_dir,
+                    slot,
+                    snapshot_storages
+                )
+                .map_err(|err| AddBankSnapshotError::SerializeObsoleteAccounts(Box::new(err)))?);
 
-            // Now that the storages are flushed and hard linked, mark the snapshot as loadable
-            mark_bank_snapshot_as_loadable(&bank_snapshot_dir)
-                .map_err(AddBankSnapshotError::MarkSnapshotLoadable)?;
+                // Now that the storages are flushed and hard linked, mark the snapshot as loadable
+                mark_bank_snapshot_as_loadable(&bank_snapshot_dir)
+                    .map_err(AddBankSnapshotError::MarkSnapshotLoadable)?;
 
-            Some((flush_us, hard_link_us))
-        } else {
-            None
-        }
-        .unzip();
+                (
+                    Some(flush_us),
+                    Some(hard_link_us),
+                    Some(serialize_obsolete_accounts_us),
+                )
+            } else {
+                (None, None, None)
+            };
+
         measure_everything.stop();
 
         // Monitor sizes because they're capped to MAX_SNAPSHOT_DATA_FILE_SIZE
@@ -1033,6 +1044,7 @@ fn serialize_snapshot(
             ("status_cache_size", status_cache_consumed_size, i64),
             ("flush_storages_us", flush_storages_us, Option<i64>),
             ("hard_link_storages_us", hard_link_storages_us, Option<i64>),
+            ("serialize_obsolete_accounts_us", serialize_obsolete_accounts_us, Option<i64>),
             ("bank_serialize_us", bank_serialize.as_us(), i64),
             ("status_cache_serialize_us", status_cache_serialize_us, i64),
             ("write_version_file_us", write_version_file_us, i64),
@@ -1294,12 +1306,9 @@ pub fn serialize_obsolete_accounts(
     let mut file_stream = BufWriter::new(obsolete_accounts_file);
 
     snapshot_storages.iter().for_each(|storage| {
-        let obsolete_accounts = SerdeObsoleteAccounts {
-            id: storage.id() as SerializedAccountsFileId,
-            bytes: storage.get_obsolete_bytes(Some(snapshot_slot)) as u64,
-            accounts: storage.serialize_obsolete_accounts(snapshot_slot),
-        };
-        bincode::serialize_into(&mut file_stream, & (snapshot_slot, obsolete_accounts) ).unwrap();
+        let obsolete_accounts =
+            SerdeObsoleteAccounts::new_from_storage_entry_at_slot(storage, snapshot_slot);
+        bincode::serialize_into(&mut file_stream, &(storage.slot(), obsolete_accounts)).unwrap();
     });
     file_stream.flush()?;
 
@@ -1316,7 +1325,9 @@ pub(crate) fn deserialize_obsolete_accounts(
 
     let mut obsolete_accounts = HashMap::new();
     while let Ok((slot, accounts)) = {
-        bincode::deserialize_from::<&mut BufReader<fs::File>, (Slot, SerdeObsoleteAccounts)>(&mut data_file_stream)
+        bincode::deserialize_from::<&mut BufReader<fs::File>, (Slot, SerdeObsoleteAccounts)>(
+            &mut data_file_stream,
+        )
     } {
         obsolete_accounts.insert(slot, accounts);
     }
@@ -1324,7 +1335,7 @@ pub(crate) fn deserialize_obsolete_accounts(
     Ok(obsolete_accounts)
 }
 
-pub(crate) fn serialize_snapshot_data_file<F>(data_file_path: &Path, serializer: F) -> Result<u64>
+pub fn serialize_snapshot_data_file<F>(data_file_path: &Path, serializer: F) -> Result<u64>
 where
     F: FnOnce(&mut BufWriter<std::fs::File>) -> Result<()>,
 {
@@ -1984,7 +1995,7 @@ pub fn rebuild_storages_from_snapshot_dir(
     let account_run_paths: HashSet<_> = HashSet::from_iter(account_paths);
 
     // Read out the obsolete accounts
-    let obsolete_accounts = deserialize_obsolete_accounts(bank_snapshot_dir)?;
+    let obsolete_accounts = deserialize_obsolete_accounts(bank_snapshot_dir).unwrap_or_default();
 
     let read_dir = fs::read_dir(&accounts_hardlinks).map_err(|err| {
         IoError::other(format!(

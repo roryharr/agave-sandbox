@@ -63,3 +63,16 @@ pub(crate) struct SerdeObsoleteAccounts {
     /// A list of accounts that are obsolete in the storage being restored.
     pub accounts: ObsoleteAccounts,
 }
+
+impl SerdeObsoleteAccounts {
+    pub fn new_from_storage_entry_at_slot(
+        storage: &AccountStorageEntry,
+        snapshot_slot: Slot,
+    ) -> Self {
+        SerdeObsoleteAccounts {
+            id: storage.id() as SerializedAccountsFileId,
+            bytes: storage.get_obsolete_bytes(Some(snapshot_slot)) as u64,
+            accounts: storage.serialize_obsolete_accounts(snapshot_slot),
+        }
+    }
+}

@@ -46,8 +46,7 @@ impl ObsoleteAccounts {
             .map(|obsolete_account| (obsolete_account.offset, obsolete_account.data_len))
     }
 
-    pub fn serialize_obsolete_accounts(&self, slot: Slot)
-    -> ObsoleteAccounts {
+    pub fn serialize_obsolete_accounts(&self, slot: Slot) -> ObsoleteAccounts {
         let filtered_accounts = self
             .accounts
             .iter()
