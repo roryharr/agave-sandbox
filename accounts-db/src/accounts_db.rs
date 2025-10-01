@@ -515,6 +515,9 @@ struct SlotIndexGenerationInfo {
     num_existed_on_disk: u64,
     /// The accounts lt hash *of only this slot*
     slot_lt_hash: SlotLtHash,
+    /// The number of accounts in this slot that were skipped when generating the index as they
+    /// were already marked obsolete in the account storage entry
+    num_obsolete_accounts_skipped: u64,
 }
 
 /// The lt hash of old/duplicate accounts
@@ -563,6 +566,7 @@ struct GenerateIndexTimings {
     pub mark_obsolete_accounts_us: u64,
     pub num_obsolete_accounts_marked: u64,
     pub num_slots_removed_as_obsolete: u64,
+    pub num_obsolete_accounts_skipped: u64,
 }
 
 #[derive(Default, Debug, PartialEq, Eq)]
@@ -646,6 +650,11 @@ impl GenerateIndexTimings {
             (
                 "num_slots_removed_as_obsolete",
                 self.num_slots_removed_as_obsolete,
+                i64
+            ),
+            (
+                "num_obsolete_accounts_skipped",
+                self.num_obsolete_accounts_skipped,
                 i64
             ),
         );
@@ -6391,59 +6400,73 @@ impl AccountsDb {
         // counter per account and use that for the write version.
         let mut write_version_for_geyser = 0;
 
+        // Collect all the obsolete accounts in this storage into a hashset for fast lookup.
+        // Newer obsolete accounts were filtered when the data was saved, so no need to filter
+        // by slot here
+        let obsolete_accounts: HashSet<Offset> = storage
+            .obsolete_accounts_read_lock()
+            .filter_obsolete_accounts(None)
+            .map(|(offset, _)| offset)
+            .collect();
+        let mut num_obsolete_accounts_skipped = 0;
+
         storage
             .accounts
             .scan_accounts(reader, |offset, account| {
-                let data_len = account.data.len();
-                stored_size_alive += storage.accounts.calculate_stored_size(data_len);
-                let is_account_zero_lamport = account.is_zero_lamport();
-                if !is_account_zero_lamport {
-                    accounts_data_len += data_len as u64;
-                    all_accounts_are_zero_lamports = false;
-                } else {
-                    // With obsolete accounts enabled, all zero lamport accounts
-                    // are obsolete or single ref by the end of index generation
-                    // Store the offsets here
-                    if self.mark_obsolete_accounts == MarkObsoleteAccounts::Enabled {
-                        zero_lamport_offsets.push(offset);
+                if !obsolete_accounts.contains(&offset) {
+                    let data_len = account.data.len();
+                    stored_size_alive += storage.accounts.calculate_stored_size(data_len);
+                    let is_account_zero_lamport = account.is_zero_lamport();
+                    if !is_account_zero_lamport {
+                        accounts_data_len += data_len as u64;
+                        all_accounts_are_zero_lamports = false;
+                    } else {
+                        // With obsolete accounts enabled, all zero lamport accounts
+                        // are obsolete or single ref by the end of index generation
+                        // Store the offsets here
+                        if self.mark_obsolete_accounts == MarkObsoleteAccounts::Enabled {
+                            zero_lamport_offsets.push(offset);
+                        }
+                        zero_lamport_pubkeys.push(*account.pubkey);
                     }
-                    zero_lamport_pubkeys.push(*account.pubkey);
-                }
-                keyed_account_infos.push((
-                    *account.pubkey,
-                    AccountInfo::new(
-                        StorageLocation::AppendVec(store_id, offset), // will never be cached
-                        is_account_zero_lamport,
-                    ),
-                ));
+                    keyed_account_infos.push((
+                        *account.pubkey,
+                        AccountInfo::new(
+                            StorageLocation::AppendVec(store_id, offset), // will never be cached
+                            is_account_zero_lamport,
+                        ),
+                    ));
 
-                if !self.account_indexes.is_empty() {
-                    self.accounts_index.update_secondary_indexes(
-                        account.pubkey,
-                        &account,
-                        &self.account_indexes,
-                    );
-                }
+                    if !self.account_indexes.is_empty() {
+                        self.accounts_index.update_secondary_indexes(
+                            account.pubkey,
+                            &account,
+                            &self.account_indexes,
+                        );
+                    }
 
-                let account_lt_hash = Self::lt_hash_account(&account, account.pubkey());
-                slot_lt_hash.0.mix_in(&account_lt_hash.0);
+                    let account_lt_hash = Self::lt_hash_account(&account, account.pubkey());
+                    slot_lt_hash.0.mix_in(&account_lt_hash.0);
 
-                if let Some(geyser_notifier) = geyser_notifier {
-                    debug_assert!(geyser_notifier.snapshot_notifications_enabled());
-                    let account_for_geyser = AccountForGeyser {
-                        pubkey: account.pubkey(),
-                        lamports: account.lamports(),
-                        owner: account.owner(),
-                        executable: account.executable(),
-                        rent_epoch: account.rent_epoch(),
-                        data: account.data(),
-                    };
-                    geyser_notifier.notify_account_restore_from_snapshot(
-                        slot,
-                        write_version_for_geyser,
-                        &account_for_geyser,
-                    );
-                    write_version_for_geyser += 1;
+                    if let Some(geyser_notifier) = geyser_notifier {
+                        debug_assert!(geyser_notifier.snapshot_notifications_enabled());
+                        let account_for_geyser = AccountForGeyser {
+                            pubkey: account.pubkey(),
+                            lamports: account.lamports(),
+                            owner: account.owner(),
+                            executable: account.executable(),
+                            rent_epoch: account.rent_epoch(),
+                            data: account.data(),
+                        };
+                        geyser_notifier.notify_account_restore_from_snapshot(
+                            slot,
+                            write_version_for_geyser,
+                            &account_for_geyser,
+                        );
+                        write_version_for_geyser += 1;
+                    }
+                } else {
+                    num_obsolete_accounts_skipped += 1;
                 }
             })
             .expect("must scan accounts storage");
@@ -6497,6 +6520,7 @@ impl AccountsDb {
             num_existed_in_mem: insert_info.num_existed_in_mem,
             num_existed_on_disk: insert_info.num_existed_on_disk,
             slot_lt_hash,
+            num_obsolete_accounts_skipped,
         }
     }
 
@@ -6531,6 +6555,7 @@ impl AccountsDb {
             num_existed_in_mem: u64,
             num_existed_on_disk: u64,
             lt_hash: LtHash,
+            num_obsolete_accounts_skipped: u64,
         }
         impl IndexGenerationAccumulator {
             const fn new() -> Self {
@@ -6545,6 +6570,7 @@ impl AccountsDb {
                     num_existed_in_mem: 0,
                     num_existed_on_disk: 0,
                     lt_hash: LtHash::identity(),
+                    num_obsolete_accounts_skipped: 0,
                 }
             }
             fn accumulate(&mut self, other: Self) {
@@ -6559,6 +6585,7 @@ impl AccountsDb {
                 self.num_existed_in_mem += other.num_existed_in_mem;
                 self.num_existed_on_disk += other.num_existed_on_disk;
                 self.lt_hash.mix_in(&other.lt_hash);
+                self.num_obsolete_accounts_skipped += other.num_obsolete_accounts_skipped;
             }
         }
 
@@ -6606,6 +6633,8 @@ impl AccountsDb {
                                 thread_accum.num_existed_in_mem += slot_info.num_existed_in_mem;
                                 thread_accum.num_existed_on_disk += slot_info.num_existed_on_disk;
                                 thread_accum.lt_hash.mix_in(&slot_info.slot_lt_hash.0);
+                                thread_accum.num_obsolete_accounts_skipped +=
+                                    slot_info.num_obsolete_accounts_skipped;
                                 num_processed.fetch_add(1, Ordering::Relaxed);
                             }
                             thread_accum
@@ -6765,6 +6794,7 @@ impl AccountsDb {
             total_including_duplicates: total_accum.num_accounts,
             total_slots: num_storages as u64,
             all_accounts_are_zero_lamports_slots: total_accum.all_accounts_are_zero_lamports_slots,
+            num_obsolete_accounts_skipped: total_accum.num_obsolete_accounts_skipped,
             ..GenerateIndexTimings::default()
         };
 
