@@ -6413,60 +6413,61 @@ impl AccountsDb {
         storage
             .accounts
             .scan_accounts(reader, |offset, account| {
-                if !obsolete_accounts.contains(&offset) {
-                    let data_len = account.data.len();
-                    stored_size_alive += storage.accounts.calculate_stored_size(data_len);
-                    let is_account_zero_lamport = account.is_zero_lamport();
-                    if !is_account_zero_lamport {
-                        accounts_data_len += data_len as u64;
-                        all_accounts_are_zero_lamports = false;
-                    } else {
-                        // With obsolete accounts enabled, all zero lamport accounts
-                        // are obsolete or single ref by the end of index generation
-                        // Store the offsets here
-                        if self.mark_obsolete_accounts == MarkObsoleteAccounts::Enabled {
-                            zero_lamport_offsets.push(offset);
-                        }
-                        zero_lamport_pubkeys.push(*account.pubkey);
-                    }
-                    keyed_account_infos.push((
-                        *account.pubkey,
-                        AccountInfo::new(
-                            StorageLocation::AppendVec(store_id, offset), // will never be cached
-                            is_account_zero_lamport,
-                        ),
-                    ));
-
-                    if !self.account_indexes.is_empty() {
-                        self.accounts_index.update_secondary_indexes(
-                            account.pubkey,
-                            &account,
-                            &self.account_indexes,
-                        );
-                    }
-
-                    let account_lt_hash = Self::lt_hash_account(&account, account.pubkey());
-                    slot_lt_hash.0.mix_in(&account_lt_hash.0);
-
-                    if let Some(geyser_notifier) = geyser_notifier {
-                        debug_assert!(geyser_notifier.snapshot_notifications_enabled());
-                        let account_for_geyser = AccountForGeyser {
-                            pubkey: account.pubkey(),
-                            lamports: account.lamports(),
-                            owner: account.owner(),
-                            executable: account.executable(),
-                            rent_epoch: account.rent_epoch(),
-                            data: account.data(),
-                        };
-                        geyser_notifier.notify_account_restore_from_snapshot(
-                            slot,
-                            write_version_for_geyser,
-                            &account_for_geyser,
-                        );
-                        write_version_for_geyser += 1;
-                    }
-                } else {
+                if obsolete_accounts.contains(&offset) {
                     num_obsolete_accounts_skipped += 1;
+                    return;
+                }
+
+                let data_len = account.data.len();
+                stored_size_alive += storage.accounts.calculate_stored_size(data_len);
+                let is_account_zero_lamport = account.is_zero_lamport();
+                if !is_account_zero_lamport {
+                    accounts_data_len += data_len as u64;
+                    all_accounts_are_zero_lamports = false;
+                } else {
+                    // With obsolete accounts enabled, all zero lamport accounts
+                    // are obsolete or single ref by the end of index generation
+                    // Store the offsets here
+                    if self.mark_obsolete_accounts == MarkObsoleteAccounts::Enabled {
+                        zero_lamport_offsets.push(offset);
+                    }
+                    zero_lamport_pubkeys.push(*account.pubkey);
+                }
+                keyed_account_infos.push((
+                    *account.pubkey,
+                    AccountInfo::new(
+                        StorageLocation::AppendVec(store_id, offset), // will never be cached
+                        is_account_zero_lamport,
+                    ),
+                ));
+
+                if !self.account_indexes.is_empty() {
+                    self.accounts_index.update_secondary_indexes(
+                        account.pubkey,
+                        &account,
+                        &self.account_indexes,
+                    );
+                }
+
+                let account_lt_hash = Self::lt_hash_account(&account, account.pubkey());
+                slot_lt_hash.0.mix_in(&account_lt_hash.0);
+
+                if let Some(geyser_notifier) = geyser_notifier {
+                    debug_assert!(geyser_notifier.snapshot_notifications_enabled());
+                    let account_for_geyser = AccountForGeyser {
+                        pubkey: account.pubkey(),
+                        lamports: account.lamports(),
+                        owner: account.owner(),
+                        executable: account.executable(),
+                        rent_epoch: account.rent_epoch(),
+                        data: account.data(),
+                    };
+                    geyser_notifier.notify_account_restore_from_snapshot(
+                        slot,
+                        write_version_for_geyser,
+                        &account_for_geyser,
+                    );
+                    write_version_for_geyser += 1;
                 }
             })
             .expect("must scan accounts storage");
