@@ -5027,7 +5027,7 @@ fn test_calculate_storage_count_and_alive_bytes_obsolete_account() {
     let account = AccountSharedData::new(1, 1, AccountSharedData::default().owner());
     let account_big = AccountSharedData::new(1, 1000, AccountSharedData::default().owner());
     let slot0 = 0;
-    let storage = accounts.create_and_insert_store(slot0, 4_000, "flush_slot_cache");
+    let storage = accounts.create_and_insert_store(slot0, 4_000, "");
     let offsets = storage.accounts.write_accounts(
         &(slot0, &[(&keys[0], &account), (&keys[1], &account_big)][..]),
         0,

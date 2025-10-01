@@ -6403,7 +6403,7 @@ impl AccountsDb {
         // Collect all the obsolete accounts in this storage into a hashset for fast lookup.
         // Newer obsolete accounts were removed from the list when the data was saved, so it is
         // ok to pass in 'None' for slot here
-        let obsolete_accounts: HashSet<Offset> = storage
+        let obsolete_accounts: IntSet<_> = storage
             .obsolete_accounts_read_lock()
             .filter_obsolete_accounts(None)
             .map(|(offset, _)| offset)
