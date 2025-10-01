@@ -5018,42 +5018,68 @@ define_accounts_db_test!(
     }
 );
 
-#[test]
-fn test_calculate_storage_count_and_alive_bytes_obsolete_account() {
+#[test_case(8)]
+#[test_case(5)]
+#[test_case(0)]
+fn test_calculate_storage_count_and_alive_bytes_obsolete_account(
+    num_accounts_to_mark_obsolete: usize,
+) {
     let accounts = AccountsDb::new_single_for_tests();
-    let keys = [Pubkey::new_unique(), Pubkey::new_unique()];
     accounts.accounts_index.set_startup(Startup::Startup);
 
-    let account = AccountSharedData::new(1, 1, AccountSharedData::default().owner());
-    let account_big = AccountSharedData::new(1, 1000, AccountSharedData::default().owner());
+    let account_sizes = [1, 5, 10, 50, 100, 500, 1000, 2000];
+    let account_list: Vec<_> = account_sizes
+        .into_iter()
+        .map(|size| {
+            (
+                Pubkey::new_unique(),
+                AccountSharedData::new(1, size, AccountSharedData::default().owner()),
+            )
+        })
+        .collect();
+
     let slot0 = 0;
-    let storage = accounts.create_and_insert_store(slot0, 4_000, "");
-    let offsets = storage.accounts.write_accounts(
-        &(slot0, &[(&keys[0], &account), (&keys[1], &account_big)][..]),
-        0,
-    );
+    let storage = accounts.create_and_insert_store(slot0, 10_000, "");
+    let offsets = storage
+        .accounts
+        .write_accounts(&(slot0, &account_list[..]), 0);
 
     let offsets = offsets.unwrap().offsets;
-
-    // Mark one account as obsolete
     let data_lens = storage.accounts.get_account_data_lens(&offsets);
+    let mut offsets: Vec<_> = offsets.into_iter().zip(data_lens).collect();
+
+    // Randomize the accounts that get marked obsolete
+    let mut rng = rand::thread_rng();
+    offsets.shuffle(&mut rng);
+
+    let (accounts_to_mark_obsolete, accounts_to_keep) =
+        offsets.split_at(num_accounts_to_mark_obsolete);
+
     storage
         .obsolete_accounts
         .write()
         .unwrap()
-        .mark_accounts_obsolete(vec![(offsets[0], data_lens[0])].into_iter(), slot0 + 1);
+        .mark_accounts_obsolete(accounts_to_mark_obsolete.iter().cloned(), slot0 + 1);
 
     let storage_info = StorageSizeAndCountMap::default();
     let mut reader = append_vec::new_scan_accounts_reader();
     let info = accounts.generate_index_for_slot(&mut reader, &storage, 0, 0, &storage_info);
-    assert_eq!(info.num_obsolete_accounts_skipped, 1);
+    assert_eq!(
+        info.num_obsolete_accounts_skipped,
+        num_accounts_to_mark_obsolete as u64
+    );
     assert_eq!(storage_info.len(), 1);
+
     for entry in storage_info.iter() {
-        // Only the second account should be returned when generating the index for the slot
-        let expected_stored_size = storage.accounts.calculate_stored_size(data_lens[1]);
+        // Sum up the stored size of all non obsolete accounts
+        let expected_stored_size: usize = accounts_to_keep
+            .iter()
+            .map(|(_, data_len)| storage.accounts.calculate_stored_size(*data_len))
+            .sum();
+
         assert_eq!(
             (entry.key(), entry.value().count, entry.value().stored_size),
-            (&0, 1, expected_stored_size)
+            (&0, accounts_to_keep.len(), expected_stored_size)
         );
     }
     accounts.accounts_index.set_startup(Startup::Normal);
