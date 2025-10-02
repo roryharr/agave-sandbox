@@ -6403,7 +6403,7 @@ impl AccountsDb {
         // Collect all the obsolete accounts in this storage into a hashset for fast lookup.
         // Safe to pass in 'None' which will return all obsolete accounts in this Slot.
         // Any accounts marked obsolete in a slot newer than the snapshot slot were filtered out
-        // when the obsolete account data was saved in TODO
+        // when the obsolete account data was serialized to disk for fastboot
         let obsolete_accounts: IntSet<_> = storage
             .obsolete_accounts_read_lock()
             .filter_obsolete_accounts(None)
