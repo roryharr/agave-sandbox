@@ -2011,7 +2011,8 @@ mod tests {
         bank0.transfer(lamports, &mint, &key1.pubkey()).unwrap();
         bank0.fill_bank_with_ticks_for_tests();
 
-        // Squash and root bank0 to ensure slot 0 is skipped during flush
+        // Squash and root bank0 to ensure slot 0. This ensures slot0 data is not cleaned
+        // before being written to storage.
         bank0.squash();
         bank0.force_flush_accounts_cache();
 
@@ -2046,7 +2047,7 @@ mod tests {
         let account_paths = &bank2.rc.accounts.accounts_db.paths;
         let bank_snapshot = get_highest_bank_snapshot(&bank_snapshots_dir).unwrap();
 
-        // Deserialize the bank from the snapshot directory instead of the archives
+        // Deserialize the bank from the snapshot directory
         let deserialized_bank = bank_from_snapshot_dir(
             account_paths,
             &bank_snapshot,
