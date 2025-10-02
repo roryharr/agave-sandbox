@@ -5028,6 +5028,11 @@ fn test_calculate_storage_count_and_alive_bytes_obsolete_account(
     accounts.accounts_index.set_startup(Startup::Startup);
 
     let account_sizes = [1, 5, 10, 50, 100, 500, 1000, 2000];
+
+    // Make sure we have enough accounts to mark obsolete. If this fails, just add more
+    // entries to account_sizes
+    assert!(account_sizes.len() >= num_accounts_to_mark_obsolete);
+
     let account_list: Vec<_> = account_sizes
         .into_iter()
         .map(|size| {
