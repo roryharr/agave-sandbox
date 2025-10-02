@@ -1827,7 +1827,7 @@ mod tests {
         }
     }
 
-    /// Test that snapshots correctly handle zero lamport accounts
+    /// Test that snapshots correctly handles zero lamport accounts
     ///
     /// slot 1:
     ///     - send some lamports to Account1 (from Account2) to bring it to life
