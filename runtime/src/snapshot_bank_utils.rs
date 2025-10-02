@@ -1827,7 +1827,7 @@ mod tests {
         }
     }
 
-    /// Test that snapshots correctly handles zero lamport accounts
+    /// Test that snapshots correctly handle zero lamport accounts
     ///
     /// slot 1:
     ///     - send some lamports to Account1 (from Account2) to bring it to life
@@ -1966,7 +1966,7 @@ mod tests {
         assert_eq!(*bank3, deserialized_bank);
     }
 
-    /// Test that restoring from snapshot dir rather than archives correctly handle zero lamport
+    /// Test that restoring from snapshot dir rather than archives correctly handles zero lamport
     /// accounts
     ///
     /// slot 0:
