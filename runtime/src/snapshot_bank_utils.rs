@@ -2032,7 +2032,9 @@ mod tests {
         bank2.fill_bank_with_ticks_for_tests();
         assert_eq!(bank2.get_balance(&key2.pubkey()), 0);
 
-        // Take full snapshot
+        // Take a full snapshot, passing `true` for `should_flush_and_hard_link_storages`.
+        // This ensures that `serialize_snapshot` performs all necessary steps to create
+        // a snapshot that supports fastbooting.
         bank_to_full_snapshot_archive_with(
             &bank_snapshots_dir,
             &bank2,
