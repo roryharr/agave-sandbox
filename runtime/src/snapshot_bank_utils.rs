@@ -1966,8 +1966,7 @@ mod tests {
         assert_eq!(*bank3, deserialized_bank);
     }
 
-    /// Test that restoring from snapshot dir rather than archives correctly handles zero lamport
-    /// accounts
+    /// Test that fastboot correctly handles zero lamport accounts
     ///
     /// slot 0:
     ///     - send some lamports to Account2 (from mint) to bring it to life
@@ -1975,13 +1974,14 @@ mod tests {
     ///
     /// slot 1:
     ///     - send all lamports to account2 from account1 to make account1 zero lamport
+    ///
     /// slot 2:
     ///     - send all lamports from account2 to the mint to make account2 zero lamport
     ///
     /// If zero lamport accounts are not handled correctly, Account1 or Account2 will come back
     /// failing the test
     #[test_case(MarkObsoleteAccounts::Disabled)]
-    fn test_restore_snapshots_dir_handle_zero_lamport_accounts(
+    fn test_fastboot_handle_zero_lamport_accounts(
         mark_obsolete_accounts: MarkObsoleteAccounts,
     ) {
         let collector = Pubkey::new_unique();
@@ -2006,7 +2006,6 @@ mod tests {
 
         let bank0 = Bank::new_with_config_for_tests(&genesis_config, bank_test_config);
         let (bank0, bank_forks) = Bank::wrap_with_bank_forks_for_tests(bank0);
-        // Transport some money from mint to key1 and key2
         bank0.transfer(lamports, &mint, &key2.pubkey()).unwrap();
         bank0.transfer(lamports, &mint, &key1.pubkey()).unwrap();
         bank0.fill_bank_with_ticks_for_tests();
@@ -2049,7 +2048,6 @@ mod tests {
         let account_paths = &bank2.rc.accounts.accounts_db.paths;
         let bank_snapshot = get_highest_bank_snapshot(&bank_snapshots_dir).unwrap();
 
-        // Deserialize the bank from the snapshot directory
         let deserialized_bank = bank_from_snapshot_dir(
             account_paths,
             &bank_snapshot,
@@ -2065,8 +2063,8 @@ mod tests {
         .unwrap();
 
         // Ensure both accounts are still zero lamport
-        assert_eq!(deserialized_bank.get_balance(&key1.pubkey()), 0,);
-        assert_eq!(deserialized_bank.get_balance(&key2.pubkey()), 0,);
+        assert_eq!(deserialized_bank.get_balance(&key1.pubkey()), 0);
+        assert_eq!(deserialized_bank.get_balance(&key2.pubkey()), 0);
 
         // Ensure the deserialized bank matches the original bank
         assert_eq!(*bank2, deserialized_bank);
