@@ -2008,8 +2008,7 @@ mod tests {
         bank0.transfer(lamports, &mint, &key1.pubkey()).unwrap();
         bank0.fill_bank_with_ticks_for_tests();
 
-        // Squash and root bank0. This ensures slot0 data is not cleaned before being written to
-        // storage.
+        // Squash and flush bank0 to ensure slot0 data is not cleaned before being written to storage.
         bank0.squash();
         bank0.force_flush_accounts_cache();
 
