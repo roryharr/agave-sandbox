@@ -1981,9 +1981,7 @@ mod tests {
     /// If zero lamport accounts are not handled correctly, Account1 or Account2 will come back
     /// failing the test
     #[test_case(MarkObsoleteAccounts::Disabled)]
-    fn test_fastboot_handle_zero_lamport_accounts(
-        mark_obsolete_accounts: MarkObsoleteAccounts,
-    ) {
+    fn test_fastboot_handle_zero_lamport_accounts(mark_obsolete_accounts: MarkObsoleteAccounts) {
         let collector = Pubkey::new_unique();
         let key1 = Keypair::new();
         let key2 = Keypair::new();
@@ -2010,8 +2008,8 @@ mod tests {
         bank0.transfer(lamports, &mint, &key1.pubkey()).unwrap();
         bank0.fill_bank_with_ticks_for_tests();
 
-        // Squash and root bank0 to ensure slot 0. This ensures slot0 data is not cleaned
-        // before being written to storage.
+        // Squash and root bank0. This ensures slot0 data is not cleaned before being written to
+        // storage.
         bank0.squash();
         bank0.force_flush_accounts_cache();
 
