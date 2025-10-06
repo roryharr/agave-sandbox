@@ -1874,6 +1874,7 @@ fn unarchive_snapshot(
                     next_append_vec_id,
                     SnapshotFrom::Archive,
                     accounts_db_config.storage_access,
+                    None,
                 )?,
                 measure_name
             );
@@ -1934,6 +1935,9 @@ pub fn rebuild_storages_from_snapshot_dir(
     let bank_snapshot_dir = &snapshot_info.snapshot_dir;
     let accounts_hardlinks = bank_snapshot_dir.join(SNAPSHOT_ACCOUNTS_HARDLINKS);
     let account_run_paths: HashSet<_> = HashSet::from_iter(account_paths);
+
+    // Initialize the obsolete account structure
+    let obsolete_accounts = HashMap::new();
 
     let read_dir = fs::read_dir(&accounts_hardlinks).map_err(|err| {
         IoError::other(format!(
@@ -2012,6 +2016,7 @@ pub fn rebuild_storages_from_snapshot_dir(
         next_append_vec_id,
         SnapshotFrom::Dir,
         storage_access,
+        Some(obsolete_accounts),
     )?;
 
     Ok((storage, bank_fields, accounts_db_fields))
