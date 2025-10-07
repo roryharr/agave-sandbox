@@ -153,7 +153,7 @@ pub struct LoadableBankSnapshotInfo {
     pub snapshot_dir: PathBuf,
     /// Snapshot version
     pub snapshot_version: SnapshotVersion,
-    /// Fastboot version
+    /// Fastboot version. Can be made non-optional in Version 3.2
     pub fastboot_version: Option<Version>,
 }
 
