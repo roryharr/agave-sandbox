@@ -782,6 +782,7 @@ fn is_bank_snapshot_loadable(
     if let Some(version) = version {
         is_snapshot_fastboot_compatible(version)
     } else {
+        // No fastboot version file, so this is not a fastbootable
         Ok(false)
     }
 }
