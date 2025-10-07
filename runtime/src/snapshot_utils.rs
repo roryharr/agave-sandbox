@@ -143,6 +143,20 @@ impl SnapshotVersion {
     }
 }
 
+/// Information about a loadable bank snapshot. Namely the slot of the bank, the path to the
+/// snapshot, and the versions
+#[derive(PartialEq, Eq, Debug)]
+pub struct LoadableBankSnapshotInfo {
+    /// Slot of the bank
+    pub slot: Slot,
+    /// Path to the bank snapshot directory
+    pub snapshot_dir: PathBuf,
+    /// Snapshot version
+    pub snapshot_version: SnapshotVersion,
+    /// Fastboot version
+    pub fastboot_version: Option<Version>,
+}
+
 /// Information about a bank snapshot. Namely the slot of the bank, the path to the snapshot, and
 /// the kind of the snapshot.
 #[derive(PartialEq, Eq, Debug)]
@@ -754,6 +768,7 @@ pub fn mark_bank_snapshot_as_loadable(bank_snapshot_dir: impl AsRef<Path>) -> io
 /// Is this bank snapshot loadable?
 fn is_bank_snapshot_loadable(
     bank_snapshot_dir: impl AsRef<Path>,
+    snapshot_version: &Option<Version>,
 ) -> std::result::Result<bool, SnapshotFastbootError> {
     // Legacy storages flushed file
     // Read in v3.1 for backwards compatibility, can be removed in v3.2
@@ -764,18 +779,9 @@ fn is_bank_snapshot_loadable(
         return Ok(true);
     }
 
-    let snapshot_fastboot_version_path = bank_snapshot_dir
-        .as_ref()
-        .join(SNAPSHOT_FASTBOOT_VERSION_FILENAME);
-
-    if let Ok(version_string) = fs::read_to_string(&snapshot_fastboot_version_path) {
-        if let Ok(version) = Version::from_str(version_string.trim()) {
-            is_snapshot_fastboot_compatible(&version)
-        } else {
-            Err(SnapshotFastbootError::InvalidVersion(version_string))
-        }
+    if let Some(version) = snapshot_version {
+        is_snapshot_fastboot_compatible(version)
     } else {
-        // No fastboot version file, so this is not a fastbootable
         Ok(false)
     }
 }
@@ -796,13 +802,35 @@ fn is_snapshot_fastboot_compatible(
 /// The highest bank snapshot is the one with the highest slot.
 pub fn get_highest_loadable_bank_snapshot(
     snapshot_config: &SnapshotConfig,
-) -> Option<BankSnapshotInfo> {
+) -> Option<LoadableBankSnapshotInfo> {
     let highest_bank_snapshot = get_highest_bank_snapshot(&snapshot_config.bank_snapshots_dir)?;
 
-    let is_bank_snapshot_loadable = is_bank_snapshot_loadable(&highest_bank_snapshot.snapshot_dir);
+    let snapshot_fastboot_version_path = highest_bank_snapshot
+        .snapshot_dir
+        .join(SNAPSHOT_FASTBOOT_VERSION_FILENAME);
+    let fastboot_version = fs::read_to_string(&snapshot_fastboot_version_path)
+        .ok()
+        .and_then(|version_string| {
+            Version::from_str(version_string.trim())
+                .map_err(|err| {
+                    warn!(
+                        "Invalid fastboot version '{}': {err}",
+                        version_string.trim()
+                    );
+                })
+                .ok()
+        });
+
+    let is_bank_snapshot_loadable =
+        is_bank_snapshot_loadable(&highest_bank_snapshot.snapshot_dir, &fastboot_version);
 
     match is_bank_snapshot_loadable {
-        Ok(true) => Some(highest_bank_snapshot),
+        Ok(true) => Some(LoadableBankSnapshotInfo {
+            slot: highest_bank_snapshot.slot,
+            snapshot_dir: highest_bank_snapshot.snapshot_dir,
+            snapshot_version: highest_bank_snapshot.snapshot_version,
+            fastboot_version,
+        }),
         Ok(false) => None,
         Err(err) => {
             warn!(
@@ -2561,6 +2589,14 @@ mod tests {
         std::{convert::TryFrom, mem::size_of},
         tempfile::NamedTempFile,
     };
+
+    impl PartialEq<BankSnapshotInfo> for LoadableBankSnapshotInfo {
+        fn eq(&self, other: &BankSnapshotInfo) -> bool {
+            self.slot == other.slot
+                && self.snapshot_dir == other.snapshot_dir
+                && self.snapshot_version == other.snapshot_version
+        }
+    }
 
     #[test]
     fn test_serialize_snapshot_data_file_under_limit() {
