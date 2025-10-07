@@ -20,7 +20,7 @@ use {
         accounts_file::StorageAccess,
     },
     solana_clock::Slot,
-    solana_nohash_hasher::{BuildNoHashHasher, IntMap},
+    solana_nohash_hasher::BuildNoHashHasher,
     std::{
         collections::HashMap,
         path::PathBuf,
@@ -57,7 +57,7 @@ pub(crate) struct SnapshotStorageRebuilder {
     /// specify how storages are accessed
     storage_access: StorageAccess,
     /// obsolete accounts for all storages
-    obsolete_accounts: Option<Mutex<IntMap<Slot, SerdeObsoleteAccounts>>>,
+    obsolete_accounts: Option<DashMap<Slot, SerdeObsoleteAccounts>>,
 }
 
 impl SnapshotStorageRebuilder {
@@ -70,7 +70,7 @@ impl SnapshotStorageRebuilder {
         next_append_vec_id: Arc<AtomicAccountsFileId>,
         snapshot_from: SnapshotFrom,
         storage_access: StorageAccess,
-        obsolete_accounts: Option<IntMap<Slot, SerdeObsoleteAccounts>>,
+        obsolete_accounts: Option<DashMap<Slot, SerdeObsoleteAccounts>>,
     ) -> Result<AccountStorageMap, SnapshotError> {
         let snapshot_storage_lengths = snapshot_storage_lengths_from_fields(accounts_db_fields);
 
@@ -97,7 +97,7 @@ impl SnapshotStorageRebuilder {
         snapshot_storage_lengths: HashMap<Slot, HashMap<usize, usize>>,
         snapshot_from: SnapshotFrom,
         storage_access: StorageAccess,
-        obsolete_accounts: Option<IntMap<Slot, SerdeObsoleteAccounts>>,
+        obsolete_accounts: Option<DashMap<Slot, SerdeObsoleteAccounts>>,
     ) -> Self {
         let storage = DashMap::with_capacity_and_hasher(
             snapshot_storage_lengths.len(),
@@ -109,7 +109,6 @@ impl SnapshotStorageRebuilder {
                 (*slot, Mutex::new(Vec::with_capacity(storage_lengths.len())))
             })
             .collect();
-        let obsolete_accounts = obsolete_accounts.map(Mutex::new);
         Self {
             file_receiver,
             num_threads,
@@ -134,7 +133,7 @@ impl SnapshotStorageRebuilder {
         append_vec_files: Vec<PathBuf>,
         snapshot_from: SnapshotFrom,
         storage_access: StorageAccess,
-        obsolete_accounts: Option<IntMap<Slot, SerdeObsoleteAccounts>>,
+        obsolete_accounts: Option<DashMap<Slot, SerdeObsoleteAccounts>>,
     ) -> Result<AccountStorageMap, SnapshotError> {
         let rebuilder = Arc::new(SnapshotStorageRebuilder::new(
             file_receiver,
@@ -261,9 +260,9 @@ impl SnapshotStorageRebuilder {
                         current_len,
                         old_append_vec_id as AccountsFileId,
                         self.storage_access,
-                        self.obsolete_accounts
-                            .as_ref()
-                            .and_then(|accounts| accounts.lock().unwrap().remove(&slot)),
+                        self.obsolete_accounts.as_ref().and_then(|accounts| {
+                            accounts.remove(&slot).map(|(_slot, accounts)| accounts)
+                        }),
                     )?,
                 };
 
