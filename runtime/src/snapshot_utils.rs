@@ -157,6 +157,12 @@ pub struct LoadableBankSnapshotInfo {
     pub fastboot_version: Option<Version>,
 }
 
+impl LoadableBankSnapshotInfo {
+    pub fn snapshot_path(&self) -> PathBuf {
+        self.snapshot_dir.join(get_snapshot_file_name(self.slot))
+    }
+}
+
 /// Information about a bank snapshot. Namely the slot of the bank, the path to the snapshot, and
 /// the kind of the snapshot.
 #[derive(PartialEq, Eq, Debug)]
@@ -1950,7 +1956,7 @@ fn streaming_snapshot_dir_files(
 /// Handles reading the snapshot file and version file,
 /// then returning those fields plus the rebuilt storages.
 pub fn rebuild_storages_from_snapshot_dir(
-    snapshot_info: &BankSnapshotInfo,
+    snapshot_info: &LoadableBankSnapshotInfo,
     account_paths: &[PathBuf],
     next_append_vec_id: Arc<AtomicAccountsFileId>,
     storage_access: StorageAccess,

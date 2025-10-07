@@ -25,11 +25,12 @@ use {
         snapshot_hash::SnapshotHash,
         snapshot_package::{SnapshotKind, SnapshotPackage},
         snapshot_utils::{
-            self, get_highest_bank_snapshot, get_highest_full_snapshot_archive_info,
-            get_highest_incremental_snapshot_archive_info, rebuild_storages_from_snapshot_dir,
-            verify_and_unarchive_snapshots, ArchiveFormat, BankSnapshotInfo, SnapshotError,
-            SnapshotVersion, StorageAndNextAccountsFileId, UnarchivedSnapshots,
-            VerifyEpochStakesError, VerifySlotDeltasError, VerifySlotHistoryError,
+            self, get_highest_full_snapshot_archive_info,
+            get_highest_incremental_snapshot_archive_info, get_highest_loadable_bank_snapshot,
+            rebuild_storages_from_snapshot_dir, verify_and_unarchive_snapshots, ArchiveFormat,
+            LoadableBankSnapshotInfo, SnapshotError, SnapshotVersion, StorageAndNextAccountsFileId,
+            UnarchivedSnapshots, VerifyEpochStakesError, VerifySlotDeltasError,
+            VerifySlotHistoryError,
         },
         status_cache,
     },
@@ -326,7 +327,7 @@ pub fn bank_from_latest_snapshot_archives(
 #[allow(clippy::too_many_arguments)]
 pub fn bank_from_snapshot_dir(
     account_paths: &[PathBuf],
-    bank_snapshot: &BankSnapshotInfo,
+    bank_snapshot: &LoadableBankSnapshotInfo,
     genesis_config: &GenesisConfig,
     runtime_config: &RuntimeConfig,
     debug_keys: Option<Arc<HashSet<Pubkey>>>,
@@ -434,7 +435,11 @@ pub fn bank_from_latest_snapshot_dir(
     accounts_update_notifier: Option<AccountsUpdateNotifier>,
     exit: Arc<AtomicBool>,
 ) -> snapshot_utils::Result<Bank> {
-    let bank_snapshot = get_highest_bank_snapshot(&bank_snapshots_dir).ok_or_else(|| {
+    let snapshot_config = SnapshotConfig {
+        bank_snapshots_dir: bank_snapshots_dir.as_ref().to_path_buf(),
+        ..SnapshotConfig::default()
+    };
+    let bank_snapshot = get_highest_loadable_bank_snapshot(&snapshot_config).ok_or_else(|| {
         SnapshotError::NoSnapshotSlotDir(bank_snapshots_dir.as_ref().to_path_buf())
     })?;
     let bank = bank_from_snapshot_dir(
@@ -2043,7 +2048,11 @@ mod tests {
         .unwrap();
 
         let account_paths = &bank2.rc.accounts.accounts_db.paths;
-        let bank_snapshot = get_highest_bank_snapshot(&bank_snapshots_dir).unwrap();
+        let snapshot_config = SnapshotConfig {
+            bank_snapshots_dir: bank_snapshots_dir.as_ref().to_path_buf(),
+            ..SnapshotConfig::default()
+        };
+        let bank_snapshot = get_highest_loadable_bank_snapshot(&snapshot_config).unwrap();
 
         let deserialized_bank = bank_from_snapshot_dir(
             account_paths,
@@ -2074,7 +2083,11 @@ mod tests {
         let bank_snapshots_dir = tempfile::TempDir::new().unwrap();
         let bank = create_snapshot_dirs_for_tests(&genesis_config, &bank_snapshots_dir, 3, true);
 
-        let bank_snapshot = get_highest_bank_snapshot(&bank_snapshots_dir).unwrap();
+        let snapshot_config = SnapshotConfig {
+            bank_snapshots_dir: bank_snapshots_dir.as_ref().to_path_buf(),
+            ..SnapshotConfig::default()
+        };
+        let bank_snapshot = get_highest_loadable_bank_snapshot(&snapshot_config).unwrap();
         let account_paths = &bank.rc.accounts.accounts_db.paths;
 
         let bank_constructed = bank_from_snapshot_dir(
