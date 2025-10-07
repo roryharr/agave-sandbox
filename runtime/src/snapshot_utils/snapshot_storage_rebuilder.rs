@@ -20,7 +20,7 @@ use {
         accounts_file::StorageAccess,
     },
     solana_clock::Slot,
-    solana_nohash_hasher::BuildNoHashHasher,
+    solana_nohash_hasher::{BuildNoHashHasher, IntMap},
     std::{
         collections::HashMap,
         path::PathBuf,
@@ -57,7 +57,7 @@ pub(crate) struct SnapshotStorageRebuilder {
     /// specify how storages are accessed
     storage_access: StorageAccess,
     /// obsolete accounts for all storages
-    obsolete_accounts: Option<Mutex<HashMap<Slot, SerdeObsoleteAccounts>>>,
+    obsolete_accounts: Option<Mutex<IntMap<Slot, SerdeObsoleteAccounts>>>,
 }
 
 impl SnapshotStorageRebuilder {
@@ -70,7 +70,7 @@ impl SnapshotStorageRebuilder {
         next_append_vec_id: Arc<AtomicAccountsFileId>,
         snapshot_from: SnapshotFrom,
         storage_access: StorageAccess,
-        obsolete_accounts: Option<HashMap<Slot, SerdeObsoleteAccounts>>,
+        obsolete_accounts: Option<IntMap<Slot, SerdeObsoleteAccounts>>,
     ) -> Result<AccountStorageMap, SnapshotError> {
         let snapshot_storage_lengths = snapshot_storage_lengths_from_fields(accounts_db_fields);
 
@@ -97,7 +97,7 @@ impl SnapshotStorageRebuilder {
         snapshot_storage_lengths: HashMap<Slot, HashMap<usize, usize>>,
         snapshot_from: SnapshotFrom,
         storage_access: StorageAccess,
-        obsolete_accounts: Option<HashMap<Slot, SerdeObsoleteAccounts>>,
+        obsolete_accounts: Option<IntMap<Slot, SerdeObsoleteAccounts>>,
     ) -> Self {
         let storage = DashMap::with_capacity_and_hasher(
             snapshot_storage_lengths.len(),
@@ -134,7 +134,7 @@ impl SnapshotStorageRebuilder {
         append_vec_files: Vec<PathBuf>,
         snapshot_from: SnapshotFrom,
         storage_access: StorageAccess,
-        obsolete_accounts: Option<HashMap<Slot, SerdeObsoleteAccounts>>,
+        obsolete_accounts: Option<IntMap<Slot, SerdeObsoleteAccounts>>,
     ) -> Result<AccountStorageMap, SnapshotError> {
         let rebuilder = Arc::new(SnapshotStorageRebuilder::new(
             file_receiver,
