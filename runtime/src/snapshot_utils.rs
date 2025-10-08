@@ -216,6 +216,9 @@ impl BankSnapshotInfo {
         let snapshot_fastboot_version_path =
             bank_snapshot_dir.join(SNAPSHOT_FASTBOOT_VERSION_FILENAME);
 
+        // If the version file is absent, fastboot_version will be None. This allows versions 3.1+
+        // to load snapshots created by versions <3.1. In version 3.2, the version file will become
+        // mandatory, and its absence can be treated as an error.
         let fastboot_version = fs::read_to_string(&snapshot_fastboot_version_path)
             .ok()
             .map(|version_string| {
