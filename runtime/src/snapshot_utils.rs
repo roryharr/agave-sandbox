@@ -218,11 +218,11 @@ impl BankSnapshotInfo {
 
         let fastboot_version = fs::read_to_string(&snapshot_fastboot_version_path)
             .ok()
-            .and_then(|version_string| {
+            .map(|version_string| {
                 Version::from_str(version_string.trim())
                     .map_err(|_| SnapshotNewFromDirError::InvalidFastbootVersion(version_string))
-                    .ok()
-            });
+            })
+            .transpose()?;
 
         Ok(BankSnapshotInfo {
             slot,
@@ -768,7 +768,7 @@ pub fn mark_bank_snapshot_as_loadable(bank_snapshot_dir: impl AsRef<Path>) -> io
 /// Is this bank snapshot loadable?
 fn is_bank_snapshot_loadable(
     bank_snapshot_dir: impl AsRef<Path>,
-    version: &Option<Version>,
+    fastboot_version: Option<&Version>,
 ) -> std::result::Result<bool, SnapshotFastbootError> {
     // Legacy storages flushed file
     // Read in v3.1 for backwards compatibility, can be removed in v3.2
@@ -779,8 +779,8 @@ fn is_bank_snapshot_loadable(
         return Ok(true);
     }
 
-    if let Some(version) = version {
-        is_snapshot_fastboot_compatible(version)
+    if let Some(fastboot_version) = fastboot_version {
+        is_snapshot_fastboot_compatible(fastboot_version)
     } else {
         // No fastboot version file, so this is not a fastbootable
         Ok(false)
@@ -808,7 +808,7 @@ pub fn get_highest_loadable_bank_snapshot(
 
     let is_bank_snapshot_loadable = is_bank_snapshot_loadable(
         &highest_bank_snapshot.snapshot_dir,
-        &highest_bank_snapshot.fastboot_version,
+        highest_bank_snapshot.fastboot_version.as_ref(),
     );
 
     match is_bank_snapshot_loadable {
