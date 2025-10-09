@@ -24,7 +24,7 @@ use {
         accounts_update_notifier_interface::AccountsUpdateNotifier,
         ancestors::AncestorsForSerialization,
         blockhash_queue::BlockhashQueue,
-        ObsoleteAccounts,
+        ObsoleteAccountItem, ObsoleteAccounts,
     },
     solana_clock::{Epoch, Slot, UnixTimestamp},
     solana_epoch_schedule::EpochSchedule,
@@ -58,7 +58,7 @@ mod status_cache;
 mod storage;
 mod tests;
 mod types;
-mod utils;
+pub mod utils;
 
 pub(crate) use {
     status_cache::{deserialize_status_cache, serialize_status_cache},
@@ -869,8 +869,19 @@ pub(crate) fn reconstruct_single_storage(
                 obsolete_accounts.id,
             ));
         }
+        let accounts = ObsoleteAccounts {
+            accounts: obsolete_accounts
+                .accounts
+                .into_iter()
+                .map(|(offset, data_len, slot)| ObsoleteAccountItem {
+                    offset,
+                    data_len,
+                    slot,
+                })
+                .collect(),
+        };
 
-        (updated_len, obsolete_accounts.accounts)
+        (updated_len, accounts)
     } else {
         (current_len, ObsoleteAccounts::default())
     };

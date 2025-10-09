@@ -1,18 +1,18 @@
 use {crate::account_info::Offset, solana_clock::Slot};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-struct ObsoleteAccountItem {
+pub struct ObsoleteAccountItem {
     /// Offset of the account in the account storage entry
-    offset: Offset,
+    pub offset: Offset,
     /// Length of the account data
-    data_len: usize,
+    pub data_len: usize,
     /// Slot when the account was marked obsolete
-    slot: Slot,
+    pub slot: Slot,
 }
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct ObsoleteAccounts {
-    accounts: Vec<ObsoleteAccountItem>,
+   pub accounts: Vec<ObsoleteAccountItem>,
 }
 
 impl ObsoleteAccounts {
@@ -49,7 +49,7 @@ impl ObsoleteAccounts {
     /// Returns the accounts that were marked obsolete as of the passed in slot
     /// or earlier. Returned data includes the slots that the accounts were marked
     /// obsolete at
-    pub fn obsolete_accounts_at_slot(&self, slot: Slot) -> ObsoleteAccounts {
+    pub fn obsolete_accounts_for_snapshots(&self, slot: Slot) -> ObsoleteAccounts {
         let filtered_accounts = self
             .accounts
             .iter()
@@ -117,7 +117,7 @@ mod tests {
     }
 
     #[test]
-    fn test_obsolete_accounts_at_slot() {
+    fn test_obsolete_accounts_for_snapshots() {
         let mut obsolete_accounts = ObsoleteAccounts::default();
         let new_accounts = vec![(10, 100, 40), (20, 200, 42), (30, 300, 44)]
             .into_iter()
@@ -135,7 +135,7 @@ mod tests {
         });
 
         // Filter accounts obsolete as of slot 42
-        let obsolete_accounts_at_slot = obsolete_accounts.obsolete_accounts_at_slot(42);
+        let obsolete_accounts_for_snapshots = obsolete_accounts.obsolete_accounts_for_snapshots(42);
 
         let expected_accounts: Vec<_> = new_accounts
             .iter()
@@ -143,11 +143,11 @@ mod tests {
             .cloned()
             .collect();
 
-        assert_eq!(obsolete_accounts_at_slot.accounts, expected_accounts);
+        assert_eq!(obsolete_accounts_for_snapshots.accounts, expected_accounts);
 
         // Filter accounts obsolete passing in no slot (i.e., all obsolete accounts)
-        let obsolete_accounts_at_slot = obsolete_accounts.obsolete_accounts_at_slot(100);
+        let obsolete_accounts_for_snapshots = obsolete_accounts.obsolete_accounts_for_snapshots(100);
 
-        assert_eq!(obsolete_accounts_at_slot.accounts, new_accounts);
+        assert_eq!(obsolete_accounts_for_snapshots.accounts, new_accounts);
     }
 }

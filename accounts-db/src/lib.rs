@@ -47,7 +47,7 @@ pub mod waitable_condvar;
 
 pub use {
     buffered_reader::large_file_buf_reader, file_io::validate_memlock_limit_for_disk_io,
-    obsolete_accounts::ObsoleteAccounts,
+    obsolete_accounts::{ObsoleteAccounts, ObsoleteAccountItem},
 };
 
 #[macro_use]

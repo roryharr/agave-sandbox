@@ -19,6 +19,7 @@ use {
             get_slot_and_append_vec_id, SnapshotStorageRebuilder,
         },
     },
+    bincode::Options,
     crossbeam_channel::{Receiver, Sender},
     dashmap::DashMap,
     log::*,
@@ -1324,9 +1325,11 @@ fn serialize_obsolete_accounts(
     let obsolete_accounts_file = fs::File::create(&obsolete_accounts_path)?;
     let mut file_stream = BufWriter::new(obsolete_accounts_file);
 
-    for (slot, obsolete_accounts) in obsolete_accounts_map {
-        bincode::serialize_into(&mut file_stream, &(slot, obsolete_accounts))?;
-    }
+    let bincode = bincode::DefaultOptions::new().with_fixint_encoding();
+    bincode.serialize_into(
+        &mut file_stream,
+        &serde_snapshot::utils::serialize_iter_as_tuple(obsolete_accounts_map.iter()),
+    )?;
     file_stream.flush()?;
 
     let consumed_size = file_stream.stream_position()?;
@@ -2636,7 +2639,7 @@ mod tests {
         super::*,
         assert_matches::assert_matches,
         bincode::{deserialize_from, serialize_into},
-        solana_accounts_db::{accounts_file::AccountsFileProvider, ObsoleteAccounts},
+        solana_accounts_db::accounts_file::AccountsFileProvider,
         std::{convert::TryFrom, mem::size_of},
         tempfile::NamedTempFile,
         test_case::test_case,
@@ -3664,9 +3667,9 @@ mod tests {
         // Create a sample obsolete accounts map
         let mut obsolete_accounts_map = HashMap::new();
         for slot in 1..=num_storages {
-            let mut obsolete_accounts = ObsoleteAccounts::default();
-            let accounts = (0..num_accounts_per_storage).map(|j| (j, j * 10));
-            obsolete_accounts.mark_accounts_obsolete(accounts, slot + 1);
+            let obsolete_accounts = (0..num_accounts_per_storage)
+                .map(|j| (j, j * 10, slot + 1))
+                .collect();
 
             obsolete_accounts_map.insert(
                 slot,

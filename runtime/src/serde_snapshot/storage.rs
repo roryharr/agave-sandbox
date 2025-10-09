@@ -1,6 +1,6 @@
 use {
     serde::{Deserialize, Serialize},
-    solana_accounts_db::{accounts_db::AccountStorageEntry, ObsoleteAccounts},
+    solana_accounts_db::{account_info::Offset, accounts_db::AccountStorageEntry},
     solana_clock::Slot,
 };
 
@@ -61,7 +61,7 @@ pub(crate) struct SerdeObsoleteAccounts {
     /// is used to validate the size when creating the accounts file.
     pub bytes: u64,
     /// A list of accounts that are obsolete in the storage being restored.
-    pub accounts: ObsoleteAccounts,
+    pub accounts: Vec<(Offset, usize, Slot)>,
 }
 
 impl SerdeObsoleteAccounts {
@@ -69,10 +69,17 @@ impl SerdeObsoleteAccounts {
         storage: &AccountStorageEntry,
         snapshot_slot: Slot,
     ) -> Self {
+        let accounts: Vec<(usize, usize, u64)> = storage
+            .obsolete_accounts_for_snapshots(snapshot_slot)
+            .accounts
+            .into_iter()
+            .map(|item| (item.offset, item.data_len, item.slot))
+            .collect();
+
         SerdeObsoleteAccounts {
             id: storage.id() as SerializedAccountsFileId,
             bytes: storage.get_obsolete_bytes(Some(snapshot_slot)) as u64,
-            accounts: storage.obsolete_accounts_at_slot(snapshot_slot),
+            accounts,
         }
     }
 }
