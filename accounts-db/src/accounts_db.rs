@@ -1412,14 +1412,15 @@ impl AccountsDb {
         next_id
     }
 
-    fn new_storage_entry(&self, slot: Slot, path: &Path, size: u64) -> AccountStorageEntry {
+    fn new_storage_entry(&self, slot: Slot, path: &Path, size: u64, storage_access: Option<StorageAccess>) -> AccountStorageEntry {
+        let storage_access = storage_access.unwrap_or(self.storage_access);
         AccountStorageEntry::new(
             path,
             slot,
             self.next_id(),
             size,
             self.accounts_file_provider,
-            self.storage_access,
+            storage_access,
         )
     }
 
@@ -3310,7 +3311,7 @@ impl AccountsDb {
 
     /// return a store that can contain 'size' bytes
     pub fn get_store_for_shrink(&self, slot: Slot, size: u64) -> ShrinkInProgress<'_> {
-        let shrunken_store = self.create_store(slot, size, "shrink", self.shrink_paths.as_slice());
+        let shrunken_store = self.create_store(slot, size, "shrink", self.shrink_paths.as_slice(), None);
         self.storage.shrinking_in_progress(slot, shrunken_store)
     }
 
@@ -4354,12 +4355,13 @@ impl AccountsDb {
         size: u64,
         from: &str,
         paths: &[PathBuf],
+        access: Option<StorageAccess>,
     ) -> Arc<AccountStorageEntry> {
         self.stats
             .create_store_count
             .fetch_add(1, Ordering::Relaxed);
         let path_index = thread_rng().gen_range(0..paths.len());
-        let store = Arc::new(self.new_storage_entry(slot, Path::new(&paths[path_index]), size));
+        let store = Arc::new(self.new_storage_entry(slot, Path::new(&paths[path_index]), size, access));
 
         debug!(
             "creating store: {} slot: {} len: {} size: {} from: {} path: {}",
@@ -4390,7 +4392,7 @@ impl AccountsDb {
         from: &str,
         paths: &[PathBuf],
     ) -> Arc<AccountStorageEntry> {
-        let store = self.create_store(slot, size, from, paths);
+        let store = self.create_store(slot, size, from, paths, Some(StorageAccess::Memory));
         let store_for_index = store.clone();
 
         self.insert_store(slot, store_for_index);
