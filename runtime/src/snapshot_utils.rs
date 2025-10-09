@@ -1320,7 +1320,9 @@ fn serialize_obsolete_accounts(
     bank_snapshot_dir: impl AsRef<Path>,
     obsolete_accounts_map: &HashMap<Slot, SerdeObsoleteAccounts>,
 ) -> Result<u64> {
-    let obsolete_accounts_path = bank_snapshot_dir.as_ref().join(SNAPSHOT_OBSOLETE_ACCOUNTS_FILENAME);
+    let obsolete_accounts_path = bank_snapshot_dir
+        .as_ref()
+        .join(SNAPSHOT_OBSOLETE_ACCOUNTS_FILENAME);
     let obsolete_accounts_file = fs::File::create(&obsolete_accounts_path)?;
     let mut file_stream = BufWriter::new(obsolete_accounts_file);
 
@@ -1336,7 +1338,9 @@ fn serialize_obsolete_accounts(
 fn deserialize_obsolete_accounts(
     bank_snapshot_dir: impl AsRef<Path>,
 ) -> Result<DashMap<Slot, SerdeObsoleteAccounts>> {
-    let obsolete_accounts_path = bank_snapshot_dir.as_ref().join(SNAPSHOT_OBSOLETE_ACCOUNTS_FILENAME);
+    let obsolete_accounts_path = bank_snapshot_dir
+        .as_ref()
+        .join(SNAPSHOT_OBSOLETE_ACCOUNTS_FILENAME);
     let obsolete_accounts_file = fs::File::open(obsolete_accounts_path)?;
     let mut data_file_stream = BufReader::new(obsolete_accounts_file);
 
