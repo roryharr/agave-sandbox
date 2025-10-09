@@ -1637,7 +1637,7 @@ mod tests {
     fn test_fastboot_versioning() {
         let genesis_config = GenesisConfig::default();
         let bank_snapshots_dir = tempfile::TempDir::new().unwrap();
-        let _bank = create_snapshot_dirs_for_tests(&genesis_config, &bank_snapshots_dir, 3, true);
+        let _bank = create_snapshot_dirs_for_tests(&genesis_config, &bank_snapshots_dir, 2, true);
 
         let snapshot_config = SnapshotConfig {
             bank_snapshots_dir: bank_snapshots_dir.as_ref().to_path_buf(),
@@ -1648,20 +1648,9 @@ mod tests {
 
         // Verify the snapshot is found with all files present
         let snapshot = get_highest_loadable_bank_snapshot(&snapshot_config).unwrap();
-        assert_eq!(snapshot.slot, 3);
+        assert_eq!(snapshot.slot, 2);
 
-        // Test 1: Remove the storages flushed file
-        let storages_flushed_file = snapshot
-            .snapshot_dir
-            .join(snapshot_utils::SNAPSHOT_STORAGES_FLUSHED_FILENAME);
-        fs::remove_file(storages_flushed_file).unwrap();
-
-        // If the storages flushed file is removed, the version in the version file should be
-        // checked, and the snapshot should be found
-        let snapshot = get_highest_loadable_bank_snapshot(&snapshot_config).unwrap();
-        assert_eq!(snapshot.slot, 3);
-
-        // Test 2: Modify the version in the fastboot version file to something newer
+        // Test 1: Modify the version in the fastboot version file to something newer
         // than current
         let complete_flag_file = snapshot
             .snapshot_dir
@@ -1672,29 +1661,19 @@ mod tests {
 
         fs::write(&complete_flag_file, new_version.to_string()).unwrap();
 
-        // With an invalid version and no flush file, the snapshot will be considered invalid
+        // With an invalid version, the snapshot will be considered invalid
         let new_snapshot = get_highest_loadable_bank_snapshot(&snapshot_config);
         assert!(new_snapshot.is_none());
 
-        // Test 3: Remove the bank snapshot version file
+        // Test 2: Remove the bank snapshot version file
         let complete_flag_file = snapshot
             .snapshot_dir
             .join(snapshot_utils::SNAPSHOT_VERSION_FILENAME);
         fs::remove_file(complete_flag_file).unwrap();
 
-        // This will now find the previous entry in the directory, which is slot 2
+        // This will now find the previous entry in the directory, which is slot 1
         let snapshot = get_highest_loadable_bank_snapshot(&snapshot_config).unwrap();
-        assert_eq!(snapshot.slot, 2);
-
-        // Test 4: Remove the fastboot version file
-        let fastboot_version_file = snapshot
-            .snapshot_dir
-            .join(snapshot_utils::SNAPSHOT_FASTBOOT_VERSION_FILENAME);
-        fs::remove_file(fastboot_version_file).unwrap();
-
-        // The flush file will still be found, making this a valid snapshot
-        let snapshot = get_highest_loadable_bank_snapshot(&snapshot_config).unwrap();
-        assert_eq!(snapshot.slot, 2);
+        assert_eq!(snapshot.slot, 1);
     }
 
     #[test_case(false)]
@@ -1982,6 +1961,7 @@ mod tests {
     /// If zero lamport accounts are not handled correctly, Account1 or Account2 will come back
     /// failing the test
     #[test_case(MarkObsoleteAccounts::Disabled)]
+    #[test_case(MarkObsoleteAccounts::Enabled)]
     fn test_fastboot_handle_zero_lamport_accounts(mark_obsolete_accounts: MarkObsoleteAccounts) {
         let collector = Pubkey::new_unique();
         let key1 = Keypair::new();
@@ -2066,6 +2046,39 @@ mod tests {
 
         // Ensure the deserialized bank matches the original bank
         assert_eq!(*bank2, deserialized_bank);
+    }
+
+    /// Test that removing the obsolete accounts file causes fastboot to fail.
+    /// Fastboot requires obsolete accounts files in newer versions.
+    #[test]
+    #[should_panic(expected = "failed to read obsolete accounts file")]
+    fn test_fastboot_missing_obsolete_accounts() {
+        let genesis_config = GenesisConfig::default();
+        let bank_snapshots_dir = tempfile::TempDir::new().unwrap();
+        let bank = create_snapshot_dirs_for_tests(&genesis_config, &bank_snapshots_dir, 3, true);
+
+        let account_paths = &bank.rc.accounts.accounts_db.paths;
+        let bank_snapshot = get_highest_bank_snapshot(&bank_snapshots_dir).unwrap();
+
+        // Remove the obsolete account file
+        let obsolete_accounts_file = bank_snapshot
+            .snapshot_dir
+            .join(snapshot_utils::SNAPSHOT_OBSOLETE_ACCOUNTS_FILENAME);
+        fs::remove_file(obsolete_accounts_file).unwrap();
+
+        bank_from_snapshot_dir(
+            account_paths,
+            &bank_snapshot,
+            &genesis_config,
+            &RuntimeConfig::default(),
+            None,
+            None,
+            false,
+            ACCOUNTS_DB_CONFIG_FOR_TESTING,
+            None,
+            Arc::default(),
+        )
+        .unwrap();
     }
 
     #[test_case(StorageAccess::Mmap)]
