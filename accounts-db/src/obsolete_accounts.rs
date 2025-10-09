@@ -1,6 +1,6 @@
 use {crate::account_info::Offset, solana_clock::Slot};
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ObsoleteAccountItem {
     /// Offset of the account in the account storage entry
     pub offset: Offset,
@@ -10,7 +10,7 @@ pub struct ObsoleteAccountItem {
     pub slot: Slot,
 }
 
-#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct ObsoleteAccounts {
    pub accounts: Vec<ObsoleteAccountItem>,
 }
