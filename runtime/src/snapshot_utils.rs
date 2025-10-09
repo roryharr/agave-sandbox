@@ -19,7 +19,6 @@ use {
             get_slot_and_append_vec_id, SnapshotStorageRebuilder,
         },
     },
-    bincode::Options,
     crossbeam_channel::{Receiver, Sender},
     dashmap::DashMap,
     log::*,
@@ -1318,18 +1317,15 @@ fn collect_obsolete_accounts(
 }
 
 fn serialize_obsolete_accounts(
-    bank_snapshot_dir: &Path,
+    bank_snapshot_dir: impl AsRef<Path>,
     obsolete_accounts_map: &HashMap<Slot, SerdeObsoleteAccounts>,
 ) -> Result<u64> {
-    let obsolete_accounts_path = bank_snapshot_dir.join(SNAPSHOT_OBSOLETE_ACCOUNTS_FILENAME);
+    let obsolete_accounts_path = bank_snapshot_dir.as_ref().join(SNAPSHOT_OBSOLETE_ACCOUNTS_FILENAME);
     let obsolete_accounts_file = fs::File::create(&obsolete_accounts_path)?;
     let mut file_stream = BufWriter::new(obsolete_accounts_file);
 
-    let bincode = bincode::DefaultOptions::new().with_fixint_encoding();
-    bincode.serialize_into(
-        &mut file_stream,
-        &serde_snapshot::utils::serialize_iter_as_tuple(obsolete_accounts_map.iter()),
-    )?;
+    serde_snapshot::serialize_obsolete_accounts(&mut file_stream, obsolete_accounts_map)?;
+
     file_stream.flush()?;
 
     let consumed_size = file_stream.stream_position()?;
@@ -1338,20 +1334,13 @@ fn serialize_obsolete_accounts(
 
 #[allow(dead_code)]
 fn deserialize_obsolete_accounts(
-    bank_snapshot_dir: &Path,
+    bank_snapshot_dir: impl AsRef<Path>,
 ) -> Result<DashMap<Slot, SerdeObsoleteAccounts>> {
-    let obsolete_accounts_path = bank_snapshot_dir.join(SNAPSHOT_OBSOLETE_ACCOUNTS_FILENAME);
+    let obsolete_accounts_path = bank_snapshot_dir.as_ref().join(SNAPSHOT_OBSOLETE_ACCOUNTS_FILENAME);
     let obsolete_accounts_file = fs::File::open(obsolete_accounts_path)?;
     let mut data_file_stream = BufReader::new(obsolete_accounts_file);
 
-    let obsolete_accounts = DashMap::default();
-    while let Ok((slot, accounts)) = {
-        bincode::deserialize_from::<&mut BufReader<fs::File>, (Slot, SerdeObsoleteAccounts)>(
-            &mut data_file_stream,
-        )
-    } {
-        obsolete_accounts.insert(slot, accounts);
-    }
+    let obsolete_accounts = serde_snapshot::deserialize_obsolete_accounts(&mut data_file_stream)?;
 
     Ok(obsolete_accounts)
 }
@@ -3651,47 +3640,6 @@ mod tests {
         for storage in &snapshot_storages {
             assert!(deserialized_accounts.contains_key(&storage.slot()));
             assert!(deserialized_accounts.get(&storage.slot()).unwrap().bytes == 0);
-        }
-    }
-
-    #[test_case(0, 0)]
-    #[test_case(1, 0)]
-    #[test_case(10, 15)]
-    fn test_serialize_and_deserialize_obsolete_accounts(
-        num_storages: u64,
-        num_accounts_per_storage: usize,
-    ) {
-        let temp_dir = TempDir::new().unwrap();
-        let bank_snapshot_dir = temp_dir.path();
-
-        // Create a sample obsolete accounts map
-        let mut obsolete_accounts_map = HashMap::new();
-        for slot in 1..=num_storages {
-            let obsolete_accounts = (0..num_accounts_per_storage)
-                .map(|j| (j, j * 10, slot + 1))
-                .collect();
-
-            obsolete_accounts_map.insert(
-                slot,
-                SerdeObsoleteAccounts {
-                    bytes: num_accounts_per_storage as u64 * 1000,
-                    id: slot as usize,
-                    accounts: obsolete_accounts,
-                },
-            );
-        }
-
-        // Serialize the obsolete accounts
-        serialize_obsolete_accounts(bank_snapshot_dir, &obsolete_accounts_map).unwrap();
-
-        // Deserialize the obsolete accounts
-        let deserialized_accounts = deserialize_obsolete_accounts(bank_snapshot_dir).unwrap();
-
-        // Verify the deserialized data matches the original
-        assert_eq!(deserialized_accounts.len(), obsolete_accounts_map.len());
-        for (slot, accounts) in obsolete_accounts_map {
-            let deserialized_accounts = deserialized_accounts.get(&slot).unwrap();
-            assert_eq!(accounts.accounts, deserialized_accounts.accounts);
         }
     }
 }

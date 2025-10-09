@@ -4,8 +4,10 @@ mod serde_snapshot_tests {
         crate::{
             bank::BankHashStats,
             serde_snapshot::{
-                deserialize_accounts_db_fields, reconstruct_accountsdb_from_fields,
-                remap_append_vec_file, SerializableAccountsDb, SnapshotAccountsDbFields,
+                deserialize_accounts_db_fields, deserialize_obsolete_accounts,
+                reconstruct_accountsdb_from_fields, remap_append_vec_file,
+                serialize_obsolete_accounts, SerdeObsoleteAccounts, SerializableAccountsDb,
+                SnapshotAccountsDbFields,
             },
             snapshot_utils::{get_storages_to_serialize, StorageAndNextAccountsFileId},
         },
@@ -30,8 +32,9 @@ mod serde_snapshot_tests {
         solana_nohash_hasher::BuildNoHashHasher,
         solana_pubkey::Pubkey,
         std::{
+            collections::HashMap,
             fs::File,
-            io::{self, BufReader, Cursor, Read, Write},
+            io::{self, BufReader, BufWriter, Cursor, Read, Write},
             ops::RangeFull,
             path::{Path, PathBuf},
             sync::{
@@ -936,5 +939,49 @@ mod serde_snapshot_tests {
             &num_collisions,
         )
         .unwrap();
+    }
+
+    #[test_case(0, 0)]
+    #[test_case(1, 0)]
+    #[test_case(10, 15)]
+    fn test_serialize_and_deserialize_obsolete_accounts(
+        num_storages: u64,
+        num_accounts_per_storage: usize,
+    ) {
+        // Create a sample obsolete accounts map
+        let mut obsolete_accounts_map = HashMap::new();
+        for slot in 1..=num_storages {
+            let obsolete_accounts = (0..num_accounts_per_storage)
+                .map(|j| (j, j * 10, slot + 1))
+                .collect();
+
+            obsolete_accounts_map.insert(
+                slot,
+                SerdeObsoleteAccounts {
+                    bytes: num_accounts_per_storage as u64 * 1000,
+                    id: slot as usize,
+                    accounts: obsolete_accounts,
+                },
+            );
+        }
+
+        // Serialize the obsolete accounts
+        let mut buf = Vec::new();
+        let cursor = Cursor::new(&mut buf);
+        let mut writer = BufWriter::new(cursor);
+        serialize_obsolete_accounts(&mut writer, &obsolete_accounts_map).unwrap();
+        drop(writer);
+
+        // Deserialize the obsolete accounts
+        let cursor = Cursor::new(buf.as_slice());
+        let mut reader = BufReader::new(cursor);
+        let deserialized_accounts = deserialize_obsolete_accounts(&mut reader).unwrap();
+
+        // Verify the deserialized data matches the original
+        assert_eq!(deserialized_accounts.len(), obsolete_accounts_map.len());
+        for (slot, accounts) in obsolete_accounts_map {
+            let deserialized_accounts = deserialized_accounts.get(&slot).unwrap();
+            assert_eq!(accounts.accounts, deserialized_accounts.accounts);
+        }
     }
 }
