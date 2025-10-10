@@ -1364,7 +1364,8 @@ fn deserialize_obsolete_accounts(
     let obsolete_accounts_file_metadata = fs::metadata(&obsolete_accounts_path)?;
     if obsolete_accounts_file_metadata.len() > maximum_obsolete_accounts_file_size {
         let error_message = format!(
-            "too large obsolete accounts file to deserialize: '{}' has {} bytes (max size is {} bytes)",
+            "too large obsolete accounts file to deserialize: '{}' has {} bytes (max size is {} \
+             bytes)",
             obsolete_accounts_path.display(),
             obsolete_accounts_file_metadata.len(),
             MAX_OBSOLETE_ACCOUNTS_FILE_SIZE,
