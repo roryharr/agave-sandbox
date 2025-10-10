@@ -12,7 +12,7 @@ pub struct ObsoleteAccountItem {
 
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct ObsoleteAccounts {
-   pub accounts: Vec<ObsoleteAccountItem>,
+    pub accounts: Vec<ObsoleteAccountItem>,
 }
 
 impl ObsoleteAccounts {
@@ -146,7 +146,8 @@ mod tests {
         assert_eq!(obsolete_accounts_for_snapshots.accounts, expected_accounts);
 
         // Filter accounts obsolete passing in no slot (i.e., all obsolete accounts)
-        let obsolete_accounts_for_snapshots = obsolete_accounts.obsolete_accounts_for_snapshots(100);
+        let obsolete_accounts_for_snapshots =
+            obsolete_accounts.obsolete_accounts_for_snapshots(100);
 
         assert_eq!(obsolete_accounts_for_snapshots.accounts, new_accounts);
     }
