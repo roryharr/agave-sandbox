@@ -12,6 +12,11 @@ use {
 };
 
 /// This structure handles the load/store of obsolete accounts during snapshot restoration.
+#[cfg_attr(
+    feature = "frozen-abi",
+    derive(AbiExample),
+    frozen_abi(digest = "gdRJ8jL5YUArjpxF46N82NMsZ2NZ9sL3y4DJS6onxat")
+)]
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub(crate) struct SerdeObsoleteAccounts {
     /// The ID of the associated account file. Used for verification to ensure the restored
