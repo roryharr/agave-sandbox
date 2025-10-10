@@ -72,6 +72,7 @@ where
 
     Ok(obsolete_accounts)
 }
+
 #[cfg(test)]
 mod test {
     use {
