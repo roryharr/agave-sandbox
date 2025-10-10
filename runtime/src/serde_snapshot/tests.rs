@@ -946,19 +946,19 @@ mod serde_snapshot_tests {
     #[test_case(10, 15)]
     fn test_serialize_and_deserialize_obsolete_accounts(
         num_storages: u64,
-        num_accounts_per_storage: usize,
+        num_obsolete_accounts_per_storage: usize,
     ) {
         // Create a sample obsolete accounts map
         let mut obsolete_accounts_map = HashMap::new();
         for slot in 1..=num_storages {
-            let obsolete_accounts = (0..num_accounts_per_storage)
+            let obsolete_accounts = (0..num_obsolete_accounts_per_storage)
                 .map(|j| (j, j * 10, slot + 1))
                 .collect();
 
             obsolete_accounts_map.insert(
                 slot,
                 SerdeObsoleteAccounts {
-                    bytes: num_accounts_per_storage as u64 * 1000,
+                    bytes: num_obsolete_accounts_per_storage as u64 * 1000,
                     id: slot as usize,
                     accounts: obsolete_accounts,
                 },
@@ -975,13 +975,19 @@ mod serde_snapshot_tests {
         // Deserialize the obsolete accounts
         let cursor = Cursor::new(buf.as_slice());
         let mut reader = BufReader::new(cursor);
-        let deserialized_accounts = deserialize_obsolete_accounts(&mut reader).unwrap();
+        let deserialized_obsolete_accounts = deserialize_obsolete_accounts(&mut reader).unwrap();
 
         // Verify the deserialized data matches the original
-        assert_eq!(deserialized_accounts.len(), obsolete_accounts_map.len());
-        for (slot, accounts) in obsolete_accounts_map {
-            let deserialized_accounts = deserialized_accounts.get(&slot).unwrap();
-            assert_eq!(accounts.accounts, deserialized_accounts.accounts);
+        assert_eq!(
+            deserialized_obsolete_accounts.len(),
+            obsolete_accounts_map.len()
+        );
+        for (slot, obsolete_accounts) in obsolete_accounts_map {
+            let deserialized_obsolete_accounts = deserialized_obsolete_accounts.get(&slot).unwrap();
+            assert_eq!(
+                obsolete_accounts.accounts,
+                deserialized_obsolete_accounts.accounts
+            );
         }
     }
 }

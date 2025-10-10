@@ -1294,7 +1294,7 @@ fn do_get_highest_bank_snapshot(
 }
 
 pub fn write_obsolete_accounts_to_snapshot(
-    bank_snapshot_dir: &Path,
+    bank_snapshot_dir: impl AsRef<Path>,
     snapshot_storages: &[Arc<AccountStorageEntry>],
     snapshot_slot: Slot,
 ) -> Result<u64> {

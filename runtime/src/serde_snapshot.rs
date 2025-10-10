@@ -11,7 +11,6 @@ use {
         stakes::{serialize_stake_accounts_to_delegation_format, Stakes},
     },
     bincode::{self, config::Options, Error},
-    dashmap::DashMap,
     log::*,
     serde::{de::DeserializeOwned, Deserialize, Serialize},
     solana_accounts_db::{
@@ -55,15 +54,19 @@ use {
     types::SerdeAccountsLtHash,
 };
 
+mod obsolete_accounts;
 mod status_cache;
 mod storage;
 mod tests;
 mod types;
-pub mod utils;
+mod utils;
 
 pub(crate) use {
+    obsolete_accounts::{
+        deserialize_obsolete_accounts, serialize_obsolete_accounts, SerdeObsoleteAccounts,
+    },
     status_cache::{deserialize_status_cache, serialize_status_cache},
-    storage::{SerdeObsoleteAccounts, SerializableAccountStorageEntry, SerializedAccountsFileId},
+    storage::{SerializableAccountStorageEntry, SerializedAccountsFileId},
 };
 
 const MAX_STREAM_SIZE: u64 = 32 * 1024 * 1024 * 1024;
@@ -648,34 +651,6 @@ where
         write_version,
     };
     (serializable_bank, serializable_accounts_db, extra_fields).serialize(serializer)
-}
-
-pub(crate) fn serialize_obsolete_accounts<W>(
-    stream: &mut BufWriter<W>,
-    obsolete_accounts_map: &HashMap<Slot, SerdeObsoleteAccounts>,
-) -> Result<(), Error>
-where
-    W: Write,
-{
-    let bincode = bincode::DefaultOptions::new().with_fixint_encoding();
-    bincode.serialize_into(
-        stream,
-        &utils::serialize_iter_as_tuple(obsolete_accounts_map.iter()),
-    )
-}
-
-pub(crate) fn deserialize_obsolete_accounts<R>(
-    stream: &mut BufReader<R>,
-) -> Result<DashMap<Slot, SerdeObsoleteAccounts>, Error>
-where
-    R: Read,
-{
-    let obsolete_accounts = DashMap::default();
-    while let Ok((slot, accounts)) = { deserialize_from(&mut *stream) } {
-        obsolete_accounts.insert(slot, accounts);
-    }
-
-    Ok(obsolete_accounts)
 }
 
 #[cfg(test)]
