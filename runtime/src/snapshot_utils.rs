@@ -1304,7 +1304,11 @@ pub fn write_obsolete_accounts_to_snapshot(
     snapshot_slot: Slot,
 ) -> Result<u64> {
     let obsolete_accounts = collect_obsolete_accounts(snapshot_storages, snapshot_slot);
-    serialize_obsolete_accounts(bank_snapshot_dir, &obsolete_accounts, MAX_OBSOLETE_ACCOUNTS_FILE_SIZE)
+    serialize_obsolete_accounts(
+        bank_snapshot_dir,
+        &obsolete_accounts,
+        MAX_OBSOLETE_ACCOUNTS_FILE_SIZE,
+    )
 }
 
 fn collect_obsolete_accounts(
@@ -3663,7 +3667,9 @@ mod tests {
             .unwrap();
 
         // Deserialize
-        let deserialized_accounts = deserialize_obsolete_accounts(bank_snapshot_dir, MAX_OBSOLETE_ACCOUNTS_FILE_SIZE).unwrap();
+        let deserialized_accounts =
+            deserialize_obsolete_accounts(bank_snapshot_dir, MAX_OBSOLETE_ACCOUNTS_FILE_SIZE)
+                .unwrap();
 
         // Verify
         assert_eq!(deserialized_accounts.len(), num_storages as usize);
