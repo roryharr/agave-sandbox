@@ -68,6 +68,11 @@ pub const SNAPSHOT_STORAGES_FLUSHED_FILENAME: &str = "storages_flushed";
 pub const SNAPSHOT_ACCOUNTS_HARDLINKS: &str = "accounts_hardlinks";
 pub const SNAPSHOT_ARCHIVE_DOWNLOAD_DIR: &str = "remote";
 pub const SNAPSHOT_OBSOLETE_ACCOUNTS_FILENAME: &str = "obsolete_accounts";
+/// Limit the size of the obsolete accounts file
+/// If it exceeds this limit, remove the file which will force restore from archives
+/// Limit is set assuming 24 bytes per entry, 5% of 10 billion accounts
+/// = 500 million entries * 24 bytes = 12 GB
+pub const MAX_OBSOLETE_ACCOUNTS_FILE_SIZE: u64 = 1024 * 1024 * 1024 * 12; // 12 GB
 /// No longer checked in version v3.1. Can be removed in v3.2
 pub const SNAPSHOT_FULL_SNAPSHOT_SLOT_FILENAME: &str = "full_snapshot_slot";
 /// When a snapshot is taken of a bank, the state is serialized under this directory.
@@ -1285,18 +1290,22 @@ fn do_get_highest_bank_snapshot(
 }
 
 pub fn write_obsolete_accounts_to_snapshot(
-    bank_snapshot_dir: &Path,
+    bank_snapshot_dir: impl AsRef<Path>,
     snapshot_storages: &[Arc<AccountStorageEntry>],
     snapshot_slot: Slot,
 ) -> Result<u64> {
     let obsolete_accounts = collect_obsolete_accounts(snapshot_storages, snapshot_slot);
-    serialize_obsolete_accounts(bank_snapshot_dir, &obsolete_accounts)
+    serialize_obsolete_accounts(
+        bank_snapshot_dir,
+        &obsolete_accounts,
+        MAX_OBSOLETE_ACCOUNTS_FILE_SIZE,
+    )
 }
 
 fn collect_obsolete_accounts(
     snapshot_storages: &[Arc<AccountStorageEntry>],
     snapshot_slot: Slot,
-) -> HashMap<Slot, SerdeObsoleteAccounts> {
+) -> DashMap<Slot, SerdeObsoleteAccounts> {
     snapshot_storages
         .iter()
         .map(|storage| {
@@ -1308,37 +1317,55 @@ fn collect_obsolete_accounts(
 }
 
 fn serialize_obsolete_accounts(
-    bank_snapshot_dir: &Path,
-    obsolete_accounts_map: &HashMap<Slot, SerdeObsoleteAccounts>,
+    bank_snapshot_dir: impl AsRef<Path>,
+    obsolete_accounts_map: &DashMap<Slot, SerdeObsoleteAccounts>,
+    maximum_obsolete_accounts_file_size: u64,
 ) -> Result<u64> {
-    let obsolete_accounts_path = bank_snapshot_dir.join(SNAPSHOT_OBSOLETE_ACCOUNTS_FILENAME);
+    let obsolete_accounts_path = bank_snapshot_dir
+        .as_ref()
+        .join(SNAPSHOT_OBSOLETE_ACCOUNTS_FILENAME);
     let obsolete_accounts_file = fs::File::create(&obsolete_accounts_path)?;
     let mut file_stream = BufWriter::new(obsolete_accounts_file);
 
-    for (slot, obsolete_accounts) in obsolete_accounts_map {
-        bincode::serialize_into(&mut file_stream, &(slot, obsolete_accounts))?;
-    }
+    serde_snapshot::serialize_obsolete_accounts(&mut file_stream, obsolete_accounts_map)?;
+
     file_stream.flush()?;
 
     let consumed_size = file_stream.stream_position()?;
+    if consumed_size > maximum_obsolete_accounts_file_size {
+        let error_message = format!(
+            "too large obsolete accounts file to serialize: '{}' has {consumed_size} bytes",
+            obsolete_accounts_path.display(),
+        );
+        return Err(IoError::other(error_message).into());
+    }
     Ok(consumed_size)
 }
 
 fn deserialize_obsolete_accounts(
-    bank_snapshot_dir: &Path,
+    bank_snapshot_dir: impl AsRef<Path>,
+    maximum_obsolete_accounts_file_size: u64,
 ) -> Result<DashMap<Slot, SerdeObsoleteAccounts>> {
-    let obsolete_accounts_path = bank_snapshot_dir.join(SNAPSHOT_OBSOLETE_ACCOUNTS_FILENAME);
-    let obsolete_accounts_file = fs::File::open(obsolete_accounts_path)?;
+    let obsolete_accounts_path = bank_snapshot_dir
+        .as_ref()
+        .join(SNAPSHOT_OBSOLETE_ACCOUNTS_FILENAME);
+    let obsolete_accounts_file = fs::File::open(&obsolete_accounts_path)?;
+    // If the file is too large return error
+    let obsolete_accounts_file_metadata = fs::metadata(&obsolete_accounts_path)?;
+    if obsolete_accounts_file_metadata.len() > maximum_obsolete_accounts_file_size {
+        let error_message = format!(
+            "too large obsolete accounts file to deserialize: '{}' has {} bytes (max size is {} \
+             bytes)",
+            obsolete_accounts_path.display(),
+            obsolete_accounts_file_metadata.len(),
+            MAX_OBSOLETE_ACCOUNTS_FILE_SIZE,
+        );
+        return Err(IoError::other(error_message).into());
+    }
+
     let mut data_file_stream = BufReader::new(obsolete_accounts_file);
 
-    let obsolete_accounts = DashMap::default();
-    while let Ok((slot, accounts)) = {
-        bincode::deserialize_from::<&mut BufReader<fs::File>, (Slot, SerdeObsoleteAccounts)>(
-            &mut data_file_stream,
-        )
-    } {
-        obsolete_accounts.insert(slot, accounts);
-    }
+    let obsolete_accounts = serde_snapshot::deserialize_obsolete_accounts(&mut data_file_stream)?;
 
     Ok(obsolete_accounts)
 }
@@ -2009,12 +2036,13 @@ pub fn rebuild_storages_from_snapshot_dir(
         .is_some_and(|fastboot_version| fastboot_version.major >= 2)
     {
         Some(
-            deserialize_obsolete_accounts(bank_snapshot_dir).map_err(|err| {
-                IoError::other(format!(
-                    "failed to read obsolete accounts file '{}': {err}",
-                    bank_snapshot_dir.display()
-                ))
-            })?,
+            deserialize_obsolete_accounts(bank_snapshot_dir, MAX_OBSOLETE_ACCOUNTS_FILE_SIZE)
+                .map_err(|err| {
+                    IoError::other(format!(
+                        "failed to read obsolete accounts file '{}': {err}",
+                        bank_snapshot_dir.display()
+                    ))
+                })?,
         )
     } else {
         None
@@ -2644,7 +2672,7 @@ mod tests {
         super::*,
         assert_matches::assert_matches,
         bincode::{deserialize_from, serialize_into},
-        solana_accounts_db::{accounts_file::AccountsFileProvider, ObsoleteAccounts},
+        solana_accounts_db::accounts_file::AccountsFileProvider,
         std::{convert::TryFrom, mem::size_of},
         tempfile::NamedTempFile,
         test_case::test_case,
@@ -3649,7 +3677,9 @@ mod tests {
             .unwrap();
 
         // Deserialize
-        let deserialized_accounts = deserialize_obsolete_accounts(bank_snapshot_dir).unwrap();
+        let deserialized_accounts =
+            deserialize_obsolete_accounts(bank_snapshot_dir, MAX_OBSOLETE_ACCOUNTS_FILE_SIZE)
+                .unwrap();
 
         // Verify
         assert_eq!(deserialized_accounts.len(), num_storages as usize);
@@ -3659,44 +3689,34 @@ mod tests {
         }
     }
 
-    #[test_case(0, 0)]
-    #[test_case(1, 0)]
-    #[test_case(10, 15)]
-    fn test_serialize_and_deserialize_obsolete_accounts(
-        num_storages: u64,
-        num_accounts_per_storage: usize,
-    ) {
-        let temp_dir = TempDir::new().unwrap();
+    #[test]
+    fn test_serialize_obsolete_accounts_too_large_file() {
+        let temp_dir = tempfile::tempdir().unwrap();
         let bank_snapshot_dir = temp_dir.path();
+        let num_storages = 10;
+        let snapshot_slot = num_storages + 1 as Slot;
 
-        // Create a sample obsolete accounts map
-        let mut obsolete_accounts_map = HashMap::new();
-        for slot in 1..=num_storages {
-            let mut obsolete_accounts = ObsoleteAccounts::default();
-            let accounts = (0..num_accounts_per_storage).map(|j| (j, j * 10));
-            obsolete_accounts.mark_accounts_obsolete(accounts, slot + 1);
-
-            obsolete_accounts_map.insert(
-                slot,
-                SerdeObsoleteAccounts {
-                    bytes: num_accounts_per_storage as u64 * 1000,
-                    id: slot as usize,
-                    accounts: obsolete_accounts,
-                },
-            );
+        // Create AccountStorageEntries
+        let mut snapshot_storages = Vec::new();
+        for i in 0..num_storages {
+            let storage = Arc::new(AccountStorageEntry::new(
+                &PathBuf::new(),
+                i,        // Incrementing slot
+                i as u32, // Incrementing id
+                1024,
+                AccountsFileProvider::AppendVec,
+                StorageAccess::File,
+            ));
+            snapshot_storages.push(storage);
         }
 
-        // Serialize the obsolete accounts
-        serialize_obsolete_accounts(bank_snapshot_dir, &obsolete_accounts_map).unwrap();
+        // write obsolete accounts to snapshot
+        let obsolete_accounts = collect_obsolete_accounts(&snapshot_storages, snapshot_slot);
 
-        // Deserialize the obsolete accounts
-        let deserialized_accounts = deserialize_obsolete_accounts(bank_snapshot_dir).unwrap();
+        // Limit the file size to something low for the test
+        let result = serialize_obsolete_accounts(bank_snapshot_dir, &obsolete_accounts, 100);
 
-        // Verify the deserialized data matches the original
-        assert_eq!(deserialized_accounts.len(), obsolete_accounts_map.len());
-        for (slot, accounts) in obsolete_accounts_map {
-            let deserialized_accounts = deserialized_accounts.get(&slot).unwrap();
-            assert_eq!(accounts.accounts, deserialized_accounts.accounts);
-        }
+        // Ensure the function returns an error
+        assert!(result.is_err());
     }
 }
