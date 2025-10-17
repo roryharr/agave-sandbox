@@ -7070,7 +7070,7 @@ fn test_block_limits() {
 
 #[test]
 fn test_program_replacement() {
-    let mut bank = create_simple_test_bank(0);
+    let bank = create_simple_test_bank(0);
 
     // Setup original program account
     let old_address = Pubkey::new_unique();

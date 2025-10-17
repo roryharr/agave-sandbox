@@ -77,7 +77,6 @@ use {
     solana_nohash_hasher::{BuildNoHashHasher, IntMap, IntSet},
     solana_pubkey::Pubkey,
     solana_rayon_threadlimit::get_thread_count,
-    solana_transaction::sanitized::SanitizedTransaction,
     std::{
         borrow::Cow,
         boxed::Box,
@@ -5364,6 +5363,41 @@ impl AccountsDb {
     /// Updates the accounts index with the given `infos` and `accounts`.
     /// Returns a vector of `SlotList<AccountInfo>` containing the reclaims for each batch processed.
     /// The element of the returned vector is guaranteed to be non-empty.
+    fn update_index_cached<'a>(
+        &self,
+        accounts: &impl StorableAccounts<'a>,
+        update_index_thread_selection: UpdateIndexThreadSelection,
+        thread_pool: &ThreadPool,
+    ) {
+        let target_slot = accounts.target_slot();
+        let info = AccountInfo::new(StorageLocation::Cached, false);
+
+        let update = |index| {
+            accounts.account(index, |account| {
+                self.accounts_index.upsert_cached(
+                    target_slot,
+                    account.pubkey(),
+                    &account,
+                    &self.account_indexes,
+                    info,
+                );
+            });
+        };
+
+        if matches!(
+            update_index_thread_selection,
+            UpdateIndexThreadSelection::PoolWithThreshold,
+        ) && accounts.len() > 1
+        {
+            thread_pool.install(|| (0..accounts.len()).into_par_iter().for_each(update));
+        } else {
+            (0..accounts.len()).for_each(update);
+        }
+    }
+
+    /// Updates the accounts index with the given `infos` and `accounts`.
+    /// Returns a vector of `SlotList<AccountInfo>` containing the reclaims for each batch processed.
+    /// The element of the returned vector is guaranteed to be non-empty.
     fn update_index<'a>(
         &self,
         infos: Vec<AccountInfo>,
@@ -5788,7 +5822,6 @@ impl AccountsDb {
     pub(crate) fn store_accounts_unfrozen<'a>(
         &self,
         accounts: impl StorableAccounts<'a>,
-        transactions: Option<&'a [&'a SanitizedTransaction]>,
         update_index_thread_selection: UpdateIndexThreadSelection,
     ) {
         // If all transactions in a batch are errored,
@@ -5797,18 +5830,9 @@ impl AccountsDb {
             return;
         }
 
-        let mut total_data = 0;
-        (0..accounts.len()).for_each(|index| {
-            total_data += accounts.data_len(index);
-        });
-
-        self.stats
-            .store_total_data
-            .fetch_add(total_data as u64, Ordering::Relaxed);
-
         // Store the accounts in the write cache
         let mut store_accounts_time = Measure::start("store_accounts");
-        let infos = self.write_accounts_to_cache(accounts.target_slot(), &accounts, transactions);
+        self.write_accounts_to_cache(accounts.target_slot(), &accounts);
         store_accounts_time.stop();
         self.stats
             .store_accounts
@@ -5817,10 +5841,8 @@ impl AccountsDb {
         // Update the index
         let mut update_index_time = Measure::start("update_index");
 
-        self.update_index(
-            infos,
+        self.update_index_cached(
             &accounts,
-            UpsertReclaim::PreviousSlotEntryWasCached,
             update_index_thread_selection,
             &self.thread_pool_foreground,
         );
@@ -5957,38 +5979,14 @@ impl AccountsDb {
         &self,
         slot: Slot,
         accounts_and_meta_to_store: &impl StorableAccounts<'b>,
-        txs: Option<&[&SanitizedTransaction]>,
-    ) -> Vec<AccountInfo> {
-        let mut current_write_version = if self.accounts_update_notifier.is_some() {
-            self.write_version
-                .fetch_add(accounts_and_meta_to_store.len() as u64, Ordering::AcqRel)
-        } else {
-            0
-        };
-
-        (0..accounts_and_meta_to_store.len())
-            .map(|index| {
-                let txn = txs.map(|txs| *txs.get(index).expect("txs must be present if provided"));
-                accounts_and_meta_to_store.account_default_if_zero_lamport(index, |account| {
-                    let account_shared_data = account.to_account_shared_data();
-                    let pubkey = account.pubkey();
-                    let account_info =
-                        AccountInfo::new(StorageLocation::Cached, account.is_zero_lamport());
-
-                    self.notify_account_at_accounts_update(
-                        slot,
-                        &account_shared_data,
-                        &txn,
-                        pubkey,
-                        current_write_version,
-                    );
-                    current_write_version = current_write_version.saturating_add(1);
-
-                    self.accounts_cache.store(slot, pubkey, account_shared_data);
-                    account_info
-                })
-            })
-            .collect()
+    ) {
+        for index in 0..accounts_and_meta_to_store.len() {
+            accounts_and_meta_to_store.account_default_if_zero_lamport(index, |account| {
+                let account_shared_data = account.to_account_shared_data();
+                let pubkey = account.pubkey();
+                self.accounts_cache.store(slot, pubkey, account_shared_data);
+            });
+        }
     }
 
     fn write_accounts_to_storage<'a>(
@@ -7303,11 +7301,7 @@ impl AccountsDb {
 
     /// callers used to call store_uncached. But, this is not allowed anymore.
     pub fn store_for_tests<'a>(&self, accounts: impl StorableAccounts<'a>) {
-        self.store_accounts_unfrozen(
-            accounts,
-            None,
-            UpdateIndexThreadSelection::PoolWithThreshold,
-        );
+        self.store_accounts_unfrozen(accounts, UpdateIndexThreadSelection::PoolWithThreshold);
     }
 
     #[allow(clippy::needless_range_loop)]

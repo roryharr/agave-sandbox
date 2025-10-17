@@ -481,6 +481,14 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
         current.set_dirty(true);
     }
 
+    pub fn upsert_cached(&self, pubkey: &Pubkey, new_value: PreAllocatedAccountMapEntry<T>) {
+        let (slot, account_info) = new_value.into();
+        self.get_or_create_index_entry_for_pubkey(pubkey, |entry| {
+            Self::cache_entry_at_slot(entry, (slot, account_info));
+            self.set_age_to_future(entry, true);
+        });
+    }
+
     pub fn upsert(
         &self,
         pubkey: &Pubkey,

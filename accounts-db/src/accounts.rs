@@ -23,7 +23,6 @@ use {
     solana_svm_transaction::{
         message_address_table_lookup::SVMMessageAddressTableLookup, svm_message::SVMMessage,
     },
-    solana_transaction::sanitized::SanitizedTransaction,
     solana_transaction_context::transaction_accounts::KeyedAccountSharedData,
     solana_transaction_error::TransactionResult as Result,
     std::{
@@ -550,32 +549,18 @@ impl Accounts {
     ///
     /// This version updates the accounts index sequentially,
     /// using the same thread that calls the fn itself.
-    pub fn store_accounts_seq<'a>(
-        &self,
-        accounts: impl StorableAccounts<'a>,
-        transactions: Option<&'a [&'a SanitizedTransaction]>,
-    ) {
-        self.accounts_db.store_accounts_unfrozen(
-            accounts,
-            transactions,
-            UpdateIndexThreadSelection::Inline,
-        );
+    pub fn store_accounts_seq<'a>(&self, accounts: impl StorableAccounts<'a>) {
+        self.accounts_db
+            .store_accounts_unfrozen(accounts, UpdateIndexThreadSelection::Inline);
     }
 
     /// Store `accounts` into the DB
     ///
     /// This version updates the accounts index in parallel,
     /// using the foreground AccountsDb thread pool.
-    pub fn store_accounts_par<'a>(
-        &self,
-        accounts: impl StorableAccounts<'a>,
-        transactions: Option<&'a [&'a SanitizedTransaction]>,
-    ) {
-        self.accounts_db.store_accounts_unfrozen(
-            accounts,
-            transactions,
-            UpdateIndexThreadSelection::PoolWithThreshold,
-        );
+    pub fn store_accounts_par<'a>(&self, accounts: impl StorableAccounts<'a>) {
+        self.accounts_db
+            .store_accounts_unfrozen(accounts, UpdateIndexThreadSelection::PoolWithThreshold);
     }
 
     /// Add a slot to root.  Root slots cannot be purged
@@ -601,7 +586,9 @@ mod tests {
         solana_sdk_ids::native_loader,
         solana_signature::Signature,
         solana_signer::{signers::Signers, Signer},
-        solana_transaction::{sanitized::MAX_TX_ACCOUNT_LOCKS, Transaction},
+        solana_transaction::{
+            sanitized::SanitizedTransaction, sanitized::MAX_TX_ACCOUNT_LOCKS, Transaction,
+        },
         solana_transaction_error::TransactionError,
         std::{
             borrow::Cow,

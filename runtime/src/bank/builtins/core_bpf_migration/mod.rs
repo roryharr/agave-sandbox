@@ -374,7 +374,7 @@ impl Bank {
     }
 
     fn update_captalization(
-        &mut self,
+        &self,
         lamports_to_burn: u64,
         lamports_to_fund: u64,
     ) -> Result<(), CoreBpfMigrationError> {

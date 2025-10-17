@@ -1,5 +1,4 @@
 use {
-    core::borrow::Borrow,
     solana_account::AccountSharedData,
     solana_pubkey::Pubkey,
     solana_svm::{
@@ -10,7 +9,6 @@ use {
         },
     },
     solana_svm_transaction::svm_message::SVMMessage,
-    solana_transaction::sanitized::SanitizedTransaction,
     solana_transaction_context::transaction_accounts::KeyedAccountSharedData,
 };
 
@@ -50,62 +48,42 @@ fn max_number_of_accounts_to_collect(
 // be useless.
 pub fn collect_accounts_to_store<'a, T: SVMMessage>(
     txs: &'a [T],
-    txs_refs: &'a Option<Vec<impl Borrow<SanitizedTransaction>>>,
     processing_results: &'a [TransactionProcessingResult],
-) -> (
-    Vec<(&'a Pubkey, &'a AccountSharedData)>,
-    Option<Vec<&'a SanitizedTransaction>>,
-) {
+) -> Vec<(&'a Pubkey, &'a AccountSharedData)> {
     let collect_capacity = max_number_of_accounts_to_collect(txs, processing_results);
     let mut accounts = Vec::with_capacity(collect_capacity);
-    let mut transactions = txs_refs
-        .is_some()
-        .then(|| Vec::with_capacity(collect_capacity));
-    for (index, (processing_result, transaction)) in processing_results.iter().zip(txs).enumerate()
-    {
+    for (processing_result, transaction) in processing_results.iter().zip(txs) {
         let Some(processed_tx) = processing_result.processed_transaction() else {
             // Don't store any accounts if tx wasn't executed
             continue;
         };
 
-        let transaction_ref = txs_refs.as_ref().map(|txs_refs| txs_refs[index].borrow());
         match processed_tx {
             ProcessedTransaction::Executed(executed_tx) => {
                 if executed_tx.execution_details.status.is_ok() {
                     collect_accounts_for_successful_tx(
                         &mut accounts,
-                        &mut transactions,
                         transaction,
-                        transaction_ref,
                         &executed_tx.loaded_transaction.accounts,
                     );
                 } else {
                     collect_accounts_for_failed_tx(
                         &mut accounts,
-                        &mut transactions,
-                        transaction_ref,
                         &executed_tx.loaded_transaction.rollback_accounts,
                     );
                 }
             }
             ProcessedTransaction::FeesOnly(fees_only_tx) => {
-                collect_accounts_for_failed_tx(
-                    &mut accounts,
-                    &mut transactions,
-                    transaction_ref,
-                    &fees_only_tx.rollback_accounts,
-                );
+                collect_accounts_for_failed_tx(&mut accounts, &fees_only_tx.rollback_accounts);
             }
         }
     }
-    (accounts, transactions)
+    accounts
 }
 
 fn collect_accounts_for_successful_tx<'a, T: SVMMessage>(
     collected_accounts: &mut Vec<(&'a Pubkey, &'a AccountSharedData)>,
-    collected_account_transactions: &mut Option<Vec<&'a SanitizedTransaction>>,
     transaction: &'a T,
-    transaction_ref: Option<&'a SanitizedTransaction>,
     transaction_accounts: &'a [KeyedAccountSharedData],
 ) {
     for (i, (address, account)) in (0..transaction.account_keys().len()).zip(transaction_accounts) {
@@ -122,25 +100,15 @@ fn collect_accounts_for_successful_tx<'a, T: SVMMessage>(
         }
 
         collected_accounts.push((address, account));
-        if let Some(collected_account_transactions) = collected_account_transactions {
-            collected_account_transactions
-                .push(transaction_ref.expect("transaction ref must exist if collecting"));
-        }
     }
 }
 
 fn collect_accounts_for_failed_tx<'a>(
     collected_accounts: &mut Vec<(&'a Pubkey, &'a AccountSharedData)>,
-    collected_account_transactions: &mut Option<Vec<&'a SanitizedTransaction>>,
-    transaction_ref: Option<&'a SanitizedTransaction>,
     rollback_accounts: &'a RollbackAccounts,
 ) {
     for (address, account) in rollback_accounts {
         collected_accounts.push((address, account));
-        if let Some(collected_account_transactions) = collected_account_transactions {
-            collected_account_transactions
-                .push(transaction_ref.expect("transaction ref must exist if collecting"));
-        }
     }
 }
 
@@ -269,27 +237,15 @@ mod tests {
         let max_collected_accounts = max_number_of_accounts_to_collect(&txs, &processing_results);
         assert_eq!(max_collected_accounts, 2);
 
-        for collect_transactions in [false, true] {
-            let transaction_refs = collect_transactions.then(|| txs.iter().collect::<Vec<_>>());
-            let (collected_accounts, transactions) =
-                collect_accounts_to_store(&txs, &transaction_refs, &processing_results);
-            assert_eq!(collected_accounts.len(), 2);
-            assert!(collected_accounts
-                .iter()
-                .any(|(pubkey, _account)| *pubkey == &keypair0.pubkey()));
-            assert!(collected_accounts
-                .iter()
-                .any(|(pubkey, _account)| *pubkey == &keypair1.pubkey()));
+        let collected_accounts = collect_accounts_to_store(&txs, &processing_results);
+        assert_eq!(collected_accounts.len(), 2);
+        assert!(collected_accounts
+            .iter()
+            .any(|(pubkey, _account)| *pubkey == &keypair0.pubkey()));
+        assert!(collected_accounts
+            .iter()
+            .any(|(pubkey, _account)| *pubkey == &keypair1.pubkey()));
 
-            if collect_transactions {
-                let transactions = transactions.unwrap();
-                assert_eq!(transactions.len(), 2);
-                assert!(transactions.iter().any(|txn| (*txn).eq(&tx0)));
-                assert!(transactions.iter().any(|txn| (*txn).eq(&tx1)));
-            } else {
-                assert!(transactions.is_none());
-            }
-        }
     }
 
     #[test]
@@ -333,28 +289,17 @@ mod tests {
         let max_collected_accounts = max_number_of_accounts_to_collect(&txs, &processing_results);
         assert_eq!(max_collected_accounts, 1);
 
-        for collect_transactions in [false, true] {
-            let transaction_refs = collect_transactions.then(|| txs.iter().collect::<Vec<_>>());
-            let (collected_accounts, transactions) =
-                collect_accounts_to_store(&txs, &transaction_refs, &processing_results);
-            assert_eq!(collected_accounts.len(), 1);
-            assert_eq!(
-                collected_accounts
-                    .iter()
-                    .find(|(pubkey, _account)| *pubkey == &from_address)
-                    .map(|(_pubkey, account)| *account)
-                    .cloned()
-                    .unwrap(),
-                from_account_pre,
-            );
-
-            if collect_transactions {
-                let transactions = transactions.unwrap();
-                assert_eq!(transactions.len(), collected_accounts.len());
-            } else {
-                assert!(transactions.is_none());
-            }
-        }
+        let collected_accounts = collect_accounts_to_store(&txs, &processing_results);
+        assert_eq!(collected_accounts.len(), 1);
+        assert_eq!(
+            collected_accounts
+                .iter()
+                .find(|(pubkey, _account)| *pubkey == &from_address)
+                .map(|(_pubkey, account)| *account)
+                .cloned()
+                .unwrap(),
+            from_account_pre,
+        );
     }
 
     #[test]
@@ -425,43 +370,32 @@ mod tests {
         let max_collected_accounts = max_number_of_accounts_to_collect(&txs, &processing_results);
         assert_eq!(max_collected_accounts, 2);
 
-        for collect_transactions in [false, true] {
-            let transaction_refs = collect_transactions.then(|| txs.iter().collect::<Vec<_>>());
-            let (collected_accounts, transactions) =
-                collect_accounts_to_store(&txs, &transaction_refs, &processing_results);
-            assert_eq!(collected_accounts.len(), 2);
-            assert_eq!(
-                collected_accounts
-                    .iter()
-                    .find(|(pubkey, _account)| *pubkey == &from_address)
-                    .map(|(_pubkey, account)| *account)
-                    .cloned()
-                    .unwrap(),
-                from_account_pre,
-            );
-            let collected_nonce_account = collected_accounts
+        let collected_accounts = collect_accounts_to_store(&txs, &processing_results);
+        assert_eq!(collected_accounts.len(), 2);
+        assert_eq!(
+            collected_accounts
                 .iter()
-                .find(|(pubkey, _account)| *pubkey == &nonce_address)
+                .find(|(pubkey, _account)| *pubkey == &from_address)
                 .map(|(_pubkey, account)| *account)
                 .cloned()
-                .unwrap();
-            assert_eq!(
-                collected_nonce_account.lamports(),
-                nonce_account_pre.lamports(),
-            );
-            assert!(nonce_account::verify_nonce_account(
-                &collected_nonce_account,
-                durable_nonce.as_hash()
-            )
-            .is_some());
-
-            if collect_transactions {
-                let transactions = transactions.unwrap();
-                assert_eq!(transactions.len(), collected_accounts.len());
-            } else {
-                assert!(transactions.is_none());
-            }
-        }
+                .unwrap(),
+            from_account_pre,
+        );
+        let collected_nonce_account = collected_accounts
+            .iter()
+            .find(|(pubkey, _account)| *pubkey == &nonce_address)
+            .map(|(_pubkey, account)| *account)
+            .cloned()
+            .unwrap();
+        assert_eq!(
+            collected_nonce_account.lamports(),
+            nonce_account_pre.lamports(),
+        );
+        assert!(nonce_account::verify_nonce_account(
+            &collected_nonce_account,
+            durable_nonce.as_hash()
+        )
+        .is_some());
     }
 
     #[test]
@@ -530,34 +464,23 @@ mod tests {
         let max_collected_accounts = max_number_of_accounts_to_collect(&txs, &processing_results);
         assert_eq!(max_collected_accounts, 1);
 
-        for collect_transactions in [false, true] {
-            let transaction_refs = collect_transactions.then(|| txs.iter().collect::<Vec<_>>());
-            let (collected_accounts, transactions) =
-                collect_accounts_to_store(&txs, &transaction_refs, &processing_results);
-            assert_eq!(collected_accounts.len(), 1);
-            let collected_nonce_account = collected_accounts
-                .iter()
-                .find(|(pubkey, _account)| *pubkey == &nonce_address)
-                .map(|(_pubkey, account)| *account)
-                .cloned()
-                .unwrap();
-            assert_eq!(
-                collected_nonce_account.lamports(),
-                nonce_account_pre.lamports()
-            );
-            assert!(nonce_account::verify_nonce_account(
-                &collected_nonce_account,
-                durable_nonce.as_hash()
-            )
-            .is_some());
-
-            if collect_transactions {
-                let transactions = transactions.unwrap();
-                assert_eq!(transactions.len(), collected_accounts.len());
-            } else {
-                assert!(transactions.is_none());
-            }
-        }
+        let collected_accounts = collect_accounts_to_store(&txs, &processing_results);
+        assert_eq!(collected_accounts.len(), 1);
+        let collected_nonce_account = collected_accounts
+            .iter()
+            .find(|(pubkey, _account)| *pubkey == &nonce_address)
+            .map(|(_pubkey, account)| *account)
+            .cloned()
+            .unwrap();
+        assert_eq!(
+            collected_nonce_account.lamports(),
+            nonce_account_pre.lamports()
+        );
+        assert!(nonce_account::verify_nonce_account(
+            &collected_nonce_account,
+            durable_nonce.as_hash()
+        )
+        .is_some());
     }
 
     #[test]
@@ -586,27 +509,16 @@ mod tests {
         let max_collected_accounts = max_number_of_accounts_to_collect(&txs, &processing_results);
         assert_eq!(max_collected_accounts, 1);
 
-        for collect_transactions in [false, true] {
-            let transaction_refs = collect_transactions.then(|| txs.iter().collect::<Vec<_>>());
-            let (collected_accounts, transactions) =
-                collect_accounts_to_store(&txs, &transaction_refs, &processing_results);
-            assert_eq!(collected_accounts.len(), 1);
-            assert_eq!(
-                collected_accounts
-                    .iter()
-                    .find(|(pubkey, _account)| *pubkey == &from_address)
-                    .map(|(_pubkey, account)| *account)
-                    .cloned()
-                    .unwrap(),
-                from_account_pre,
-            );
-
-            if collect_transactions {
-                let transactions = transactions.unwrap();
-                assert_eq!(transactions.len(), collected_accounts.len());
-            } else {
-                assert!(transactions.is_none());
-            }
-        }
+        let collected_accounts = collect_accounts_to_store(&txs, &processing_results);
+        assert_eq!(collected_accounts.len(), 1);
+        assert_eq!(
+            collected_accounts
+                .iter()
+                .find(|(pubkey, _account)| *pubkey == &from_address)
+                .map(|(_pubkey, account)| *account)
+                .cloned()
+                .unwrap(),
+            from_account_pre,
+        );
     }
 }

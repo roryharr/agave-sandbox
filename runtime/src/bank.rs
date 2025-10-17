@@ -3555,33 +3555,13 @@ impl Bank {
         }
 
         let ((), store_accounts_us) = measure_us!({
-            // If geyser is present, we must collect `SanitizedTransaction`
-            // references in order to comply with that interface - until it
-            // is changed.
-            let maybe_transaction_refs = self
-                .accounts()
-                .accounts_db
-                .has_accounts_update_notifier()
-                .then(|| {
-                    sanitized_txs
-                        .iter()
-                        .map(|tx| tx.as_sanitized_transaction())
-                        .collect::<Vec<_>>()
-                });
-
-            let (accounts_to_store, transactions) = collect_accounts_to_store(
-                sanitized_txs,
-                &maybe_transaction_refs,
-                &processing_results,
-            );
+            let accounts_to_store = collect_accounts_to_store(sanitized_txs, &processing_results);
 
             let to_store = (self.slot(), accounts_to_store.as_slice());
             self.update_bank_hash_stats(&to_store);
             // See https://github.com/solana-labs/solana/pull/31455 for discussion
             // on *not* updating the index within a threadpool.
-            self.rc
-                .accounts
-                .store_accounts_seq(to_store, transactions.as_deref());
+            self.rc.accounts.store_accounts_seq(to_store);
         });
 
         // Cached vote and stake accounts are synchronized with accounts-db
@@ -3955,7 +3935,7 @@ impl Bank {
             })
         });
         self.update_bank_hash_stats(&accounts);
-        self.rc.accounts.store_accounts_par(accounts, None);
+        self.rc.accounts.store_accounts_par(accounts);
         m.stop();
         self.rc
             .accounts
@@ -4024,7 +4004,7 @@ impl Bank {
         self.rc.accounts.clone()
     }
 
-    fn apply_simd_0306_cost_tracker_changes(&mut self) {
+    fn apply_simd_0306_cost_tracker_changes(&self) {
         let mut cost_tracker = self.write_cost_tracker().unwrap();
         let block_cost_limit = cost_tracker.get_block_limit();
         let vote_cost_limit = cost_tracker.get_vote_limit();
@@ -5397,7 +5377,7 @@ impl Bank {
         Some(self.epoch_schedule.get_first_slot_in_epoch(active_epoch))
     }
 
-    fn add_active_builtin_programs(&mut self) {
+    fn add_active_builtin_programs(&self) {
         for builtin in BUILTINS.iter() {
             // The `builtin_is_bpf` flag is used to handle the case where a
             // builtin is scheduled to be enabled by one feature gate and
@@ -5505,7 +5485,7 @@ impl Bank {
     /// Use to replace programs by feature activation
     #[allow(dead_code)]
     fn replace_program_account(
-        &mut self,
+        &self,
         old_address: &Pubkey,
         new_address: &Pubkey,
         datapoint_name: &'static str,

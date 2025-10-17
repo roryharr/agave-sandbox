@@ -1454,6 +1454,42 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> AccountsIndex<T, U> {
         self.update_secondary_indexes(pubkey, account, account_indexes);
     }
 
+    /// Updates the given pubkey at the given slot with the new account information.
+    /// on return, the index's previous account info may be returned in 'reclaims' depending on 'previous_slot_entry_was_cached'
+    pub fn upsert_cached(
+        &self,
+        new_slot: Slot,
+        pubkey: &Pubkey,
+        account: &impl ReadableAccount,
+        account_indexes: &AccountSecondaryIndexes,
+        account_info: T,
+    ) {
+        // vast majority of updates are to item already in accounts index, so store as raw to avoid unnecessary allocations
+        let store_raw = true;
+
+        // We don't atomically update both primary index and secondary index together.
+        // This certainly creates a small time window with inconsistent state across the two indexes.
+        // However, this is acceptable because:
+        //
+        //  - A strict consistent view at any given moment of time is not necessary, because the only
+        //  use case for the secondary index is `scan`, and `scans` are only supported/require consistency
+        //  on frozen banks, and this inconsistency is only possible on working banks.
+        //
+        //  - The secondary index is never consulted as primary source of truth for gets/stores.
+        //  So, what the accounts_index sees alone is sufficient as a source of truth for other non-scan
+        //  account operations.
+        let new_item = PreAllocatedAccountMapEntry::new(
+            new_slot,
+            account_info,
+            &self.storage.storage,
+            store_raw,
+        );
+        let map = self.get_bin(pubkey);
+
+        map.upsert_cached(pubkey, new_item);
+        self.update_secondary_indexes(pubkey, account, account_indexes);
+    }
+
     pub fn ref_count_from_storage(&self, pubkey: &Pubkey) -> RefCount {
         let map = self.get_bin(pubkey);
         map.get_internal_inner(pubkey, |entry| {
