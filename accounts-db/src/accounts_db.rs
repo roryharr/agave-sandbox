@@ -5854,7 +5854,6 @@ impl AccountsDb {
         self.stats
             .store_num_accounts
             .fetch_add(accounts.len() as u64, Ordering::Relaxed);
-        self.report_store_timings();
     }
 
     /// Stores accounts in the storage and updates the index.
@@ -5967,6 +5966,8 @@ impl AccountsDb {
                 .store_handle_reclaims
                 .fetch_add(handle_reclaims_elapsed, Ordering::Relaxed);
         }
+
+        self.report_store_timings();
 
         StoreAccountsTiming {
             store_accounts_elapsed: store_accounts_time.as_us(),

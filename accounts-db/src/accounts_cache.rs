@@ -1,6 +1,6 @@
 use {
     dashmap::DashMap,
-    solana_account::{AccountSharedData, ReadableAccount},
+    solana_account::AccountSharedData,
     solana_clock::Slot,
     solana_nohash_hasher::BuildNoHashHasher,
     solana_pubkey::{Pubkey, PubkeyHasherBuilder},
@@ -69,38 +69,12 @@ impl SlotCache {
         );
     }
 
-    pub fn insert(&self, pubkey: &Pubkey, account: AccountSharedData) -> Arc<CachedAccount> {
-        let data_len = account.data().len() as u64;
+    pub fn insert(&self, pubkey: &Pubkey, account: AccountSharedData){
         let item = Arc::new(CachedAccount {
             account,
             pubkey: *pubkey,
         });
-        if let Some(old) = self.cache.insert(*pubkey, item.clone()) {
-            self.same_account_writes.fetch_add(1, Ordering::Relaxed);
-            self.same_account_writes_size
-                .fetch_add(data_len, Ordering::Relaxed);
-
-            let old_len = old.account.data().len() as u64;
-            let grow = data_len.saturating_sub(old_len);
-            if grow > 0 {
-                self.size.fetch_add(grow, Ordering::Relaxed);
-                self.total_size.fetch_add(grow, Ordering::Relaxed);
-            } else {
-                let shrink = old_len.saturating_sub(data_len);
-                if shrink > 0 {
-                    self.size.fetch_sub(shrink, Ordering::Relaxed);
-                    self.total_size.fetch_sub(shrink, Ordering::Relaxed);
-                }
-            }
-        } else {
-            self.size.fetch_add(data_len, Ordering::Relaxed);
-            self.total_size.fetch_add(data_len, Ordering::Relaxed);
-            self.unique_account_writes_size
-                .fetch_add(data_len, Ordering::Relaxed);
-            self.accounts_count.fetch_add(1, Ordering::Relaxed);
-            self.total_accounts_count.fetch_add(1, Ordering::Relaxed);
-        }
-        item
+        self.cache.insert(*pubkey, item);
     }
 
     pub fn get_cloned(&self, pubkey: &Pubkey) -> Option<Arc<CachedAccount>> {
@@ -198,7 +172,7 @@ impl AccountsCache {
         slot: Slot,
         pubkey: &Pubkey,
         account: AccountSharedData,
-    ) -> Arc<CachedAccount> {
+    ) {
         let slot_cache = self.slot_cache(slot).unwrap_or_else(||
             // DashMap entry.or_insert() returns a RefMut, essentially a write lock,
             // which is dropped after this block ends, minimizing time held by the lock.
@@ -210,7 +184,7 @@ impl AccountsCache {
                 .or_insert_with(|| self.new_inner())
                 .clone());
 
-        slot_cache.insert(pubkey, account)
+        slot_cache.insert(pubkey, account);
     }
 
     pub fn load(&self, slot: Slot, pubkey: &Pubkey) -> Option<Arc<CachedAccount>> {
