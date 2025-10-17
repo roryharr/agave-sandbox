@@ -15,7 +15,6 @@ use {
         accounts_equal, Account, AccountSharedData, InheritableAccountFields, ReadableAccount,
         WritableAccount, DUMMY_INHERITABLE_ACCOUNT_FIELDS,
     },
-    solana_lattice_hash::lt_hash::Checksum as LtHashChecksum,
     solana_pubkey::PUBKEY_BYTES,
     std::{
         iter::{self, FromIterator},
@@ -1903,53 +1902,6 @@ fn test_accounts_db_purge1() {
     // slot 1 & 2 should not have any stores
     assert_no_stores(&accounts, 1);
     assert_no_stores(&accounts, 2);
-}
-
-#[test]
-#[ignore]
-fn test_store_account_stress() {
-    let slot = 42;
-    let num_threads = 2;
-
-    let min_file_bytes = std::mem::size_of::<StoredMeta>() + std::mem::size_of::<AccountMeta>();
-
-    let db = Arc::new(AccountsDb {
-        file_size: min_file_bytes as u64,
-        ..AccountsDb::new_single_for_tests()
-    });
-
-    db.add_root(slot);
-    let thread_hdls: Vec<_> = (0..num_threads)
-        .map(|_| {
-            let db = db.clone();
-            std::thread::Builder::new()
-                .name("account-writers".to_string())
-                .spawn(move || {
-                    let pubkey = solana_pubkey::new_rand();
-                    let mut account = AccountSharedData::new(1, 0, &pubkey);
-                    let mut i = 0;
-                    loop {
-                        let account_bal = thread_rng().gen_range(1..99);
-                        account.set_lamports(account_bal);
-                        db.store_for_tests((slot, [(&pubkey, &account)].as_slice()));
-
-                        let (account, slot) = db
-                            .load_without_fixed_root(&Ancestors::default(), &pubkey)
-                            .unwrap_or_else(|| {
-                                panic!("Could not fetch stored account {pubkey}, iter {i}")
-                            });
-                        assert_eq!(slot, slot);
-                        assert_eq!(account.lamports(), account_bal);
-                        i += 1;
-                    }
-                })
-                .unwrap()
-        })
-        .collect();
-
-    for t in thread_hdls {
-        t.join().unwrap();
-    }
 }
 
 #[test]
@@ -6189,11 +6141,13 @@ fn populate_index(db: &AccountsDb, slots: Range<Slot>) {
         if let Some(storage) = db.get_storage_for_slot(slot) {
             storage
                 .accounts
-                .scan_accounts_stored_meta(|account| {
+                .scan_accounts_without_data(|offset, account| {
                     let info = AccountInfo::new(
-                        StorageLocation::AppendVec(storage.id(), account.offset()),
+                        StorageLocation::AppendVec(storage.id(), offset),
                         account.is_zero_lamport(),
                     );
+                    let binding = vec![0; account.data_len];
+                    let account = StoredAccountInfo::new_from(&account, &binding);
                     db.accounts_index.upsert(
                         slot,
                         slot,

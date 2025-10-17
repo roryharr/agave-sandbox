@@ -2,8 +2,6 @@
 #![cfg(feature = "dev-context-only-utils")]
 use {
     rand::{distributions::Alphanumeric, Rng},
-    solana_account::AccountSharedData,
-    solana_pubkey::Pubkey,
     std::path::PathBuf,
 };
 
@@ -35,6 +33,8 @@ pub fn get_append_vec_path(path: &str) -> TempFile {
     std::fs::create_dir_all(dir).expect("Create directory failed");
     TempFile { path: buf }
 }
+
+use {solana_account::AccountSharedData, solana_pubkey::Pubkey};
 
 /// return a test account.
 /// Note that `sample`=0 returns a fully default account with a default pubkey.

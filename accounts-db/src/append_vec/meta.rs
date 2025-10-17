@@ -12,7 +12,7 @@ use {
 /// So the data layout must be stable and consistent across the entire cluster!
 #[derive(Clone, PartialEq, Eq, Debug)]
 #[repr(C)]
-pub struct StoredMeta {
+pub(crate) struct StoredMeta {
     /// global write version
     /// This will be made completely obsolete such that we stop storing it.
     /// We will not support multiple append vecs per slot anymore, so this concept is no longer necessary.
@@ -27,7 +27,7 @@ pub struct StoredMeta {
 /// So the data layout must be stable and consistent across the entire cluster!
 #[derive(Serialize, Deserialize, Clone, Debug, Default, Eq, PartialEq)]
 #[repr(C)]
-pub struct AccountMeta {
+pub(crate) struct AccountMeta {
     /// lamports in the account
     pub lamports: u64,
     /// the epoch at which this account will next owe rent
@@ -61,7 +61,7 @@ impl<'a, T: ReadableAccount> From<Option<&'a T>> for AccountMeta {
 /// References to account data stored elsewhere. Getting an `Account` requires cloning
 /// (see `StoredAccountMeta::clone_account()`).
 #[derive(Debug)]
-pub struct StoredAccountMeta<'append_vec> {
+pub(crate) struct StoredAccountMeta<'append_vec> {
     pub meta: &'append_vec StoredMeta,
     /// account data
     pub account_meta: &'append_vec AccountMeta,
@@ -85,14 +85,6 @@ impl<'append_vec> StoredAccountMeta<'append_vec> {
 
     pub fn data(&self) -> &'append_vec [u8] {
         self.data
-    }
-
-    pub fn data_len(&self) -> usize {
-        self.meta.data_len as usize
-    }
-
-    pub fn meta(&self) -> &StoredMeta {
-        self.meta
     }
 }
 

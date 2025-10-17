@@ -7,10 +7,6 @@
 mod meta;
 pub mod test_utils;
 
-#[cfg(feature = "dev-context-only-utils")]
-pub use meta::{AccountMeta, StoredAccountMeta, StoredMeta};
-#[cfg(not(feature = "dev-context-only-utils"))]
-use meta::{AccountMeta, StoredAccountMeta, StoredMeta};
 use {
     crate::{
         account_info::Offset,
@@ -27,7 +23,7 @@ use {
     },
     log::*,
     memmap2::MmapMut,
-    meta::StoredAccountNoData,
+    meta::{AccountMeta, StoredAccountMeta, StoredAccountNoData, StoredMeta},
     solana_account::{AccountSharedData, ReadableAccount, WritableAccount},
     solana_pubkey::Pubkey,
     solana_system_interface::MAX_PERMITTED_DATA_LENGTH,
@@ -705,7 +701,7 @@ impl AppendVec {
     ///
     /// Prefer get_stored_account_callback() when possible, as it does not contain file format
     /// implementation details, and thus potentially can read less and be faster.
-    pub fn get_stored_account_meta_callback<Ret>(
+    pub(crate) fn get_stored_account_meta_callback<Ret>(
         &self,
         offset: usize,
         mut callback: impl for<'local> FnMut(StoredAccountMeta<'local>) -> Ret,
@@ -898,7 +894,7 @@ impl AppendVec {
     }
 
     #[cfg(test)]
-    pub fn get_account_test(
+    pub(crate) fn get_account_test(
         &self,
         offset: usize,
     ) -> Option<(Pubkey, solana_account::AccountSharedData)> {
@@ -914,7 +910,7 @@ impl AppendVec {
                 r2.as_ref().unwrap()
             ));
             assert_eq!(sizes, r_callback.stored_size());
-            let pubkey = r_callback.meta().pubkey;
+            let pubkey = r_callback.pubkey().clone();
             Some((pubkey, r_callback.to_account_shared_data()))
         });
         if result.is_none() {
