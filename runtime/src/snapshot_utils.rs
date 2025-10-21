@@ -686,7 +686,36 @@ pub fn read_full_snapshot_slot_file(bank_snapshot_dir: impl AsRef<Path>) -> io::
 }
 
 /// Writes files that indicate the bank snapshot is loadable by fastboot
-pub fn mark_bank_snapshot_as_loadable(bank_snapshot_dir: impl AsRef<Path>) -> io::Result<()> {
+pub fn mark_bank_snapshot_as_loadable(
+    bank_snapshot_dir: impl AsRef<Path>,
+    legacy_compatible: bool,
+) -> io::Result<()> {
+    // Mark this directory complete. Used in older versions to check if the snapshot is complete
+    // Never read in v3.1, can be removed in v3.2
+    if legacy_compatible {
+        let state_complete_path = bank_snapshot_dir
+            .as_ref()
+            .join(SNAPSHOT_STATE_COMPLETE_FILENAME);
+        fs::File::create(&state_complete_path).map_err(|err| {
+            IoError::other(format!(
+                "failed to create file '{}': {err}",
+                state_complete_path.display(),
+            ))
+        })?;
+
+        // Write the storages flushed file. Used in older versions to check if the snapshot is complete
+        // Read in v3.1 for backwards compatibility, can be removed in v3.2
+        let flushed_storages_path = bank_snapshot_dir
+            .as_ref()
+            .join(SNAPSHOT_STORAGES_FLUSHED_FILENAME);
+        fs::File::create(&flushed_storages_path).map_err(|err| {
+            IoError::other(format!(
+                "failed to create file '{}': {err}",
+                flushed_storages_path.display(),
+            ))
+        })?;
+    }
+
     let snapshot_fastboot_version_path = bank_snapshot_dir
         .as_ref()
         .join(SNAPSHOT_FASTBOOT_VERSION_FILENAME);
@@ -956,14 +985,16 @@ fn serialize_snapshot(
                 )
                 .map_err(AddBankSnapshotError::HardLinkStorages)?);
 
-                let (_, serialize_obsolete_accounts_us) = measure_us!({
+                let (result, serialize_obsolete_accounts_us) = measure_us!({
                     write_obsolete_accounts_to_snapshot(&bank_snapshot_dir, snapshot_storages, slot)
                         .map_err(|err| {
                             AddBankSnapshotError::SerializeObsoleteAccounts(Box::new(err))
                         })?
                 });
 
-                mark_bank_snapshot_as_loadable(&bank_snapshot_dir)
+                let legacy_compatible = result == 0;
+
+                mark_bank_snapshot_as_loadable(&bank_snapshot_dir, legacy_compatible)
                     .map_err(AddBankSnapshotError::MarkSnapshotLoadable)?;
 
                 (
@@ -1257,6 +1288,7 @@ fn serialize_obsolete_accounts(
     obsolete_accounts_map: &SerdeObsoleteAccountsMap,
     maximum_obsolete_accounts_file_size: u64,
 ) -> Result<u64> {
+    let num_obsolete_bytes = obsolete_accounts_map.obsolete_bytes;
     let obsolete_accounts_path = bank_snapshot_dir
         .as_ref()
         .join(SNAPSHOT_OBSOLETE_ACCOUNTS_FILENAME);
@@ -1276,7 +1308,7 @@ fn serialize_obsolete_accounts(
         );
         return Err(IoError::other(error_message).into());
     }
-    Ok(consumed_size)
+    Ok(num_obsolete_bytes)
 }
 
 fn deserialize_obsolete_accounts(

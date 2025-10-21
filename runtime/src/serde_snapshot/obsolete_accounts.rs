@@ -50,11 +50,12 @@ impl SerdeObsoleteAccounts {
 #[cfg_attr(
     feature = "frozen-abi",
     derive(AbiExample),
-    frozen_abi(digest = "12qimMBghYs9dL4nhws7Xe1B5MXWBV75VTMTGLHxevYE")
+    frozen_abi(digest = "EfLCTmhczMzaRKvmsF1uuE7vdYbXBT9fWDhnAEhiuhXf")
 )]
 #[derive(Serialize, Deserialize, Debug)]
 pub(crate) struct SerdeObsoleteAccountsMap {
     map: DashMap<Slot, SerdeObsoleteAccounts>,
+    pub obsolete_bytes: u64,
 }
 
 impl SerdeObsoleteAccountsMap {
@@ -64,13 +65,20 @@ impl SerdeObsoleteAccountsMap {
         snapshot_slot: Slot,
     ) -> Self {
         let map = DashMap::with_capacity(snapshot_storages.len());
-        snapshot_storages.par_iter().for_each(|storage| {
-            map.insert(
-                storage.slot(),
-                SerdeObsoleteAccounts::new_from_storage_entry_at_slot(storage, snapshot_slot),
-            );
-        });
-        SerdeObsoleteAccountsMap { map }
+        let obsolete_bytes = snapshot_storages
+            .par_iter()
+            .map(|storage| {
+                let obsolete_accounts =
+                    SerdeObsoleteAccounts::new_from_storage_entry_at_slot(storage, snapshot_slot);
+                let obsolete_bytes = obsolete_accounts.bytes;
+                map.insert(storage.slot(), obsolete_accounts);
+                obsolete_bytes
+            })
+            .sum();
+        SerdeObsoleteAccountsMap {
+            map,
+            obsolete_bytes,
+        }
     }
 
     /// Removes and returns the obsolete accounts data for a given slot.
@@ -128,7 +136,8 @@ mod test {
             obsolete_accounts.insert(slot, obsolete_accounts_list);
         }
 
-        // Convert the obsolete accounts into a SerdeObsoleteAccountsMap
+        // Convert the obsolete accounts into a SerdeObsoleteAccountsMap and sum up obsolete bytes
+        let mut obsolete_bytes = 0;
         let map = obsolete_accounts
             .iter()
             .map(|entry| {
@@ -138,15 +147,20 @@ mod test {
                     .iter()
                     .map(|item| (item.offset, item.data_len, item.slot))
                     .collect();
+                let bytes = num_obsolete_accounts_per_storage as u64 * 1000;
+                obsolete_bytes += bytes;
                 let serde_obsolete_accounts = SerdeObsoleteAccounts {
                     id: *entry.key() as SerializedAccountsFileId,
-                    bytes: num_obsolete_accounts_per_storage as u64 * 1000,
+                    bytes,
                     accounts,
                 };
                 (*entry.key(), serde_obsolete_accounts)
             })
             .collect();
-        let obsolete_accounts_map = SerdeObsoleteAccountsMap { map };
+        let obsolete_accounts_map = SerdeObsoleteAccountsMap {
+            map,
+            obsolete_bytes,
+        };
 
         // Serialize the obsolete accounts map
         let mut buf = Vec::new();

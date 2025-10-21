@@ -1637,7 +1637,7 @@ mod tests {
     fn test_fastboot_versioning() {
         let genesis_config = GenesisConfig::default();
         let bank_snapshots_dir = tempfile::TempDir::new().unwrap();
-        let _bank = create_snapshot_dirs_for_tests(&genesis_config, &bank_snapshots_dir, 2, true);
+        let _bank = create_snapshot_dirs_for_tests(&genesis_config, &bank_snapshots_dir, 3, true);
 
         let snapshot_config = SnapshotConfig {
             bank_snapshots_dir: bank_snapshots_dir.as_ref().to_path_buf(),
@@ -1648,9 +1648,20 @@ mod tests {
 
         // Verify the snapshot is found with all files present
         let snapshot = get_highest_loadable_bank_snapshot(&snapshot_config).unwrap();
-        assert_eq!(snapshot.slot, 2);
+        assert_eq!(snapshot.slot, 3);
 
-        // Test 1: Modify the version in the fastboot version file to something newer
+        // Test 1: Remove the storages flushed file
+        let storages_flushed_file = snapshot
+            .snapshot_dir
+            .join(snapshot_utils::SNAPSHOT_STORAGES_FLUSHED_FILENAME);
+        fs::remove_file(storages_flushed_file).unwrap();
+
+        // If the storages flushed file is removed, the version in the version file should be
+        // checked, and the snapshot should be found
+        let snapshot = get_highest_loadable_bank_snapshot(&snapshot_config).unwrap();
+        assert_eq!(snapshot.slot, 3);
+
+        // Test 2: Modify the version in the fastboot version file to something newer
         // than current
         let complete_flag_file = snapshot
             .snapshot_dir
@@ -1661,19 +1672,29 @@ mod tests {
 
         fs::write(&complete_flag_file, new_version.to_string()).unwrap();
 
-        // With an invalid version, the snapshot will be considered invalid
+        // With an invalid version and no flush file, the snapshot will be considered invalid
         let new_snapshot = get_highest_loadable_bank_snapshot(&snapshot_config);
         assert!(new_snapshot.is_none());
 
-        // Test 2: Remove the bank snapshot version file
+        // Test 3: Remove the bank snapshot version file
         let complete_flag_file = snapshot
             .snapshot_dir
             .join(snapshot_utils::SNAPSHOT_VERSION_FILENAME);
         fs::remove_file(complete_flag_file).unwrap();
 
-        // This will now find the previous entry in the directory, which is slot 1
+        // This will now find the previous entry in the directory, which is slot 2
         let snapshot = get_highest_loadable_bank_snapshot(&snapshot_config).unwrap();
-        assert_eq!(snapshot.slot, 1);
+        assert_eq!(snapshot.slot, 2);
+
+        // Test 4: Remove the fastboot version file
+        let fastboot_version_file = snapshot
+            .snapshot_dir
+            .join(snapshot_utils::SNAPSHOT_FASTBOOT_VERSION_FILENAME);
+        fs::remove_file(fastboot_version_file).unwrap();
+
+        // The flush file will still be found, making this a valid snapshot
+        let snapshot = get_highest_loadable_bank_snapshot(&snapshot_config).unwrap();
+        assert_eq!(snapshot.slot, 2);
     }
 
     #[test_case(false)]
@@ -2516,7 +2537,7 @@ mod tests {
         assert!(get_highest_loadable_bank_snapshot(&snapshot_config).is_none());
 
         // 3. Mark the bank snapshot as loadable, get_highest_loadable() should return highest_bank_snapshot_slot
-        snapshot_utils::mark_bank_snapshot_as_loadable(&highest_bank_snapshot.snapshot_dir)
+        snapshot_utils::mark_bank_snapshot_as_loadable(&highest_bank_snapshot.snapshot_dir, false)
             .unwrap();
         let bank_snapshot = get_highest_loadable_bank_snapshot(&snapshot_config).unwrap();
         assert_eq!(bank_snapshot.slot, highest_bank_snapshot.slot);
@@ -2526,10 +2547,13 @@ mod tests {
         assert!(get_highest_loadable_bank_snapshot(&snapshot_config).is_none());
 
         // 5. Mark the bank snapshot as loadable, get_highest_loadable() should return Some() again, with slot-1
-        snapshot_utils::mark_bank_snapshot_as_loadable(get_bank_snapshot_dir(
-            &snapshot_config.bank_snapshots_dir,
-            highest_bank_snapshot.slot - 1,
-        ))
+        snapshot_utils::mark_bank_snapshot_as_loadable(
+            get_bank_snapshot_dir(
+                &snapshot_config.bank_snapshots_dir,
+                highest_bank_snapshot.slot - 1,
+            ),
+            false,
+        )
         .unwrap();
         let bank_snapshot = get_highest_loadable_bank_snapshot(&snapshot_config).unwrap();
         assert_eq!(bank_snapshot.slot, highest_bank_snapshot.slot - 1);
