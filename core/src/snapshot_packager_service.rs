@@ -224,7 +224,7 @@ impl SnapshotPackagerService {
             // as loadable so return early.
             return;
         }
-        info!("Saving obsolete accounts... Done in {:?}", start.elapsed(),);
+        info!("Saving obsolete accounts... Done in {:?}", start.elapsed());
 
         let result = snapshot_utils::mark_bank_snapshot_as_loadable(&bank_snapshot_dir);
         if let Err(err) = result {
