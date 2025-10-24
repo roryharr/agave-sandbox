@@ -1,13 +1,16 @@
 use {
+    crate::AccountsFile::{AppendVec, TieredStorage},
     ahash::HashSet,
     clap::{
         crate_description, crate_name, value_t_or_exit, values_t_or_exit, App, AppSettings, Arg,
         ArgMatches, SubCommand,
     },
     rayon::prelude::*,
-    solana_accounts_db::accounts_file::{AccountsFile, StorageAccess},
+    solana_accounts_db::{
+        account_storage::stored_account_info::StoredAccountInfoWithoutData,
+        accounts_file::{AccountsFile, StorageAccess},
+    },
     solana_pubkey::Pubkey,
-    solana_system_interface::MAX_PERMITTED_DATA_LENGTH,
     std::{
         fs, io,
         mem::ManuallyDrop,
@@ -107,6 +110,29 @@ fn cmd_search(
     do_search(path, addresses, verbose)
 }
 
+fn log_account_info(
+    storage: &AccountsFile,
+    offset: usize,
+    account: &StoredAccountInfoWithoutData,
+    verbose: bool,
+) {
+    if verbose {
+        match storage {
+            AppendVec(vec) => {
+                vec.get_stored_account_meta_callback(offset, |account| {
+                    println!("{account:?}");
+                });
+            }
+            TieredStorage(_) => println!("unimplemented verbose output for TieredStorage"),
+        }
+    } else {
+        println!(
+            "{:#x}: {:44}, owner: {:44}, data size: {:}, lamports: {}",
+            offset, account.pubkey, account.owner, account.data_len, account.lamports,
+        );
+    }
+}
+
 fn do_inspect(file: impl AsRef<Path>, verbose: bool) -> Result<(), String> {
     let file_size = fs::metadata(&file)
         .map_err(|err| {
@@ -130,27 +156,12 @@ fn do_inspect(file: impl AsRef<Path>, verbose: bool) -> Result<(), String> {
     // We do not want to remove the backing file here in the store-tool, so prevent dropping.
     let storage = ManuallyDrop::new(storage);
 
-    let data_size_width = width10(MAX_PERMITTED_DATA_LENGTH);
-    let offset_width = width16(storage.capacity());
-
     let mut num_accounts = Saturating(0usize);
     let mut stored_accounts_size = Saturating(0);
     let mut lamports = Saturating(0);
     storage
         .scan_accounts_without_data(|offset, account| {
-            if verbose {
-                println!("{account:?}");
-            } else {
-                println!(
-                    "{:#0offset_width$x}: {:44}, owner: {:44}, data size: {:data_size_width$}, \
-                     lamports: {}",
-                    offset,
-                    account.pubkey().to_string(),
-                    account.owner.to_string(),
-                    account.data_len,
-                    account.lamports,
-                );
-            }
+            log_account_info(&storage, offset, &account, verbose);
             num_accounts += 1;
             stored_accounts_size += storage.calculate_stored_size(account.data_len);
             lamports += account.lamports;
@@ -224,20 +235,8 @@ fn do_search(
         storage
             .scan_accounts_without_data(|offset, account| {
                 if addresses.contains(account.pubkey()) {
-                    if verbose {
-                        println!("storage: {}, {account:?}", file_name.display());
-                    } else {
-                        println!(
-                            "storage: {}, offset: {}, pubkey: {}, owner: {}, data size: {}, \
-                             lamports: {}",
-                            file_name.display(),
-                            offset,
-                            account.pubkey(),
-                            account.owner,
-                            account.data_len,
-                            account.lamports,
-                        );
-                    }
+                    println!("storage file: {}", file_name.display());
+                    log_account_info(&storage, offset, &account, verbose);
                 }
             })
             .unwrap_or_else(|err| {
@@ -249,14 +248,4 @@ fn do_search(
     });
 
     Ok(())
-}
-
-/// Returns the number of characters required to print `x` in base-10
-fn width10(x: u64) -> usize {
-    (x as f64).log10().ceil() as usize
-}
-
-/// Returns the number of characters required to print `x` in base-16
-fn width16(x: u64) -> usize {
-    (x as f64).log(16.0).ceil() as usize
 }
