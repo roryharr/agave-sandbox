@@ -2,7 +2,6 @@ use {
     crate::{
         account_info::{AccountInfo, Offset},
         account_storage::stored_account_info::{StoredAccountInfo, StoredAccountInfoWithoutData},
-        accounts_db::AccountsFileId,
         append_vec::{AppendVec, AppendVecError},
         storable_accounts::StorableAccounts,
         tiered_storage::{
@@ -16,6 +15,7 @@ use {
     std::{
         mem,
         path::{Path, PathBuf},
+        sync::atomic::AtomicU32,
     },
     thiserror::Error,
 };
@@ -63,6 +63,10 @@ pub enum AccountsFile {
     AppendVec(AppendVec),
     TieredStorage(TieredStorage),
 }
+
+/// An offset into the AccountsDb::storage vector
+pub type AtomicAccountsFileId = AtomicU32;
+pub type AccountsFileId = u32;
 
 impl AccountsFile {
     /// Create an AccountsFile instance from the specified path.

@@ -19,9 +19,9 @@ mod serde_snapshot_tests {
             accounts::Accounts,
             accounts_db::{
                 get_temp_accounts_paths, AccountStorageEntry, AccountsDb, AccountsDbConfig,
-                AtomicAccountsFileId, MarkObsoleteAccounts, ACCOUNTS_DB_CONFIG_FOR_TESTING,
+                MarkObsoleteAccounts, ACCOUNTS_DB_CONFIG_FOR_TESTING,
             },
-            accounts_file::{AccountsFile, AccountsFileError, StorageAccess},
+            accounts_file::{AccountsFile, AccountsFileError, AtomicAccountsFileId, StorageAccess},
             ancestors::Ancestors,
             ObsoleteAccounts,
         },

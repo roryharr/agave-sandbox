@@ -18,10 +18,10 @@ mod tests {
         solana_accounts_db::{
             account_storage::AccountStorageMap,
             accounts_db::{
-                get_temp_accounts_paths, AccountStorageEntry, AccountsDb, AtomicAccountsFileId,
+                get_temp_accounts_paths, AccountStorageEntry, AccountsDb,
                 ACCOUNTS_DB_CONFIG_FOR_TESTING,
             },
-            accounts_file::{AccountsFile, AccountsFileError, StorageAccess},
+            accounts_file::{AccountsFile, AccountsFileError, AtomicAccountsFileId, StorageAccess},
             ObsoleteAccounts,
         },
         solana_epoch_schedule::EpochSchedule,

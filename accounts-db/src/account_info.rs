@@ -4,8 +4,7 @@
 //! Note that AccountInfo is saved to disk buckets during runtime, but disk buckets are recreated at startup.
 use {
     crate::{
-        accounts_db::AccountsFileId,
-        accounts_file::ALIGN_BOUNDARY_OFFSET,
+        accounts_file::{AccountsFileId, ALIGN_BOUNDARY_OFFSET},
         accounts_index::{DiskIndexValue, IndexValue, IsCached},
         is_zero_lamport::IsZeroLamport,
     },

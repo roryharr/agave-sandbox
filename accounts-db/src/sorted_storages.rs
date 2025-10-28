@@ -195,8 +195,7 @@ mod tests {
     use {
         super::*,
         crate::{
-            accounts_db::{AccountStorageEntry, AccountsFileId},
-            accounts_file::{AccountsFile, AccountsFileProvider, StorageAccess},
+            accounts_file::{AccountsFile, AccountsFileId, AccountsFileProvider, StorageAccess},
             append_vec::AppendVec,
         },
         std::sync::Arc,

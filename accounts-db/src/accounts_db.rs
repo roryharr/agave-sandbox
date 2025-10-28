@@ -40,7 +40,10 @@ use {
             AccountsStats, CleanAccountsStats, FlushStats, ObsoleteAccountsStats, PurgeStats,
             ShrinkAncientStats, ShrinkStats, ShrinkStatsSub, StoreAccountsTiming,
         },
-        accounts_file::{AccountsFile, AccountsFileError, AccountsFileProvider, StorageAccess},
+        accounts_file::{
+            AccountsFile, AccountsFileError, AccountsFileId, AccountsFileProvider,
+            AtomicAccountsFileId, StorageAccess,
+        },
         accounts_hash::{AccountLtHash, AccountsLtHash, ZERO_LAMPORT_ACCOUNT_LT_HASH},
         accounts_index::{
             in_mem_accounts_index::StartupStats, AccountSecondaryIndexes, AccountsIndex,
@@ -86,7 +89,7 @@ use {
         ops::RangeBounds,
         path::{Path, PathBuf},
         sync::{
-            atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering},
+            atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
             Arc, Condvar, Mutex, RwLock, RwLockReadGuard,
         },
         thread::{self, sleep},
@@ -588,10 +591,6 @@ impl IsZeroLamport for Account {
         self.lamports() == 0
     }
 }
-
-/// An offset into the AccountsDb::storage vector
-pub type AtomicAccountsFileId = AtomicU32;
-pub type AccountsFileId = u32;
 
 type AccountSlots = HashMap<Pubkey, IntSet<Slot>>;
 type SlotOffsets = IntMap<Slot, IntSet<Offset>>;

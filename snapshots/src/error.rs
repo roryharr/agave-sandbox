@@ -1,7 +1,7 @@
 use {
     crate::{hardened_unpack::UnpackError, snapshot_hash::SnapshotHash},
     semver::Version,
-    solana_accounts_db::{accounts_db::AccountsFileId, accounts_file::AccountsFileError},
+    solana_accounts_db::accounts_file::{AccountsFileError, AccountsFileId},
     solana_clock::{Epoch, Slot},
     std::{io, ops::RangeInclusive, path::PathBuf, process::ExitStatus},
     thiserror::Error,
