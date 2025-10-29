@@ -16,7 +16,8 @@ use {
     },
     solana_accounts_db::{
         account_storage::AccountStorageMap,
-        accounts_file::{AccountsFileId, AtomicAccountsFileId, StorageAccess},
+        accounts_db::AtomicAccountsFileId,
+        accounts_file::{AccountsFileId, StorageAccess},
     },
     solana_clock::Slot,
     std::{

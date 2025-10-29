@@ -41,7 +41,7 @@ use {
     },
     log::*,
     solana_accounts_db::{
-        accounts_db::AccountsDbConfig, accounts_file::AtomicAccountsFileId,
+        accounts_db::{AccountsDbConfig, AtomicAccountsFileId},
         accounts_update_notifier_interface::AccountsUpdateNotifier,
     },
     solana_clock::{Epoch, Slot},

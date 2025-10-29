@@ -15,7 +15,6 @@ use {
     std::{
         mem,
         path::{Path, PathBuf},
-        sync::atomic::AtomicU32,
     },
     thiserror::Error,
 };
@@ -64,8 +63,7 @@ pub enum AccountsFile {
     TieredStorage(TieredStorage),
 }
 
-/// An offset into the AccountsDb::storage vector
-pub type AtomicAccountsFileId = AtomicU32;
+// Value that uniquely identifies and accounts file.
 pub type AccountsFileId = u32;
 
 impl AccountsFile {

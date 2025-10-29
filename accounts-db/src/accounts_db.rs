@@ -41,8 +41,7 @@ use {
             ShrinkAncientStats, ShrinkStats, ShrinkStatsSub, StoreAccountsTiming,
         },
         accounts_file::{
-            AccountsFile, AccountsFileError, AccountsFileId, AccountsFileProvider,
-            AtomicAccountsFileId, StorageAccess,
+            AccountsFile, AccountsFileError, AccountsFileId, AccountsFileProvider, StorageAccess,
         },
         accounts_hash::{AccountLtHash, AccountsLtHash, ZERO_LAMPORT_ACCOUNT_LT_HASH},
         accounts_index::{
@@ -89,7 +88,7 @@ use {
         ops::RangeBounds,
         path::{Path, PathBuf},
         sync::{
-            atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+            atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering},
             Arc, Condvar, Mutex, RwLock, RwLockReadGuard,
         },
         thread::{self, sleep},
@@ -592,6 +591,7 @@ impl IsZeroLamport for Account {
     }
 }
 
+pub type AtomicAccountsFileId = AtomicU32;
 type AccountSlots = HashMap<Pubkey, IntSet<Slot>>;
 type SlotOffsets = IntMap<Slot, IntSet<Offset>>;
 type ReclaimResult = (AccountSlots, SlotOffsets);

@@ -16,8 +16,11 @@ use {
     serde::{de::DeserializeOwned, Deserialize, Serialize},
     solana_accounts_db::{
         accounts::Accounts,
-        accounts_db::{AccountStorageEntry, AccountsDb, AccountsDbConfig, IndexGenerationInfo},
-        accounts_file::{AccountsFile, AccountsFileId, AtomicAccountsFileId, StorageAccess},
+        accounts_db::{
+            AccountStorageEntry, AccountsDb, AccountsDbConfig, AtomicAccountsFileId,
+            IndexGenerationInfo,
+        },
+        accounts_file::{AccountsFile, AccountsFileId, StorageAccess},
         accounts_hash::AccountsLtHash,
         accounts_update_notifier_interface::AccountsUpdateNotifier,
         ancestors::AncestorsForSerialization,
