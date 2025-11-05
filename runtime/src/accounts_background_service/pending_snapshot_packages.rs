@@ -10,6 +10,7 @@ use {
 pub struct PendingSnapshotPackages {
     full: Option<SnapshotPackage>,
     incremental: Option<SnapshotPackage>,
+    fastboot: Option<SnapshotPackage>,
 }
 
 impl PendingSnapshotPackages {
@@ -65,6 +66,13 @@ impl PendingSnapshotPackages {
                     );
                 }
                 self.incremental = Some(snapshot_package)
+            }
+            SnapshotKind::FastbootSnapshot => {
+                assert!(
+                    self.fastboot.is_none(),
+                    "only one fastboot snapshot package can be pending at a time"
+                );
+                self.fastboot = Some(snapshot_package)
             }
         }
     }
@@ -195,6 +203,7 @@ mod tests {
         let mut pending_snapshot_packages = PendingSnapshotPackages {
             full: Some(new_full(slot)),
             incremental: None,
+            fastboot: None,
         };
 
         // pushing an older full should panic
@@ -209,6 +218,7 @@ mod tests {
         let mut pending_snapshot_packages = PendingSnapshotPackages {
             full: None,
             incremental: Some(new_incr(slot, base)),
+            fastboot: None,
         };
 
         // pushing an older incremental should panic
@@ -271,6 +281,7 @@ mod tests {
         let mut pending_snapshot_packages = PendingSnapshotPackages {
             full: Some(new_incr(110, 100)), // <-- invalid! `full` is IncrementalSnapshot
             incremental: None,
+            fastboot: None,
         };
         pending_snapshot_packages.pop();
     }
@@ -281,6 +292,7 @@ mod tests {
         let mut pending_snapshot_packages = PendingSnapshotPackages {
             full: None,
             incremental: Some(new_full(100)), // <-- invalid! `incremental` is FullSnapshot
+            fastboot: None,
         };
         pending_snapshot_packages.pop();
     }

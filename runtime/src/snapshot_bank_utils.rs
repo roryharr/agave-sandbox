@@ -746,7 +746,7 @@ fn bank_to_full_snapshot_archive_with(
         should_flush_and_hard_link_storages,
     )?;
 
-    Ok(FullSnapshotArchiveInfo::new(snapshot_archive_info))
+    Ok(FullSnapshotArchiveInfo::new(snapshot_archive_info.unwrap()))
 }
 
 /// Convenience function to create an incremental snapshot archive out of any Bank, regardless of
@@ -807,7 +807,7 @@ pub fn bank_to_incremental_snapshot_archive(
 
     Ok(IncrementalSnapshotArchiveInfo::new(
         full_snapshot_slot,
-        snapshot_archive_info,
+        snapshot_archive_info.unwrap(),
     ))
 }
 

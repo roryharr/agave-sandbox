@@ -6,6 +6,7 @@ use solana_clock::Slot;
 pub enum SnapshotKind {
     FullSnapshot,
     IncrementalSnapshot(Slot),
+    FastbootSnapshot,
 }
 
 impl SnapshotKind {

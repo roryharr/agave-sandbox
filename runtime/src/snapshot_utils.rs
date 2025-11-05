@@ -494,7 +494,7 @@ pub fn serialize_and_archive_snapshot_package(
     snapshot_package: SnapshotPackage,
     snapshot_config: &SnapshotConfig,
     should_flush_and_hard_link_storages: bool,
-) -> Result<SnapshotArchiveInfo> {
+) -> Result<Option<SnapshotArchiveInfo>> {
     let SnapshotPackage {
         snapshot_kind,
         slot: snapshot_slot,
@@ -519,10 +519,17 @@ pub fn serialize_and_archive_snapshot_package(
         should_flush_and_hard_link_storages,
     )?;
 
+    if snapshot_kind == SnapshotKind::FastbootSnapshot {
+        return Ok(None);
+    }
+
     // now write the full snapshot slot file after serializing so this bank snapshot is loadable
     let full_snapshot_archive_slot = match snapshot_kind {
         SnapshotKind::FullSnapshot => snapshot_slot,
         SnapshotKind::IncrementalSnapshot(base_slot) => base_slot,
+        SnapshotKind::FastbootSnapshot => {
+            panic!("Fastboot snapshots are not archived")
+        }
     };
     write_full_snapshot_slot_file(&bank_snapshot_info.snapshot_dir, full_snapshot_archive_slot)
         .map_err(|err| {
@@ -551,6 +558,9 @@ pub fn serialize_and_archive_snapshot_package(
                 snapshot_config.archive_format,
             )
         }
+        SnapshotKind::FastbootSnapshot => {
+            panic!("Fastboot snapshots are not archived")
+        }
     };
 
     let snapshot_archive_info = archive_snapshot(
@@ -563,7 +573,7 @@ pub fn serialize_and_archive_snapshot_package(
         snapshot_config.archive_format,
     )?;
 
-    Ok(snapshot_archive_info)
+    Ok(Some(snapshot_archive_info))
 }
 
 /// Serializes a snapshot into `bank_snapshots_dir`

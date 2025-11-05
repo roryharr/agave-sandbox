@@ -19,10 +19,15 @@ pub fn cmp_snapshot_kinds_by_priority(a: &SnapshotKind, b: &SnapshotKind) -> Ord
     match (a, b) {
         (Kind::FullSnapshot, Kind::FullSnapshot) => Equal,
         (Kind::FullSnapshot, Kind::IncrementalSnapshot(_)) => Greater,
+        (Kind::FullSnapshot, Kind::FastbootSnapshot) => Less,
         (Kind::IncrementalSnapshot(_), Kind::FullSnapshot) => Less,
         (Kind::IncrementalSnapshot(base_slot_a), Kind::IncrementalSnapshot(base_slot_b)) => {
             base_slot_a.cmp(base_slot_b)
         }
+        (Kind::IncrementalSnapshot(_), Kind::FastbootSnapshot) => Less,
+        (Kind::FastbootSnapshot, Kind::FullSnapshot) => Less,
+        (Kind::FastbootSnapshot, Kind::IncrementalSnapshot(_)) => Less,
+        (Kind::FastbootSnapshot, Kind::FastbootSnapshot) => Equal,
     }
 }
 

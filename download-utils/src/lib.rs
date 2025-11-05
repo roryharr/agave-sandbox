@@ -73,6 +73,9 @@ pub fn download_snapshot_archive(
         snapshot_paths::build_snapshot_archives_remote_dir(match snapshot_kind {
             SnapshotKind::FullSnapshot => full_snapshot_archives_dir,
             SnapshotKind::IncrementalSnapshot(_) => incremental_snapshot_archives_dir,
+            SnapshotKind::FastbootSnapshot => {
+                panic!("Fastboot snapshots are not supported for download")
+            }
         });
     fs::create_dir_all(&snapshot_archives_remote_dir).unwrap();
 
@@ -97,6 +100,9 @@ pub fn download_snapshot_archive(
                     &desired_snapshot_hash.1,
                     archive_format,
                 )
+            }
+            SnapshotKind::FastbootSnapshot => {
+                panic!("Fastboot snapshots are not supported for download")
             }
         };
 

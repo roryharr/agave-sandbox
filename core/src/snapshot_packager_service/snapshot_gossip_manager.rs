@@ -63,6 +63,9 @@ impl SnapshotGossipManager {
                     base_slot,
                 );
             }
+            SnapshotKind::FastbootSnapshot => {
+                // Fastboot snapshots are not gossiped
+            }
         }
     }
 

@@ -89,7 +89,7 @@ impl SnapshotController {
                 } else if should_request_full_snapshot {
                     Some((bank, SnapshotRequestKind::FullSnapshot))
                 } else if should_request_incremental_snapshot {
-                    Some((bank, SnapshotRequestKind::IncrementalSnapshot))
+                    Some((bank, SnapshotRequestKind::FastbootSnapshot))
                 } else {
                     None
                 }
