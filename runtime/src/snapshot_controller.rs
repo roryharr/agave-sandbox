@@ -4,18 +4,12 @@ use {
             SnapshotRequest, SnapshotRequestKind, SnapshotRequestSender,
         },
         bank::{Bank, SquashTiming},
-    },
-    agave_snapshots::{snapshot_config::SnapshotConfig, SnapshotInterval},
-    log::*,
-    solana_clock::Slot,
-    solana_measure::measure::Measure,
-    std::{
+    }, agave_snapshots::{SnapshotInterval, snapshot_config::SnapshotConfig}, log::*, solana_clock::Slot, solana_measure::measure::Measure, std::{
         sync::{
-            atomic::{AtomicU64, Ordering},
-            Arc,
+            Arc, atomic::{AtomicU64, Ordering}
         },
         time::Instant,
-    },
+    }
 };
 
 struct SnapshotGenerationIntervals {
@@ -89,6 +83,39 @@ impl SnapshotController {
                 } else if should_request_full_snapshot {
                     Some((bank, SnapshotRequestKind::FullSnapshot))
                 } else if should_request_incremental_snapshot {
+                    Some((bank, SnapshotRequestKind::FastbootSnapshot))
+                } else {
+                    None
+                }
+            }) {
+                let bank_slot = bank.slot();
+                self.set_latest_abs_request_slot(bank_slot);
+                squash_timing += bank.squash();
+
+                is_root_bank_squashed = bank_slot == root;
+
+                let mut snapshot_time = Measure::start("squash::snapshot_time");
+                // Save off the status cache because these may get pruned if another
+                // `set_root()` is called before the snapshots package can be generated
+                let status_cache_slot_deltas = bank.status_cache.read().unwrap().root_slot_deltas();
+                if let Err(e) = self.abs_request_sender.send(SnapshotRequest {
+                    snapshot_root_bank: Arc::clone(bank),
+                    status_cache_slot_deltas,
+                    request_kind,
+                    enqueued: Instant::now(),
+                }) {
+                    warn!("Error sending snapshot request for bank: {bank_slot}, err: {e:?}");
+                }
+                snapshot_time.stop();
+                total_snapshot_ms += snapshot_time.as_ms();
+            }
+        }
+        else
+        {
+            if let Some((bank, request_kind)) = banks.iter().find_map(|bank| {
+                let should_request_fastboot_snapshot = bank.block_height() % 100 == 0;
+
+                if should_request_fastboot_snapshot && bank.slot() > self.latest_abs_request_slot() {
                     Some((bank, SnapshotRequestKind::FastbootSnapshot))
                 } else {
                     None
