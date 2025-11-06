@@ -81,8 +81,9 @@ impl PendingSnapshotPackages {
     pub fn pop(&mut self) -> Option<SnapshotPackage> {
         let pending_full = self.full.take();
         let pending_incremental = self.incremental.take();
-        match (pending_full, pending_incremental) {
-            (Some(pending_full), pending_incremental) => {
+        let pending_fastboot = self.fastboot.take();
+        match (pending_full, pending_incremental, pending_fastboot) {
+            (Some(pending_full), pending_incremental, _) => {
                 // If there is a pending incremental snapshot package, check its slot.
                 // If its slot is greater than the full snapshot package's,
                 // re-enqueue it, otherwise drop it.
@@ -108,11 +109,12 @@ impl PendingSnapshotPackages {
                 assert!(pending_full.snapshot_kind.is_full_snapshot());
                 Some(pending_full)
             }
-            (None, Some(pending_incremental)) => {
+            (None, Some(pending_incremental), _) => {
                 assert!(pending_incremental.snapshot_kind.is_incremental_snapshot());
                 Some(pending_incremental)
             }
-            (None, None) => None,
+            (None, None, Some(pending_fastboot)) => Some(pending_fastboot),
+            (None, None, None) => None,
         }
     }
 }
