@@ -68,10 +68,6 @@ impl PendingSnapshotPackages {
                 self.incremental = Some(snapshot_package)
             }
             SnapshotKind::FastbootSnapshot => {
-                assert!(
-                    self.fastboot.is_none(),
-                    "only one fastboot snapshot package can be pending at a time"
-                );
                 self.fastboot = Some(snapshot_package)
             }
         }
