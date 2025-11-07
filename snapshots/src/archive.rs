@@ -11,12 +11,7 @@ use {
     solana_clock::Slot,
     solana_measure::measure::Measure,
     solana_metrics::datapoint_info,
-    std::{
-        fs,
-        io::Write,
-        path::{Path, PathBuf},
-        sync::Arc,
-    },
+    std::{fs, io::Write, path::{Path, PathBuf}, sync::Arc},
 };
 
 // Balance large and small files order in snapshot tar with bias towards small (4 small + 1 large),
@@ -75,9 +70,9 @@ pub fn archive_snapshot(
         .map_err(|err| E::CreateSnapshotStagingDir(err, staging_snapshot_dir.clone()))?;
 
     // To be a source for symlinking and archiving, the path need to be an absolute path
-    let src_snapshot_dir = bank_snapshot_dir
-        .canonicalize()
-        .map_err(|err| E::CanonicalizeSnapshotSourceDir(err, bank_snapshot_dir.to_path_buf()))?;
+    let src_snapshot_dir = bank_snapshot_dir.canonicalize().map_err(|err| {
+        E::CanonicalizeSnapshotSourceDir(err, bank_snapshot_dir.to_path_buf())
+    })?;
     let staging_snapshot_file = staging_snapshot_dir.join(&slot_str);
     let src_snapshot_file = src_snapshot_dir.join(slot_str);
     symlink::symlink_file(&src_snapshot_file, &staging_snapshot_file)
