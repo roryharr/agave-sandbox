@@ -72,6 +72,15 @@ const MAX_SNAPSHOT_VERSION_FILE_SIZE: u64 = 8; // byte
 //         Snapshots created with versions <2.0.0 will fastboot to version 2.0.0
 const SNAPSHOT_FASTBOOT_VERSION: Version = Version::new(2, 0, 0);
 
+/// A package of bank snapshot data to be serialized
+pub struct BankSnapshotPackage<'a> {
+    pub bank_fields: BankFieldsToSerialize,
+    pub bank_hash_stats: BankHashStats,
+    pub snapshot_storages: &'a [Arc<AccountStorageEntry>],
+    pub slot_deltas: Vec<BankSlotDelta>,
+    pub write_version: u64,
+}
+
 /// Information about a bank snapshot. Namely the slot of the bank, the path to the snapshot, and
 /// the kind of the snapshot.
 #[derive(PartialEq, Eq, Debug)]
@@ -453,14 +462,18 @@ pub fn serialize_and_archive_snapshot_package(
         enqueued: _,
     } = snapshot_package;
 
+    let bank_snapshot_package = BankSnapshotPackage {
+        bank_fields: bank_fields_to_serialize,
+        bank_hash_stats,
+        snapshot_storages: snapshot_storages.as_slice(),
+        slot_deltas: status_cache_slot_deltas,
+        write_version,
+    };
+
     let bank_snapshot_info = serialize_snapshot(
         &snapshot_config.bank_snapshots_dir,
         snapshot_config.snapshot_version,
-        snapshot_storages.as_slice(),
-        status_cache_slot_deltas.as_slice(),
-        bank_fields_to_serialize,
-        bank_hash_stats,
-        write_version,
+        bank_snapshot_package,
         should_flush_and_hard_link_storages,
     )?;
 
@@ -499,17 +512,14 @@ pub fn serialize_and_archive_snapshot_package(
 }
 
 /// Serializes a snapshot into `bank_snapshots_dir`
-#[allow(clippy::too_many_arguments)]
 fn serialize_snapshot(
     bank_snapshots_dir: impl AsRef<Path>,
     snapshot_version: SnapshotVersion,
-    snapshot_storages: &[Arc<AccountStorageEntry>],
-    slot_deltas: &[BankSlotDelta],
-    mut bank_fields: BankFieldsToSerialize,
-    bank_hash_stats: BankHashStats,
-    write_version: u64,
+    bank_snapshot_package: BankSnapshotPackage,
     should_flush_and_hard_link_storages: bool,
 ) -> Result<BankSnapshotInfo> {
+    let mut bank_fields = bank_snapshot_package.bank_fields;
+    let snapshot_storages = bank_snapshot_package.snapshot_storages;
     let slot = bank_fields.slot;
 
     // this lambda function is to facilitate converting between
@@ -546,10 +556,10 @@ fn serialize_snapshot(
             serde_snapshot::serialize_bank_snapshot_into(
                 stream,
                 bank_fields,
-                bank_hash_stats,
+                bank_snapshot_package.bank_hash_stats,
                 &get_storages_to_serialize(snapshot_storages),
                 extra_fields,
-                write_version,
+                bank_snapshot_package.write_version,
             )?;
             Ok(())
         };
@@ -561,10 +571,12 @@ fn serialize_snapshot(
 
         let status_cache_path =
             bank_snapshot_dir.join(snapshot_paths::SNAPSHOT_STATUS_CACHE_FILENAME);
-        let (status_cache_consumed_size, status_cache_serialize_us) = measure_us!(
-            serde_snapshot::serialize_status_cache(slot_deltas, &status_cache_path)
-                .map_err(|err| AddBankSnapshotError::SerializeStatusCache(Box::new(err)))?
-        );
+        let (status_cache_consumed_size, status_cache_serialize_us) =
+            measure_us!(serde_snapshot::serialize_status_cache(
+                bank_snapshot_package.slot_deltas.as_slice(),
+                &status_cache_path
+            )
+            .map_err(|err| AddBankSnapshotError::SerializeStatusCache(Box::new(err)))?);
 
         let version_path = bank_snapshot_dir.join(snapshot_paths::SNAPSHOT_VERSION_FILENAME);
         let (_, write_version_file_us) = measure_us!(fs::write(
