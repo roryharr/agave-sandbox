@@ -26,7 +26,8 @@ use {
             SnapshotArchiveInfoGetter,
         },
         snapshot_config::SnapshotConfig,
-        streaming_unarchive_snapshot, ArchiveFormat, Result, SnapshotKind, SnapshotVersion,
+        streaming_unarchive_snapshot, ArchiveFormat, ArchivePackage, Result, SnapshotKind,
+        SnapshotVersion,
     },
     crossbeam_channel::{Receiver, Sender},
     log::*,
@@ -454,7 +455,7 @@ pub fn serialize_and_archive_snapshot_package(
         slot: snapshot_slot,
         block_height: _,
         hash: snapshot_hash,
-        mut snapshot_storages,
+        snapshot_storages,
         status_cache_slot_deltas,
         bank_fields_to_serialize,
         bank_hash_stats,
@@ -477,33 +478,39 @@ pub fn serialize_and_archive_snapshot_package(
         should_flush_and_hard_link_storages,
     )?;
 
-    let snapshot_archive_path = match snapshot_package.snapshot_kind {
+    let mut archive_package = ArchivePackage {
+        snapshot_kind,
+        snapshot_slot,
+        snapshot_hash,
+        snapshot_storages,
+        bank_snapshot_dir: bank_snapshot_info.snapshot_dir,
+    };
+
+    let snapshot_archive_path = match archive_package.snapshot_kind {
         SnapshotKind::FullSnapshot => snapshot_paths::build_full_snapshot_archive_path(
             &snapshot_config.full_snapshot_archives_dir,
-            snapshot_package.slot,
-            &snapshot_package.hash,
+            archive_package.snapshot_slot,
+            &archive_package.snapshot_hash,
             snapshot_config.archive_format,
         ),
         SnapshotKind::IncrementalSnapshot(incremental_snapshot_base_slot) => {
             // After the snapshot has been serialized, it is now safe (and required) to prune all
             // the storages that are *not* to be archived for this incremental snapshot.
-            snapshot_storages.retain(|storage| storage.slot() > incremental_snapshot_base_slot);
+            archive_package
+                .snapshot_storages
+                .retain(|storage| storage.slot() > incremental_snapshot_base_slot);
             snapshot_paths::build_incremental_snapshot_archive_path(
                 &snapshot_config.incremental_snapshot_archives_dir,
                 incremental_snapshot_base_slot,
-                snapshot_package.slot,
-                &snapshot_package.hash,
+                archive_package.snapshot_slot,
+                &archive_package.snapshot_hash,
                 snapshot_config.archive_format,
             )
         }
     };
 
     let snapshot_archive_info = archive_snapshot(
-        snapshot_kind,
-        snapshot_slot,
-        snapshot_hash,
-        snapshot_storages.as_slice(),
-        &bank_snapshot_info.snapshot_dir,
+        archive_package,
         snapshot_archive_path,
         snapshot_config.archive_format,
     )?;
