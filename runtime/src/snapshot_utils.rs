@@ -13,7 +13,7 @@ use {
         },
     },
     agave_snapshots::{
-        archive_snapshot, ArchivePackage,
+        archive_snapshot,
         error::{
             AddBankSnapshotError, GetSnapshotAccountsHardLinkDirError,
             HardLinkStoragesToSnapshotError, SnapshotError, SnapshotFastbootError,
@@ -25,7 +25,8 @@ use {
             SnapshotArchiveInfoGetter,
         },
         snapshot_config::SnapshotConfig,
-        streaming_unarchive_snapshot, ArchiveFormat, Result, SnapshotKind, SnapshotVersion,
+        streaming_unarchive_snapshot, ArchiveFormat, ArchivePackage, Result, SnapshotKind,
+        SnapshotVersion,
     },
     crossbeam_channel::{Receiver, Sender},
     log::*,

@@ -112,7 +112,8 @@ impl SnapshotPackagerService {
 
                     if let Err(err) = bank_snapshot_info {
                         error!(
-                            "Stopping {}! Fatal error while serializing snapshot for slot {}: {err}",
+                            "Stopping {}! Fatal error while serializing snapshot for slot {}: \
+                             {err}",
                             Self::NAME,
                             snapshot_slot,
                         );
@@ -132,11 +133,9 @@ impl SnapshotPackagerService {
                     // Archiving the snapshot package is not allowed to fail.
                     // AccountsBackgroundService calls `clean_accounts()` with a value for
                     // latest_full_snapshot_slot that requires this archive call to succeed.
-                    let (archive_result, archive_time_us) =
-                        measure_us!(snapshot_utils::archive_snapshot_package(
-                            archive_package,
-                            snapshot_config
-                        ));
+                    let (archive_result, archive_time_us) = measure_us!(
+                        snapshot_utils::archive_snapshot_package(archive_package, snapshot_config)
+                    );
                     if let Err(err) = archive_result {
                         error!(
                             "Stopping {}! Fatal error while archiving snapshot package: {err}",

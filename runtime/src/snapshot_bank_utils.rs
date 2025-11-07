@@ -40,7 +40,7 @@ use {
         },
         snapshot_config::SnapshotConfig,
         snapshot_hash::SnapshotHash,
-        ArchiveFormat, SnapshotKind, SnapshotVersion, ArchivePackage,
+        ArchiveFormat, ArchivePackage, SnapshotKind, SnapshotVersion,
     },
     log::*,
     solana_accounts_db::{
