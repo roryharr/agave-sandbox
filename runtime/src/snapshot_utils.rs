@@ -147,9 +147,8 @@ impl BankSnapshotInfo {
         let snapshot_fastboot_version_path =
             bank_snapshot_dir.join(snapshot_paths::SNAPSHOT_FASTBOOT_VERSION_FILENAME);
 
-        // If the version file is absent, fastboot_version will be None. This allows versions 3.1+
-        // to load snapshots created by versions <3.1. In version 3.2, the version file will become
-        // mandatory, and its absence can be treated as an error.
+        // If the version file is absent, fastboot_version will be None. This will occur if
+        // the the snapshot was never made loadable.
         let fastboot_version = fs::read_to_string(&snapshot_fastboot_version_path)
             .ok()
             .map(|version_string| {
@@ -1382,22 +1381,27 @@ pub fn rebuild_storages_from_snapshot_dir(
     let bank_snapshot_dir = &snapshot_info.snapshot_dir;
     let accounts_hardlinks = bank_snapshot_dir.join(snapshot_paths::SNAPSHOT_ACCOUNTS_HARDLINKS);
     let account_run_paths: HashSet<_> = HashSet::from_iter(account_paths);
+    let fastboot_version = snapshot_info
+        .fastboot_version
+        .as_ref()
+        .ok_or(SnapshotError::MissingFastbootVersion)?;
 
     // With fastboot_version >= 2, obsolete accounts are tracked and stored in the snapshot
     // Even if obsolete accounts are not enabled, the snapshot may still contain obsolete accounts
     // as the feature may have been enabled in previous validator runs.
-    let obsolete_accounts = snapshot_info
-        .fastboot_version
-        .as_ref()
-        .is_some_and(|fastboot_version| fastboot_version.major >= 2)
-        .then(|| deserialize_obsolete_accounts(bank_snapshot_dir, MAX_OBSOLETE_ACCOUNTS_FILE_SIZE))
-        .transpose()
-        .map_err(|err| {
-            IoError::other(format!(
-                "failed to read obsolete accounts file '{}': {err}",
-                bank_snapshot_dir.display()
-            ))
-        })?;
+    let obsolete_accounts = if fastboot_version.major >= 2 {
+        Some(
+            deserialize_obsolete_accounts(bank_snapshot_dir, MAX_OBSOLETE_ACCOUNTS_FILE_SIZE)
+                .map_err(|err| {
+                    IoError::other(format!(
+                        "failed to read obsolete accounts file '{}': {err}",
+                        bank_snapshot_dir.display()
+                    ))
+                })?,
+        )
+    } else {
+        None
+    };
 
     let read_dir = fs::read_dir(&accounts_hardlinks).map_err(|err| {
         IoError::other(format!(
