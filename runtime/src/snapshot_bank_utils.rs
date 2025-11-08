@@ -21,7 +21,7 @@ use {
         snapshot_package::SnapshotPackage,
         snapshot_utils::{
             self, rebuild_storages_from_snapshot_dir, verify_and_unarchive_snapshots,
-            BankSnapshotInfo, StorageAndNextAccountsFileId, UnarchivedSnapshots,
+            BootableBankSnapshotInfo, StorageAndNextAccountsFileId, UnarchivedSnapshots,
         },
         status_cache,
     },
@@ -333,7 +333,7 @@ pub fn bank_from_latest_snapshot_archives(
 #[allow(clippy::too_many_arguments)]
 pub fn bank_from_snapshot_dir(
     account_paths: &[PathBuf],
-    bank_snapshot: &BankSnapshotInfo,
+    bank_snapshot: &BootableBankSnapshotInfo,
     genesis_config: &GenesisConfig,
     runtime_config: &RuntimeConfig,
     debug_keys: Option<Arc<HashSet<Pubkey>>>,

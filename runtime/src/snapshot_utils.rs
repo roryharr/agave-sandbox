@@ -147,9 +147,8 @@ impl BankSnapshotInfo {
         let snapshot_fastboot_version_path =
             bank_snapshot_dir.join(snapshot_paths::SNAPSHOT_FASTBOOT_VERSION_FILENAME);
 
-        // If the version file is absent, fastboot_version will be None. This allows versions 3.1+
-        // to load snapshots created by versions <3.1. In version 3.2, the version file will become
-        // mandatory, and its absence can be treated as an error.
+        // If the version file is absent, fastboot_version will be None. This will occur
+        // if the snapshot was never marked loadable
         let fastboot_version = fs::read_to_string(&snapshot_fastboot_version_path)
             .ok()
             .map(|version_string| {
@@ -166,6 +165,40 @@ impl BankSnapshotInfo {
         })
     }
 
+    pub fn snapshot_path(&self) -> PathBuf {
+        self.snapshot_dir
+            .join(snapshot_paths::get_snapshot_file_name(self.slot))
+    }
+}
+
+/// Information about a fastbootable bank snapshot. Only difference from BankSnapshotInfo
+/// is that fastboot_version is guaranteed to be present
+#[derive(PartialEq, Eq, Debug)]
+pub struct BootableBankSnapshotInfo {
+    /// Slot of the bank
+    pub slot: Slot,
+    /// Path to the bank snapshot directory
+    pub snapshot_dir: PathBuf,
+    /// Snapshot version
+    pub snapshot_version: SnapshotVersion,
+    /// Fastboot version
+    pub fastboot_version: Version,
+}
+
+impl From<BankSnapshotInfo> for BootableBankSnapshotInfo {
+    fn from(bank_snapshot_info: BankSnapshotInfo) -> Self {
+        BootableBankSnapshotInfo {
+            slot: bank_snapshot_info.slot,
+            snapshot_dir: bank_snapshot_info.snapshot_dir,
+            snapshot_version: bank_snapshot_info.snapshot_version,
+            fastboot_version: bank_snapshot_info
+                .fastboot_version
+                .expect("Fastboot version is present"),
+        }
+    }
+}
+
+impl BootableBankSnapshotInfo {
     pub fn snapshot_path(&self) -> PathBuf {
         self.snapshot_dir
             .join(snapshot_paths::get_snapshot_file_name(self.slot))
@@ -387,14 +420,14 @@ fn is_snapshot_fastboot_compatible(
 /// The highest bank snapshot is the one with the highest slot.
 pub fn get_highest_loadable_bank_snapshot(
     snapshot_config: &SnapshotConfig,
-) -> Option<BankSnapshotInfo> {
+) -> Option<BootableBankSnapshotInfo> {
     let highest_bank_snapshot = get_highest_bank_snapshot(&snapshot_config.bank_snapshots_dir)?;
 
     let is_bank_snapshot_loadable =
         is_bank_snapshot_loadable(highest_bank_snapshot.fastboot_version.as_ref());
 
     match is_bank_snapshot_loadable {
-        Ok(true) => Some(highest_bank_snapshot),
+        Ok(true) => Some(highest_bank_snapshot.into()),
         Ok(false) => None,
         Err(err) => {
             warn!(
@@ -1370,7 +1403,7 @@ fn streaming_snapshot_dir_files(
 /// Handles reading the snapshot file and version file,
 /// then returning those fields plus the rebuilt storages.
 pub fn rebuild_storages_from_snapshot_dir(
-    snapshot_info: &BankSnapshotInfo,
+    snapshot_info: &BootableBankSnapshotInfo,
     account_paths: &[PathBuf],
     next_append_vec_id: Arc<AtomicAccountsFileId>,
     storage_access: StorageAccess,
@@ -1386,18 +1419,19 @@ pub fn rebuild_storages_from_snapshot_dir(
     // With fastboot_version >= 2, obsolete accounts are tracked and stored in the snapshot
     // Even if obsolete accounts are not enabled, the snapshot may still contain obsolete accounts
     // as the feature may have been enabled in previous validator runs.
-    let obsolete_accounts = snapshot_info
-        .fastboot_version
-        .as_ref()
-        .is_some_and(|fastboot_version| fastboot_version.major >= 2)
-        .then(|| deserialize_obsolete_accounts(bank_snapshot_dir, MAX_OBSOLETE_ACCOUNTS_FILE_SIZE))
-        .transpose()
-        .map_err(|err| {
-            IoError::other(format!(
-                "failed to read obsolete accounts file '{}': {err}",
-                bank_snapshot_dir.display()
-            ))
-        })?;
+    let obsolete_accounts = if snapshot_info.fastboot_version.major >= 2 {
+        Some(
+            deserialize_obsolete_accounts(bank_snapshot_dir, MAX_OBSOLETE_ACCOUNTS_FILE_SIZE)
+                .map_err(|err| {
+                    IoError::other(format!(
+                        "failed to read obsolete accounts file '{}': {err}",
+                        bank_snapshot_dir.display()
+                    ))
+                })?,
+        )
+    } else {
+        None
+    };
 
     let read_dir = fs::read_dir(&accounts_hardlinks).map_err(|err| {
         IoError::other(format!(
