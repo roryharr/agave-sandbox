@@ -28,6 +28,9 @@ pub enum SnapshotError {
     #[error("Unpack error: {0}")]
     UnpackError(#[from] UnpackError),
 
+    #[error("missing fastboot version")]
+    MissingFastbootVersion,
+
     #[error("source({1}) - I/O error: {0}")]
     IoWithSource(io::Error, &'static str),
 

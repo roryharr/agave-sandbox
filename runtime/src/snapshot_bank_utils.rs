@@ -2126,6 +2126,41 @@ mod tests {
     }
 
     #[test]
+    fn test_bank_from_snapshot_dir_missing_fastboot_version() {
+        let genesis_config = GenesisConfig::default();
+        let bank_snapshots_dir = tempfile::TempDir::new().unwrap();
+        let bank = create_snapshot_dirs_for_tests(&genesis_config, &bank_snapshots_dir, 3, true);
+
+        let bank_snapshot = get_highest_bank_snapshot(&bank_snapshots_dir).unwrap();
+        let account_paths = &bank.rc.accounts.accounts_db.paths;
+
+        // get_highest_bank_snapshot populates the fastboot_version field, and will not return the
+        // snapshot if the fastboot version file is missing. So we manually create a BankSnapshotInfo
+        // without the fastboot version to simulate this case.
+        let bank_snapshot = BankSnapshotInfo {
+            snapshot_dir: bank_snapshot.snapshot_dir.clone(),
+            slot: bank_snapshot.slot,
+            snapshot_version: bank_snapshot.snapshot_version,
+            fastboot_version: None,
+        };
+
+        let bank_constructed = bank_from_snapshot_dir(
+            account_paths,
+            &bank_snapshot,
+            &genesis_config,
+            &RuntimeConfig::default(),
+            None,
+            None,
+            false,
+            ACCOUNTS_DB_CONFIG_FOR_TESTING,
+            None,
+            Arc::default(),
+        );
+
+        assert!(matches!(bank_constructed, Err(SnapshotError::MissingFastbootVersion)));
+    }
+
+    #[test]
     fn test_bank_from_latest_snapshot_dir() {
         let genesis_config = GenesisConfig::default();
         let bank_snapshots_dir = tempfile::TempDir::new().unwrap();
