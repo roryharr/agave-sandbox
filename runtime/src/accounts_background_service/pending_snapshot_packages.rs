@@ -12,6 +12,7 @@ use {
 pub struct PendingSnapshotPackages {
     full: Option<SnapshotPackage>,
     incremental: Option<SnapshotPackage>,
+    fastboot: Option<SnapshotPackage>,
 }
 
 impl PendingSnapshotPackages {
@@ -27,6 +28,7 @@ impl PendingSnapshotPackages {
             SnapshotKind::Archive(SnapshotArchiveKind::Incremental(_)) => {
                 (&mut self.incremental, "incremental")
             }
+            SnapshotKind::Fastboot => (&mut self.fastboot, "fastboot"),
         };
 
         if let Some(pending_snapshot_package) = pending_package.as_ref() {
@@ -86,7 +88,18 @@ impl PendingSnapshotPackages {
                 assert!(pending_incremental.snapshot_kind.is_incremental_snapshot());
                 Some(pending_incremental)
             }
-            (None, None) => None,
+            (None, None) => {
+                // No pending archive snapshot packages; check for fastboot packages
+                let pending_fastboot = self.fastboot.take();
+                if let Some(ref pending_fastboot) = pending_fastboot {
+                    assert!(
+                        pending_fastboot.snapshot_kind == SnapshotKind::Fastboot,
+                        "the pending fastboot snapshot package must be of kind Fastboot, but \
+                         instead was {pending_fastboot:?}",
+                    );
+                }
+                pending_fastboot
+            }
         }
     }
 }
@@ -112,6 +125,10 @@ mod tests {
         )
     }
 
+    fn new_fastboot(slot: Slot) -> SnapshotPackage {
+        new(SnapshotKind::Fastboot, slot)
+    }
+
     #[test]
     fn test_default() {
         let pending_snapshot_packages = PendingSnapshotPackages::default();
@@ -128,12 +145,14 @@ mod tests {
         pending_snapshot_packages.push(new_full(slot));
         assert_eq!(pending_snapshot_packages.full.as_ref().unwrap().slot, slot);
         assert!(pending_snapshot_packages.incremental.is_none());
+        assert!(pending_snapshot_packages.fastboot.is_none());
 
         // ensure we can overwrite full snapshot packages
         let slot = slot + 100;
         pending_snapshot_packages.push(new_full(slot));
         assert_eq!(pending_snapshot_packages.full.as_ref().unwrap().slot, slot);
         assert!(pending_snapshot_packages.incremental.is_none());
+        assert!(pending_snapshot_packages.fastboot.is_none());
 
         // ensure we can push incremental packages
         let full_slot = slot;
@@ -147,6 +166,7 @@ mod tests {
             pending_snapshot_packages.incremental.as_ref().unwrap().slot,
             slot,
         );
+        assert!(pending_snapshot_packages.fastboot.is_none());
 
         // ensure we can overwrite incremental packages
         let slot = slot + 10;
@@ -159,6 +179,7 @@ mod tests {
             pending_snapshot_packages.incremental.as_ref().unwrap().slot,
             slot,
         );
+        assert!(pending_snapshot_packages.fastboot.is_none());
 
         // ensure pushing a full package doesn't affect the incremental package
         // (we already tested above that pushing an incremental doesn't affect the full)
@@ -170,6 +191,7 @@ mod tests {
             pending_snapshot_packages.incremental.as_ref().unwrap().slot,
             incremental_slot,
         );
+        assert!(pending_snapshot_packages.fastboot.is_none());
 
         // ensure we can overwrite incremental packages with incremental packages
         // with a new full slot
@@ -184,6 +206,50 @@ mod tests {
             pending_snapshot_packages.incremental.as_ref().unwrap().slot,
             slot,
         );
+        assert!(pending_snapshot_packages.fastboot.is_none());
+
+        // ensure we can push fastboot packages
+        let incremental_slot = slot;
+        let slot = slot + 50;
+        let fastboot_package = SnapshotPackage {
+            snapshot_kind: SnapshotKind::Fastboot,
+            slot,
+            ..SnapshotPackage::default_for_tests()
+        };
+        pending_snapshot_packages.push(fastboot_package);
+        assert_eq!(
+            pending_snapshot_packages.fastboot.as_ref().unwrap().slot,
+            slot,
+        );
+        assert_eq!(
+            pending_snapshot_packages.full.as_ref().unwrap().slot,
+            full_slot,
+        );
+        assert_eq!(
+            pending_snapshot_packages.incremental.as_ref().unwrap().slot,
+            incremental_slot,
+        );
+
+        // ensure we can overwrite fastboot packages
+        let slot = slot + 10;
+        let fastboot_package = SnapshotPackage {
+            snapshot_kind: SnapshotKind::Fastboot,
+            slot,
+            ..SnapshotPackage::default_for_tests()
+        };
+        pending_snapshot_packages.push(fastboot_package);
+        assert_eq!(
+            pending_snapshot_packages.fastboot.as_ref().unwrap().slot,
+            slot,
+        );
+        assert_eq!(
+            pending_snapshot_packages.full.as_ref().unwrap().slot,
+            full_slot,
+        );
+        assert_eq!(
+            pending_snapshot_packages.incremental.as_ref().unwrap().slot,
+            incremental_slot,
+        );
     }
 
     #[test]
@@ -193,6 +259,7 @@ mod tests {
         let mut pending_snapshot_packages = PendingSnapshotPackages {
             full: Some(new_full(slot)),
             incremental: None,
+            fastboot: None,
         };
 
         // pushing an older full should panic
@@ -207,10 +274,25 @@ mod tests {
         let mut pending_snapshot_packages = PendingSnapshotPackages {
             full: None,
             incremental: Some(new_incr(slot, base)),
+            fastboot: None,
         };
 
         // pushing an older incremental should panic
         pending_snapshot_packages.push(new_incr(slot - 1, base));
+    }
+
+    #[test]
+    #[should_panic(expected = "fastboot snapshot package must be newer than pending package")]
+    fn test_push_older_fastboot() {
+        let slot = 100;
+        let mut pending_snapshot_packages = PendingSnapshotPackages {
+            full: None,
+            incremental: None,
+            fastboot: Some(new_fastboot(slot)),
+        };
+
+        // pushing an older incremental should panic
+        pending_snapshot_packages.push(new_fastboot(slot - 1));
     }
 
     #[test]
@@ -240,8 +322,10 @@ mod tests {
         // ensure pop returns full when there's both a full and newer incremental
         let full_slot = 100;
         let incr_slot = full_slot + 10;
+        let fastboot_slot = incr_slot + 10;
         pending_snapshot_packages.full = Some(new_full(full_slot));
         pending_snapshot_packages.incremental = Some(new_incr(incr_slot, full_slot));
+        pending_snapshot_packages.fastboot = Some(new_fastboot(fastboot_slot));
         let snapshot_package = pending_snapshot_packages.pop().unwrap();
         assert!(snapshot_package.snapshot_kind.is_full_snapshot());
         assert_eq!(snapshot_package.slot, full_slot);
@@ -250,6 +334,12 @@ mod tests {
         let snapshot_package = pending_snapshot_packages.pop().unwrap();
         assert!(snapshot_package.snapshot_kind.is_incremental_snapshot());
         assert_eq!(snapshot_package.slot, incr_slot);
+
+        // .. and then the third pop returns the fastboot. This also tests that popping
+        // fastboot in isolation works, as all archive snapshot packages have been popped.
+        let snapshot_package = pending_snapshot_packages.pop().unwrap();
+        assert!(snapshot_package.snapshot_kind == SnapshotKind::Fastboot);
+        assert_eq!(snapshot_package.slot, fastboot_slot);
 
         // but, if there's a full and *older* incremental, pop should return
         // the full and *not* re-enqueue the incremental
@@ -269,6 +359,7 @@ mod tests {
         let mut pending_snapshot_packages = PendingSnapshotPackages {
             full: Some(new_incr(110, 100)), // <-- invalid! `full` is IncrementalSnapshot
             incremental: None,
+            fastboot: None,
         };
         pending_snapshot_packages.pop();
     }
@@ -279,6 +370,18 @@ mod tests {
         let mut pending_snapshot_packages = PendingSnapshotPackages {
             full: None,
             incremental: Some(new_full(100)), // <-- invalid! `incremental` is FullSnapshot
+            fastboot: None,
+        };
+        pending_snapshot_packages.pop();
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_pop_invalid_pending_fastboot() {
+        let mut pending_snapshot_packages = PendingSnapshotPackages {
+            full: None,
+            incremental: None,
+            fastboot: Some(new_full(100)), // <-- invalid! `incremental` is FullSnapshot
         };
         pending_snapshot_packages.pop();
     }
