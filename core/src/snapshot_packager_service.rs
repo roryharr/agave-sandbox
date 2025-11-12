@@ -95,6 +95,8 @@ impl SnapshotPackagerService {
                         });
                     }
 
+                    let archive_time = Instant::now();
+
                     let bank_snapshot_package = BankSnapshotPackage {
                         bank_fields: snapshot_package.bank_fields_to_serialize,
                         bank_hash_stats: snapshot_package.bank_hash_stats,
@@ -133,9 +135,9 @@ impl SnapshotPackagerService {
                     // Archiving the snapshot package is not allowed to fail.
                     // AccountsBackgroundService calls `clean_accounts()` with a value for
                     // latest_full_snapshot_slot that requires this archive call to succeed.
-                    let (archive_result, archive_time_us) = measure_us!(
-                        snapshot_utils::archive_snapshot_package(archive_package, snapshot_config)
-                    );
+                    let archive_result =
+                        snapshot_utils::archive_snapshot_package(archive_package, snapshot_config);
+
                     if let Err(err) = archive_result {
                         error!(
                             "Stopping {}! Fatal error while archiving snapshot package: {err}",
@@ -144,6 +146,8 @@ impl SnapshotPackagerService {
                         exit.store(true, Ordering::Relaxed);
                         break;
                     }
+
+                    let archive_time_us = archive_time.elapsed().as_micros();
 
                     if let Some(snapshot_gossip_manager) = snapshot_gossip_manager.as_mut() {
                         snapshot_gossip_manager
