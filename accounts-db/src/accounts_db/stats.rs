@@ -539,9 +539,7 @@ impl ShrinkAncientStats {
             "shrink_ancient_stats",
             (
                 "num_slots_shrunk",
-                self.shrink_stats
-                    .num_slots_shrunk
-                    .swap(0, Ordering::Relaxed),
+                self.shrink_stats.num_slots_shrunk.load(Ordering::Relaxed),
                 i64
             ),
             (

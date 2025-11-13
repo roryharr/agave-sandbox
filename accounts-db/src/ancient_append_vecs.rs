@@ -45,8 +45,8 @@ struct PackedAncientStorageTuning {
     max_ancient_slots: usize,
     /// # of bytes in an ideal ancient storage size
     ideal_storage_size: NonZeroU64,
-    /// true if storages can be randomly shrunk even if they aren't eligible
-    can_randomly_shrink: bool,
+    /// Some if shrinking can be done randomly this iteration
+    can_randomly_shrink: Option<u64>,
     /// limit the max # of output storages to prevent packing from running too long
     max_resulting_storages: NonZeroU64,
 }
@@ -94,7 +94,7 @@ impl AncientSlotInfos {
         &mut self,
         slot: Slot,
         storage: Arc<AccountStorageEntry>,
-        can_randomly_shrink: bool,
+        can_randomly_shrink: Option<u64>,
         ideal_size: NonZeroU64,
         is_high_slot: bool,
         is_candidate_for_shrink: bool,
@@ -106,7 +106,8 @@ impl AncientSlotInfos {
             let should_shrink = if capacity > 0 {
                 if is_candidate_for_shrink {
                     true
-                } else if can_randomly_shrink && rng().random_range(0..10000) == 0 {
+                } else if can_randomly_shrink.is_some_and(|range| rng().random_range(0..range) == 0)
+                {
                     was_randomly_shrunk = true;
                     true
                 } else {
@@ -353,6 +354,16 @@ impl AccountsDb {
         sorted_slots: Vec<Slot>,
         can_randomly_shrink: bool,
     ) {
+        let slots_shrunk = self
+            .shrink_ancient_stats
+            .ancient_append_vecs_shrunk
+            .swap(0, Ordering::Relaxed);
+        let can_randomly_shrink = if can_randomly_shrink && slots_shrunk != 0 {
+            Some((sorted_slots.len() as u64) / slots_shrunk.min(1) * 10)
+        } else {
+            None
+        };
+
         let tuning = PackedAncientStorageTuning {
             // Slots old enough to be ancient.
             max_ancient_slots: self.max_ancient_storages,
@@ -2397,7 +2408,7 @@ pub mod tests {
 
     #[test]
     fn test_calc_ancient_slot_info_one_alive_only() {
-        let can_randomly_shrink = false;
+        let can_randomly_shrink = None;
         let alive = true;
         let slots = 1;
         for method in TestCollectInfo::iter() {
@@ -2465,7 +2476,7 @@ pub mod tests {
 
     #[test]
     fn test_calc_ancient_slot_info_one_dead() {
-        let can_randomly_shrink = false;
+        let can_randomly_shrink = None;
         let alive = false;
         let slots = 1;
         for call_add in [false, true] {
@@ -2503,7 +2514,7 @@ pub mod tests {
 
     #[test]
     fn test_calc_ancient_slot_info_several() {
-        let can_randomly_shrink = false;
+        let can_randomly_shrink = None;
         let tuning = PackedAncientStorageTuning {
             percent_of_alive_shrunk_data: 100,
             max_ancient_slots: 0,
@@ -2569,7 +2580,7 @@ pub mod tests {
 
     #[test]
     fn test_calc_ancient_slot_info_one_alive_one_dead() {
-        let can_randomly_shrink = false;
+        let can_randomly_shrink = None;
         let tuning = PackedAncientStorageTuning {
             ideal_storage_size: NonZeroU64::new(get_ancient_append_vec_capacity()).unwrap(),
             can_randomly_shrink,
@@ -2695,7 +2706,7 @@ pub mod tests {
                     ideal_storage_size: NonZeroU64::new(ideal_storage_size_large).unwrap(),
                     // irrelevant since we clear 'shrink_indexes'
                     percent_of_alive_shrunk_data: 0,
-                    can_randomly_shrink: false,
+                    can_randomly_shrink: None,
                     ..default_tuning()
                 };
                 match method {
@@ -2742,7 +2753,7 @@ pub mod tests {
                     ideal_storage_size: NonZeroU64::new(ideal_storage_size_large).unwrap(),
                     // irrelevant since we clear 'shrink_indexes'
                     percent_of_alive_shrunk_data: 0,
-                    can_randomly_shrink: false,
+                    can_randomly_shrink: None,
                     ..default_tuning()
                 };
                 match method {
@@ -2988,7 +2999,7 @@ pub mod tests {
 
     #[test]
     fn test_calc_ancient_slot_info_one_shrink_one_not() {
-        let can_randomly_shrink = false;
+        let can_randomly_shrink = None;
         let mut tuning = PackedAncientStorageTuning {
             percent_of_alive_shrunk_data: 100,
             max_ancient_slots: 0,
@@ -3077,7 +3088,7 @@ pub mod tests {
             percent_of_alive_shrunk_data: 0,
             max_ancient_slots: 0,
             ideal_storage_size: NonZeroU64::new(1).unwrap(),
-            can_randomly_shrink: false,
+            can_randomly_shrink: None,
             max_resulting_storages: NonZeroU64::new(10).unwrap(),
         }
     }
@@ -3291,7 +3302,7 @@ pub mod tests {
                         // irrelevant for what this test is trying to test, but necessary to avoid minimums
                         ideal_storage_size: NonZeroU64::new(get_ancient_append_vec_capacity())
                             .unwrap(),
-                        can_randomly_shrink: false,
+                        can_randomly_shrink: None,
                         ..default_tuning()
                     };
                     match method {
@@ -3382,7 +3393,7 @@ pub mod tests {
 
     #[test]
     fn test_combine_ancient_slots_packed_internal() {
-        let can_randomly_shrink = false;
+        let can_randomly_shrink = None;
         let alive = true;
         for num_slots in 0..4 {
             for max_ancient_slots in 0..4 {
@@ -3480,7 +3491,7 @@ pub mod tests {
             max_ancient_slots: 0,
             percent_of_alive_shrunk_data: 0,
             ideal_storage_size: NonZeroU64::new(get_ancient_append_vec_capacity()).unwrap(),
-            can_randomly_shrink: CAN_RANDOMLY_SHRINK_FALSE,
+            can_randomly_shrink: None,
             ..default_tuning()
         };
 
@@ -3678,7 +3689,7 @@ pub mod tests {
             max_ancient_slots: 10_000,
             percent_of_alive_shrunk_data: 0,
             ideal_storage_size: NonZeroU64::new(1000).unwrap(),
-            can_randomly_shrink: false,
+            can_randomly_shrink: None,
             ..default_tuning()
         };
 
