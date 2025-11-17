@@ -287,7 +287,8 @@ fn test_sort_and_remove_dups() {
         ];
         let mut expected = test1.clone();
         expected.truncate(1); // get rid of 1st duplicate
-        test1.first_mut().unwrap().data_len = 2342342; // this one should be ignored, so modify the data_len so it will fail the compare below if it is used
+        test1.first_mut().unwrap().data_len = 2342342; // this one should be ignored, so modify the data_len so it will fail the compare below if
+                                                       // it is used
         if insert_other_good < 2 {
             // insert another good one before or after the 2 bad ones
             test1.insert(insert_other_good, generate_sample_account_from_storage(1));
@@ -304,7 +305,8 @@ fn test_sort_and_remove_dups() {
         .map(generate_sample_account_from_storage)
         .collect::<Vec<_>>();
     test1.iter_mut().take(3).for_each(|entry| {
-        entry.data_len = 2342342; // this one should be ignored, so modify the data_len so it will fail the compare below if it is used
+        entry.data_len = 2342342; // this one should be ignored, so modify the data_len so it will fail the compare below if
+                                  // it is used
         entry.index_info = AccountInfo::new(StorageLocation::Cached, false);
     });
 
@@ -726,7 +728,8 @@ fn test_flush_slots_with_reclaim_old_slots() {
 
     accounts.accounts_index.add_root(new_slot);
 
-    // Flushing this storage directly using _store_accounts_frozen. This is done to pass in UpsertReclaim::ReclaimOldSlots
+    // Flushing this storage directly using _store_accounts_frozen. This is done to pass in
+    // UpsertReclaim::ReclaimOldSlots
     accounts._store_accounts_frozen(
         (new_slot, &accounts_list[..]),
         &storage,
@@ -1310,10 +1313,12 @@ fn test_remove_zero_lamport_single_ref_accounts_after_shrink() {
 #[test]
 fn test_shrink_zero_lamport_single_ref_account() {
     agave_logger::setup();
-    // note that 'None' checks the case based on the default value of `latest_full_snapshot_slot` in `AccountsDb`
+    // note that 'None' checks the case based on the default value of `latest_full_snapshot_slot` in
+    // `AccountsDb`
     for latest_full_snapshot_slot in [None, Some(0), Some(1), Some(2)] {
         // store a zero and non-zero lamport account
-        // make sure clean marks the ref_count=1, zero lamport account dead and removes pubkey from index completely
+        // make sure clean marks the ref_count=1, zero lamport account dead and removes pubkey from
+        // index completely
         let accounts = AccountsDb::new_single_for_tests();
         let pubkey_zero = Pubkey::from([1; 32]);
         let pubkey2 = Pubkey::from([2; 32]);
@@ -1344,7 +1349,8 @@ fn test_shrink_zero_lamport_single_ref_account() {
             accounts.set_latest_full_snapshot_slot(latest_full_snapshot_slot);
         }
 
-        // Shrink the slot. The behavior on the zero lamport account will depend on `latest_full_snapshot_slot`.
+        // Shrink the slot. The behavior on the zero lamport account will depend on
+        // `latest_full_snapshot_slot`.
         accounts.shrink_slot_forced(slot);
 
         assert!(
@@ -1742,7 +1748,8 @@ fn test_clean_max_slot_zero_lamport_account(mark_obsolete_accounts: MarkObsolete
     accounts.add_root_and_flush_write_cache(0);
     accounts.add_root_and_flush_write_cache(1);
 
-    // Clean is performed as part of flush with obsolete accounts marked, so explicit clean isn't needed
+    // Clean is performed as part of flush with obsolete accounts marked, so explicit clean isn't
+    // needed
     if mark_obsolete_accounts == MarkObsoleteAccounts::Disabled {
         // Only clean up to account 0, should not purge slot 0 based on
         // updates in later slots in slot 1
@@ -2454,7 +2461,8 @@ fn test_shrink_candidate_slots() {
 
     // Only, try to shrink stale slots, nothing happens because shrink ratio
     // is not small enough to do a shrink
-    // Note this shrink ratio had to change because we are WAY over-allocating append vecs when we flush the write cache at the moment.
+    // Note this shrink ratio had to change because we are WAY over-allocating append vecs when we
+    // flush the write cache at the moment.
     accounts.shrink_ratio = AccountShrinkThreshold::TotalSpace { shrink_ratio: 0.4 };
     accounts.shrink_candidate_slots(&EpochSchedule::default());
     assert_eq!(
@@ -2571,7 +2579,8 @@ fn test_select_candidates_by_total_usage_no_candidates() {
 #[test_case(#[allow(deprecated)] StorageAccess::Mmap)]
 #[test_case(StorageAccess::File)]
 fn test_select_candidates_by_total_usage_3_way_split_condition(storage_access: StorageAccess) {
-    // three candidates, one selected for shrink, one is put back to the candidate list and one is ignored
+    // three candidates, one selected for shrink, one is put back to the candidate list and one is
+    // ignored
     agave_logger::setup();
     let mut candidates = ShrinkCandidates::default();
     let db = AccountsDb::new_single_for_tests();
@@ -2622,10 +2631,10 @@ fn test_select_candidates_by_total_usage_3_way_split_condition(storage_access: S
         .store(store_file_size as usize, Ordering::Release);
     candidates.insert(store3_slot);
 
-    // Set the target alive ratio to 0.6 so that we can just get rid of store1, the remaining two stores
-    // alive ratio can be > the target ratio: the actual ratio is 0.75 because of 150 alive bytes / 200 total bytes.
-    // The target ratio is also set to larger than store2's alive ratio: 0.5 so that it would be added
-    // to the candidates list for next round.
+    // Set the target alive ratio to 0.6 so that we can just get rid of store1, the remaining two
+    // stores alive ratio can be > the target ratio: the actual ratio is 0.75 because of 150
+    // alive bytes / 200 total bytes. The target ratio is also set to larger than store2's alive
+    // ratio: 0.5 so that it would be added to the candidates list for next round.
     let target_alive_ratio = 0.6;
     let (selected_candidates, next_candidates) =
         db.select_candidates_by_total_usage(&candidates, target_alive_ratio);
@@ -2689,7 +2698,8 @@ fn test_select_candidates_by_total_usage_2_way_split_condition(storage_access: S
         .store(store_file_size as usize, Ordering::Release);
     candidates.insert(store3_slot);
 
-    // Set the target ratio to default (0.8), both store1 and store2 must be selected and store3 is ignored.
+    // Set the target ratio to default (0.8), both store1 and store2 must be selected and store3 is
+    // ignored.
     let target_alive_ratio = DEFAULT_ACCOUNTS_SHRINK_RATIO;
     let (selected_candidates, next_candidates) =
         db.select_candidates_by_total_usage(&candidates, target_alive_ratio);
@@ -2740,7 +2750,8 @@ fn test_select_candidates_by_total_usage_all_clean(storage_access: StorageAccess
         .store(store_file_size as usize / 2, Ordering::Release);
     candidates.insert(store2_slot);
 
-    // Set the target ratio to default (0.8), both stores from the two different slots must be selected.
+    // Set the target ratio to default (0.8), both stores from the two different slots must be
+    // selected.
     let target_alive_ratio = DEFAULT_ACCOUNTS_SHRINK_RATIO;
     let (selected_candidates, next_candidates) =
         db.select_candidates_by_total_usage(&candidates, target_alive_ratio);
@@ -3990,12 +4001,14 @@ fn run_test_accounts_db_cache_clean_max_root(
             if *slot >= requested_flush_root || *slot >= scan_root.unwrap_or(Slot::MAX) {
                 // 1) If slot > `requested_flush_root`, then  either:
                 //   a) If `is_cache_at_limit == false`, still in the cache
-                //   b) if `is_cache_at_limit == true`, were not cleaned before being flushed to storage.
+                //   b) if `is_cache_at_limit == true`, were not cleaned before being flushed to
+                // storage.
                 //
                 // In both cases all the *original* updates at index `slot` were uncleaned and thus
                 // should be discoverable by this scan.
                 //
-                // 2) If slot == `requested_flush_root`, the slot was not cleaned before being flushed to storage,
+                // 2) If slot == `requested_flush_root`, the slot was not cleaned before being
+                //    flushed to storage,
                 // so it also contains all the original updates.
                 //
                 // 3) If *slot >= scan_root, then we should not clean it either
@@ -4004,8 +4017,8 @@ fn run_test_accounts_db_cache_clean_max_root(
                     .cloned()
                     .collect::<HashSet<Pubkey>>()
             } else {
-                // Slots less than `requested_flush_root` and `scan_root` were cleaned in the cache before being flushed
-                // to storage, should only contain one account
+                // Slots less than `requested_flush_root` and `scan_root` were cleaned in the cache
+                // before being flushed to storage, should only contain one account
                 std::iter::once(keys[*slot as usize]).collect::<HashSet<Pubkey>>()
             };
 
@@ -4708,8 +4721,9 @@ fn test_cache_flush_remove_unrooted_race_multiple_slots() {
                     LoadHint::FixedMaxRoot
                 )
                 .is_some());
-            // Clear for next iteration so that `assert!(self.storage.get_slot_storage_entry(purged_slot).is_none());`
-            // in `purge_slot_pubkeys()` doesn't trigger
+            // Clear for next iteration so that
+            // `assert!(self.storage.get_slot_storage_entry(purged_slot).is_none());` in
+            // `purge_slot_pubkeys()` doesn't trigger
             db.remove_unrooted_slots(&[(*slot, *bank_id)]);
         }
     }
@@ -5126,7 +5140,8 @@ define_accounts_db_test!(test_purge_alive_unrooted_slots_after_clean, |accounts|
     assert_no_storages_at_slot(&accounts, slot0);
 });
 
-/// asserts that not only are there 0 append vecs, but there is not even an entry in the storage map for 'slot'
+/// asserts that not only are there 0 append vecs, but there is not even an entry in the storage map
+/// for 'slot'
 fn assert_no_storages_at_slot(db: &AccountsDb, slot: Slot) {
     assert!(db.storage.get_slot_storage_entry(slot).is_none());
 }
@@ -5499,8 +5514,8 @@ define_accounts_db_test!(test_mark_dirty_dead_stores_empty, |db| {
 fn test_mark_dirty_dead_stores_no_shrink_in_progress() {
     // None for shrink_in_progress, 1 existing store at the slot
     // There should be no more append vecs at that slot after the call to mark_dirty_dead_stores.
-    // This tests the case where this slot was combined into an ancient append vec from an older slot and
-    // there is no longer an append vec at this slot.
+    // This tests the case where this slot was combined into an ancient append vec from an older
+    // slot and there is no longer an append vec at this slot.
     for add_dirty_stores in [false, true] {
         let slot = 0;
         let db = AccountsDb::new_single_for_tests();
@@ -5583,7 +5598,8 @@ fn test_sweep_get_oldest_non_ancient_slot_max() {
             epoch_schedule.slots_per_epoch * 10,
         ] {
             db.add_root(max_root_inclusive);
-            // oldest non-ancient will never exceed max_root_inclusive, even if the offset is so large it would mathematically move ancient PAST the newest root
+            // oldest non-ancient will never exceed max_root_inclusive, even if the offset is so
+            // large it would mathematically move ancient PAST the newest root
             assert_eq!(
                 max_root_inclusive,
                 db.get_oldest_non_ancient_slot(&epoch_schedule)
@@ -5607,7 +5623,8 @@ fn test_sweep_get_oldest_non_ancient_slot() {
     );
     // before any roots are added, we expect the oldest non-ancient slot to be 0
     assert_eq!(0, db.get_oldest_non_ancient_slot(&epoch_schedule));
-    // adding roots until slots_per_epoch +/- ancient_append_vec_offset should still saturate to 0 as oldest non ancient slot
+    // adding roots until slots_per_epoch +/- ancient_append_vec_offset should still saturate to 0
+    // as oldest non ancient slot
     let max_root_inclusive = AccountsDb::apply_offset_to_slot(0, ancient_append_vec_offset - 1);
     db.add_root(max_root_inclusive);
     // oldest non-ancient will never exceed max_root_inclusive
@@ -5637,11 +5654,12 @@ fn test_sweep_get_oldest_non_ancient_slot() {
 
 #[test]
 fn test_sweep_get_oldest_non_ancient_slot2() {
-    // note that this test has to worry about saturation at 0 as we subtract `slots_per_epoch` and `ancient_append_vec_offset`
+    // note that this test has to worry about saturation at 0 as we subtract `slots_per_epoch` and
+    // `ancient_append_vec_offset`
     let epoch_schedule = EpochSchedule::default();
     for ancient_append_vec_offset in [-10_000i64, 50_000] {
-        // at `starting_slot_offset`=0, with a negative `ancient_append_vec_offset`, we expect saturation to 0
-        // big enough to avoid all saturation issues.
+        // at `starting_slot_offset`=0, with a negative `ancient_append_vec_offset`, we expect
+        // saturation to 0 big enough to avoid all saturation issues.
         let avoid_saturation = 1_000_000;
         assert!(
             avoid_saturation
@@ -5915,7 +5933,8 @@ fn test_shrink_collect_simple() {
                             } else {
                                 assert_eq!(shrink_collect.alive_total_bytes, 0);
                             }
-                            // expected_capacity is determined by what size append vec gets created when the write cache is flushed to an append vec.
+                            // expected_capacity is determined by what size append vec gets created
+                            // when the write cache is flushed to an append vec.
                             let mut expected_capacity =
                                 (account_count * aligned_stored_size(space)) as u64;
                             if append_opposite_zero_lamport_account && space != 0 {
@@ -5986,7 +6005,8 @@ fn test_shrink_collect_with_obsolete_accounts() {
     let storage = db.get_and_assert_single_storage(slot);
 
     for (i, pubkey) in pubkeys.iter().enumerate() {
-        // Mark Some accounts obsolete. These will include zero lamport and non zero lamport accounts
+        // Mark Some accounts obsolete. These will include zero lamport and non zero lamport
+        // accounts
         if i % 5 == 0 {
             // Lookup the pubkey in the database and find the AccountInfo
             db.accounts_index
@@ -6021,7 +6041,8 @@ fn test_shrink_collect_with_obsolete_accounts() {
 
     assert_eq!(shrink_collect.slot, slot);
 
-    // Ensure that the keys to unref does not include the obsolete accounts and only includes the unreferenced accounts
+    // Ensure that the keys to unref does not include the obsolete accounts and only includes the
+    // unreferenced accounts
     assert_eq!(
         shrink_collect
             .pubkeys_to_unref
@@ -6074,7 +6095,8 @@ fn get_all_accounts_from_storages<'a>(
                 })
                 .expect("must scan accounts storage");
             // make sure scan_pubkeys results match
-            // Note that we assume traversals are both in the same order, but this doesn't have to be true.
+            // Note that we assume traversals are both in the same order, but this doesn't have to
+            // be true.
             let mut compare = Vec::default();
             storage
                 .accounts

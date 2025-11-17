@@ -62,8 +62,8 @@ const _: () = assert!(
             + mem::size_of::<ObsoleteAccountHash>()
 );
 
-/// Returns the size this item will take to store plus possible alignment padding bytes before the next entry.
-/// fixed-size portion of per-account data written
+/// Returns the size this item will take to store plus possible alignment padding bytes before the
+/// next entry. fixed-size portion of per-account data written
 /// plus 'data_len', aligned to next boundary
 pub fn aligned_stored_size(data_len: usize) -> usize {
     u64_align!(STORE_META_OVERHEAD + data_len)
@@ -388,7 +388,8 @@ impl AppendVec {
         // happen before the first file-io reads
         std::sync::atomic::fence(Ordering::AcqRel);
 
-        // The file should have already been sanitized. Don't need to check when we open the file again.
+        // The file should have already been sanitized. Don't need to check when we open the file
+        // again.
         let mut new =
             AppendVec::new_from_file_unchecked(self.path.clone(), self.len(), StorageAccess::File)
                 .ok()?;
@@ -513,7 +514,8 @@ impl AppendVec {
         let mmap = unsafe {
             let result = MmapMut::map_mut(&data);
             if result.is_err() {
-                // for vm.max_map_count, error is: {code: 12, kind: Other, message: "Cannot allocate memory"}
+                // for vm.max_map_count, error is: {code: 12, kind: Other, message: "Cannot allocate
+                // memory"}
                 info!(
                     "memory map error: {result:?}. This may be because vm.max_map_count is not \
                      set correctly."
@@ -706,8 +708,8 @@ impl AppendVec {
         })
     }
 
-    /// calls `callback` with the stored account metadata for the account at `offset` if its data doesn't overrun
-    /// the internal buffer. Otherwise return None.
+    /// calls `callback` with the stored account metadata for the account at `offset` if its data
+    /// doesn't overrun the internal buffer. Otherwise return None.
     ///
     /// Prefer get_stored_account_callback() when possible, as it does not contain file format
     /// implementation details, and thus potentially can read less and be faster.
@@ -765,8 +767,9 @@ impl AppendVec {
                     // not enough was read from file to get `data`
                     assert!(data_len <= MAX_PERMITTED_DATA_LENGTH, "{data_len}");
                     let mut data: Box<[MaybeUninit<u8>]> = Box::new_uninit_slice(data_len as usize);
-                    // instead, we could piece together what we already read here. Maybe we just needed 1 more byte.
-                    // Note here `next` is a 0-based offset from the beginning of this account.
+                    // instead, we could piece together what we already read here. Maybe we just
+                    // needed 1 more byte. Note here `next` is a 0-based offset
+                    // from the beginning of this account.
                     // SAFETY: `read_into_buffer` will only write to uninitialized memory.
                     let bytes_read = read_into_buffer(file, self.len(), offset + next, unsafe {
                         slice::from_raw_parts_mut(data.as_mut_ptr() as *mut u8, data_len as usize)
@@ -792,8 +795,8 @@ impl AppendVec {
         }
     }
 
-    /// calls `callback` with the stored account fixed portion for the account at `offset` if its data doesn't overrun
-    /// the internal buffer. Otherwise return None.
+    /// calls `callback` with the stored account fixed portion for the account at `offset` if its
+    /// data doesn't overrun the internal buffer. Otherwise return None.
     fn get_stored_account_no_data_callback<Ret>(
         &self,
         offset: usize,
@@ -942,9 +945,11 @@ impl AppendVec {
     /// help with the math of offsets when navigating the on-disk layout in an AppendVec.
     /// data is at the end of each account and is variable sized
     /// the next account is then aligned on a 64 bit boundary.
-    /// With these helpers, we can skip over reading some of the data depending on what the caller wants.
+    /// With these helpers, we can skip over reading some of the data depending on what the caller
+    /// wants.
     ///
-    /// *Safety* - The caller must ensure that the `stored_meta.data_len` won't overflow the calculation.
+    /// *Safety* - The caller must ensure that the `stored_meta.data_len` won't overflow the
+    /// calculation.
     fn next_account_offset(start_offset: usize, stored_meta: &StoredMeta) -> AccountOffsets {
         let stored_size_unaligned = STORE_META_OVERHEAD
             .checked_add(stored_meta.data_len as usize)
@@ -1202,7 +1207,8 @@ impl AppendVec {
                 }
             }
             AppendVecFileBacking::File(file) => {
-                // Heuristic observed in benchmarking that maintains a reasonable balance between syscalls and data waste
+                // Heuristic observed in benchmarking that maintains a reasonable balance between
+                // syscalls and data waste
                 const BUFFER_SIZE: usize = PAGE_SIZE * 4;
                 let mut reader = BufferedReader::<BUFFER_SIZE>::new().with_file(file, self_len);
                 const REQUIRED_READ_LEN: usize =
@@ -1525,7 +1531,8 @@ pub mod tests {
         let data_len = 1;
         let account = create_test_account(data_len);
         let index = av.append_account_test(&account).unwrap();
-        // make the append vec 1 byte too short. we should get `None` since the append vec was truncated
+        // make the append vec 1 byte too short. we should get `None` since the append vec was
+        // truncated
         assert_eq!(
             STORE_META_OVERHEAD + data_len,
             av.current_len.load(Ordering::Relaxed)
@@ -1607,9 +1614,10 @@ pub mod tests {
     /// it may be used to test the correctness of reading back the accounts from the append vec.
     ///
     /// It also ensures the following:
-    /// - A `MAX_PERMITTED_DATA_LENGTH` and 64KiB account are present. This can be useful for exercising
-    ///   implementation details that are sensitive to the size of the account. For example, `scan_accounts_stored_meta`
-    ///   will need to use a heap-allocated buffer when the account data size is greater than its stack buffer.
+    /// - A `MAX_PERMITTED_DATA_LENGTH` and 64KiB account are present. This can be useful for
+    ///   exercising implementation details that are sensitive to the size of the account. For
+    ///   example, `scan_accounts_stored_meta` will need to use a heap-allocated buffer when the
+    ///   account data size is greater than its stack buffer.
     /// - Accounts have randomized data, lamports, and owner.
     fn rand_exhaustive_append_vec(
         num_accounts: usize,
@@ -1842,12 +1850,17 @@ pub mod tests {
     #[test_case(#[allow(deprecated)] StorageAccess::Mmap)]
     #[test_case(StorageAccess::File)]
     fn test_new_from_file_crafted_zero_lamport_account(storage_access: StorageAccess) {
-        // This test verifies that when we sanitize on load, that we fail sanitizing if we load an account with zero lamports that does not have all default value fields.
-        // This test writes an account with zero lamports, but with 3 bytes of data. On load, it asserts that load fails.
-        // It used to be possible to use the append vec api to write an account to an append vec with zero lamports, but with non-default values for other account fields.
-        // This will no longer be possible. Thus, to implement the write portion of this test would require additional test-only parameters to public apis or otherwise duplicating code paths.
-        // So, the sanitizing on load behavior can be tested by capturing [u8] that would be created if such a write was possible (as it used to be).
-        // The contents of [u8] written by an append vec cannot easily or reasonably change frequently since it has released a long time.
+        // This test verifies that when we sanitize on load, that we fail sanitizing if we load an
+        // account with zero lamports that does not have all default value fields. This test
+        // writes an account with zero lamports, but with 3 bytes of data. On load, it asserts that
+        // load fails. It used to be possible to use the append vec api to write an account
+        // to an append vec with zero lamports, but with non-default values for other account
+        // fields. This will no longer be possible. Thus, to implement the write portion of
+        // this test would require additional test-only parameters to public apis or otherwise
+        // duplicating code paths. So, the sanitizing on load behavior can be tested by
+        // capturing [u8] that would be created if such a write was possible (as it used to be).
+        // The contents of [u8] written by an append vec cannot easily or reasonably change
+        // frequently since it has released a long time.
         /*
             agave_logger::setup();
             // uncomment this code to generate the invalid append vec that will fail on load
@@ -1918,7 +1931,8 @@ pub mod tests {
         let file = get_append_vec_path("test_new_from_file_crafted_data_len");
         let path = &file.path;
         let accounts_len = {
-            // wrap AppendVec in ManuallyDrop to ensure we do not remove the backing file when dropped
+            // wrap AppendVec in ManuallyDrop to ensure we do not remove the backing file when
+            // dropped
             let av = ManuallyDrop::new(AppendVec::new(path, true, 1024 * 1024, storage_access));
 
             av.append_account_test(&create_test_account(10)).unwrap();
@@ -1967,7 +1981,8 @@ pub mod tests {
         let file = get_append_vec_path("test_append_vec_flush");
         let path = &file.path;
         let accounts_len = {
-            // wrap AppendVec in ManuallyDrop to ensure we do not remove the backing file when dropped
+            // wrap AppendVec in ManuallyDrop to ensure we do not remove the backing file when
+            // dropped
             let av = ManuallyDrop::new(AppendVec::new(path, true, 1024 * 1024, storage_access));
             av.append_account_test(&create_test_account(10)).unwrap();
             av.len()
@@ -1987,7 +2002,8 @@ pub mod tests {
         let accounts_len = {
             let av = AppendVec::new(path, true, 1024 * 1024, storage_access);
             av.append_account_test(&create_test_account(10)).unwrap();
-            // wrap AppendVec in ManuallyDrop to ensure we do not remove the backing file when dropped
+            // wrap AppendVec in ManuallyDrop to ensure we do not remove the backing file when
+            // dropped
             let ro_av = ManuallyDrop::new(
                 av.reopen_as_readonly_file_io()
                     .expect("appendable AppendVec should always re-open as read-only"),
@@ -2011,7 +2027,8 @@ pub mod tests {
         let file = get_append_vec_path("test_new_from_file_too_large_data_len");
         let path = &file.path;
         let accounts_len = {
-            // wrap AppendVec in ManuallyDrop to ensure we do not remove the backing file when dropped
+            // wrap AppendVec in ManuallyDrop to ensure we do not remove the backing file when
+            // dropped
             let av = ManuallyDrop::new(AppendVec::new(path, true, 1024 * 1024, storage_access));
 
             av.append_account_test(&create_test_account(10)).unwrap();
@@ -2050,7 +2067,8 @@ pub mod tests {
 
         // Write a valid append vec file.
         let accounts_len = {
-            // wrap AppendVec in ManuallyDrop to ensure we do not remove the backing file when dropped
+            // wrap AppendVec in ManuallyDrop to ensure we do not remove the backing file when
+            // dropped
             let av = ManuallyDrop::new(AppendVec::new(path, true, 1024 * 1024, storage_access));
             av.append_account_test(&create_test_account(10)).unwrap();
             let offset_1 = {
@@ -2124,7 +2142,8 @@ pub mod tests {
             // AppendVec internal buffer size is PAGESIZE).
             let data_len: usize = 2 * PAGE_SIZE;
             let account = create_test_account_with(data_len);
-            // wrap AppendVec in ManuallyDrop to ensure we do not remove the backing file when dropped
+            // wrap AppendVec in ManuallyDrop to ensure we do not remove the backing file when
+            // dropped
             let av = ManuallyDrop::new(AppendVec::new(
                 path,
                 true,
@@ -2135,7 +2154,8 @@ pub mod tests {
             av.flush().unwrap();
         }
 
-        // Truncate the AppendVec to PAGESIZE. This will cause get_account* to fail to load the account.
+        // Truncate the AppendVec to PAGESIZE. This will cause get_account* to fail to load the
+        // account.
         let truncated_accounts_len: usize = PAGE_SIZE;
         let av = AppendVec::new_from_file_unchecked(path, truncated_accounts_len, storage_access)
             .unwrap();
@@ -2172,7 +2192,8 @@ pub mod tests {
         let account_offsets = {
             let append_vec =
                 AppendVec::new(&temp_file.path, true, total_stored_size, storage_access);
-            // wrap AppendVec in ManuallyDrop to ensure we do not remove the backing file when dropped
+            // wrap AppendVec in ManuallyDrop to ensure we do not remove the backing file when
+            // dropped
             let append_vec = ManuallyDrop::new(append_vec);
             let slot = 77; // the specific slot does not matter
             let storable_accounts: Vec<_> = std::iter::zip(&pubkeys, &accounts).collect();
@@ -2225,7 +2246,8 @@ pub mod tests {
 
         let temp_file = get_append_vec_path("test_scan");
         let account_offsets = {
-            // wrap AppendVec in ManuallyDrop to ensure we do not remove the backing file when dropped
+            // wrap AppendVec in ManuallyDrop to ensure we do not remove the backing file when
+            // dropped
             let append_vec = ManuallyDrop::new(AppendVec::new(
                 &temp_file.path,
                 true,

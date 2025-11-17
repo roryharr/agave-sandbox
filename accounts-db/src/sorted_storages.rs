@@ -75,12 +75,14 @@ impl<'a> SortedStorages<'a> {
     /// `source` does not have to be sorted in any way, but is assumed to not have duplicate slot #s
     pub fn new_with_slots(
         source: impl Iterator<Item = (&'a Arc<AccountStorageEntry>, Slot)> + Clone,
-        // A slot used as a lower bound, but potentially smaller than the smallest slot in the given 'source' iterator
+        // A slot used as a lower bound, but potentially smaller than the smallest slot in the
+        // given 'source' iterator
         min_slot: Option<Slot>,
-        // highest valid slot. Only matters if source array does not contain a slot >= max_slot_inclusive.
-        // An example is a slot that has accounts in the write cache at slots <= 'max_slot_inclusive' but no storages at those slots.
-        // None => self.range.end = source.1.max() + 1
-        // Some(slot) => self.range.end = std::cmp::max(slot, source.1.max())
+        // highest valid slot. Only matters if source array does not contain a slot >=
+        // max_slot_inclusive. An example is a slot that has accounts in the write cache at
+        // slots <= 'max_slot_inclusive' but no storages at those slots. None => self.
+        // range.end = source.1.max() + 1 Some(slot) => self.range.end =
+        // std::cmp::max(slot, source.1.max())
         max_slot_inclusive: Option<Slot>,
     ) -> Self {
         let mut min = Slot::MAX;
@@ -148,7 +150,8 @@ impl<'a> Iterator for SortedStoragesIter<'a> {
     fn next(&mut self) -> Option<Self::Item> {
         let slot = self.next_slot;
         if slot < self.range.end {
-            // iterator is still in range. Storage may or may not exist at this slot, but the iterator still needs to return the slot
+            // iterator is still in range. Storage may or may not exist at this slot, but the
+            // iterator still needs to return the slot
             self.next_slot += 1;
             Some((slot, self.storages.get(slot)))
         } else {
@@ -166,7 +169,8 @@ impl<'a> SortedStoragesIter<'a> {
         let storage_range = storages.range();
         let next_slot = match range.start_bound() {
             Bound::Unbounded => {
-                storage_range.start // unbounded beginning starts with the min known slot (which is inclusive)
+                storage_range.start // unbounded beginning starts with the min known slot (which is
+                                    // inclusive)
             }
             Bound::Included(x) => *x,
             Bound::Excluded(x) => *x + 1, // make inclusive

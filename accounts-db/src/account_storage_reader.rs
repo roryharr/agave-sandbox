@@ -321,8 +321,8 @@ mod tests {
         // Close the file
         drop(output_file);
 
-        // If the number of accounts left is not zero, create a new AccountsFile from the output file
-        // and verify that the number of accounts in the new file is correct
+        // If the number of accounts left is not zero, create a new AccountsFile from the output
+        // file and verify that the number of accounts in the new file is correct
         if (total_accounts - number_of_accounts_to_remove) != 0 {
             let (accounts_file, num_accounts) =
                 AccountsFile::new_from_file(temp_file_path, current_len, StorageAccess::File)
@@ -426,8 +426,8 @@ mod tests {
                 storage.accounts.len() - storage.get_obsolete_bytes(Some(snapshot_slot));
             assert_eq!(reader.len(), current_len);
 
-            // Create a file to write the reader's output. It will get deleted by AccountsFile::drop() every
-            // iteration so it does not need a unique name
+            // Create a file to write the reader's output. It will get deleted by
+            // AccountsFile::drop() every iteration so it does not need a unique name
             let temp_file_path = temp_dir.path().join("output_file");
             let mut output_file = File::create(&temp_file_path).unwrap();
 

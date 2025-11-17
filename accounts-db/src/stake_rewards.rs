@@ -52,7 +52,8 @@ impl<'a> StorableAccounts<'a> for (Slot, &'a [StakeReward]) {
         &self.1[index].stake_pubkey
     }
     fn slot(&self, _index: usize) -> Slot {
-        // per-index slot is not unique per slot when per-account slot is not included in the source data
+        // per-index slot is not unique per slot when per-account slot is not included in the source
+        // data
         self.target_slot()
     }
     fn target_slot(&self) -> Slot {

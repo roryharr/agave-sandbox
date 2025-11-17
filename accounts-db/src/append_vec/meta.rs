@@ -15,8 +15,9 @@ use {
 pub struct StoredMeta {
     /// global write version
     /// This will be made completely obsolete such that we stop storing it.
-    /// We will not support multiple append vecs per slot anymore, so this concept is no longer necessary.
-    /// Order of stores of an account to an append vec will determine 'latest' account data per pubkey.
+    /// We will not support multiple append vecs per slot anymore, so this concept is no longer
+    /// necessary. Order of stores of an account to an append vec will determine 'latest'
+    /// account data per pubkey.
     pub write_version_obsolete: u64,
     pub data_len: u64,
     /// key for the account
@@ -180,8 +181,9 @@ impl<'append_vec> StoredAccountNoData<'append_vec> {
 
     /// Check if the account data matches that of a default account.
     ///
-    /// Note that we are not comparing against AccountSharedData::default() because we do not have access to the account data,
-    /// so we compare data _length_ in lieu of actual data. This check otherwise identical to AccountSharedData::default().
+    /// Note that we are not comparing against AccountSharedData::default() because we do not have
+    /// access to the account data, so we compare data _length_ in lieu of actual data. This
+    /// check otherwise identical to AccountSharedData::default().
     pub fn is_default_account(&self) -> bool {
         self.account_meta.lamports == 0
             && self.meta.data_len == 0
@@ -200,7 +202,8 @@ impl<'append_vec> StoredAccountNoData<'append_vec> {
         // Yes, this really happens; see test_new_from_file_crafted_executable
         let executable_bool: &bool = &self.account_meta.executable;
         let executable_bool_ptr = ptr::from_ref(executable_bool);
-        // UNSAFE: Force to interpret mmap-backed bool as u8 to really read the actual memory content
+        // UNSAFE: Force to interpret mmap-backed bool as u8 to really read the actual memory
+        // content
         let executable_byte: &u8 = unsafe { &*(executable_bool_ptr.cast()) };
         executable_byte
     }

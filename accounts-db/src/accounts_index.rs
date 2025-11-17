@@ -125,7 +125,8 @@ pub enum ScanFilter {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 /// how accounts index 'upsert' should handle reclaims
 pub enum UpsertReclaim {
-    /// previous entry for this slot in the index is expected to be cached, so irrelevant to reclaims
+    /// previous entry for this slot in the index is expected to be cached, so irrelevant to
+    /// reclaims
     PreviousSlotEntryWasCached,
     /// previous entry for this slot in the index may need to be reclaimed, so return it.
     /// reclaims is the only output of upsert, requiring a synchronous execution
@@ -307,11 +308,13 @@ pub struct AccountsIndex<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> {
     // `S` as the id because there can be more than one version of a slot `S`). If a fork
     // is abandoned, all of the slots on that fork up to `S` will be removed via
     // `AccountsDb::remove_unrooted_slots()`. When the scan finishes, it'll realize that the
-    // results of the scan may have been corrupted by `remove_unrooted_slots` and abort its results.
+    // results of the scan may have been corrupted by `remove_unrooted_slots` and abort its
+    // results.
     //
-    // `removed_bank_ids` tracks all the slot ids that were removed via `remove_unrooted_slots()` so any attempted scans
-    // on any of these slots fails. This is safe to purge once the associated Bank is dropped and
-    // scanning the fork with that Bank at the tip is no longer possible.
+    // `removed_bank_ids` tracks all the slot ids that were removed via `remove_unrooted_slots()`
+    // so any attempted scans on any of these slots fails. This is safe to purge once the
+    // associated Bank is dropped and scanning the fork with that Bank at the tip is no longer
+    // possible.
     pub removed_bank_ids: Mutex<HashSet<BankId>>,
 
     storage: AccountsIndexStorage<T, U>,
@@ -541,9 +544,10 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> AccountsIndex<T, U> {
         // `R_new` is an ancestor of `B`, and `R < R_new < B`, then `B.ancestors.contains(R_new)`.
         //
         // Now until the next `set_root`, any new banks constructed from `new_from_parent` will
-        // also have `max_root == R_new` in their ancestor set, so the claim holds for those descendants
-        // as well. Once the next `set_root` happens, we once again update `max_root` and the same
-        // inductive argument can be applied again to show the claim holds.
+        // also have `max_root == R_new` in their ancestor set, so the claim holds for those
+        // descendants as well. Once the next `set_root` happens, we once again update
+        // `max_root` and the same inductive argument can be applied again to show the claim
+        // holds.
 
         // Check that the `max_root` is present in `ancestors`. From the proof above, if
         // `max_root` is not present in `ancestors`, this means the bank `B` with the
@@ -857,7 +861,8 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> AccountsIndex<T, U> {
     }
 
     /// Remove keys from the account index if the key's slot list is empty.
-    /// Returns the keys that were removed from the index. These keys should not be accessed again in the current code path.
+    /// Returns the keys that were removed from the index. These keys should not be accessed again
+    /// in the current code path.
     #[must_use]
     pub fn handle_dead_keys(
         &self,
@@ -1029,19 +1034,18 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> AccountsIndex<T, U> {
     /// This fn takes 4 arguments.
     ///  - an iterator of pubkeys to scan
     ///  - callback fn to run for each pubkey in the accounts index
-    ///  - avoid_callback_result. If it is Some(default), then callback is ignored and
-    ///    default is returned instead.
-    ///  - provide_entry_in_callback. If true, populate the ref of the Arc of the
-    ///    index entry to `callback` fn. Otherwise, provide None.
+    ///  - avoid_callback_result. If it is Some(default), then callback is ignored and default is
+    ///    returned instead.
+    ///  - provide_entry_in_callback. If true, populate the ref of the Arc of the index entry to
+    ///    `callback` fn. Otherwise, provide None.
     ///
     /// The `callback` fn must return `AccountsIndexScanResult`, which is
     /// used to indicates whether the AccountIndex Entry should be added to
     /// in-memory cache. The `callback` fn takes in 3 arguments:
     ///   - the first an immutable ref of the pubkey,
     ///   - the second an option of the SlotList and RefCount
-    ///   - the third an option of the AccountMapEntry, which is only populated
-    ///     when `provide_entry_in_callback` is true. Otherwise, it will be
-    ///     None.
+    ///   - the third an option of the AccountMapEntry, which is only populated when
+    ///     `provide_entry_in_callback` is true. Otherwise, it will be None.
     pub(crate) fn scan<'a, F, I>(
         &self,
         pubkeys: I,
@@ -1116,9 +1120,10 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> AccountsIndex<T, U> {
 
             match filter {
                 ScanFilter::All => {
-                    // SAFETY: The caller must ensure that if `provide_entry_in_callback` is true, and
-                    // if it's possible for `callback` to clone the entry Arc, then it must also add
-                    // the entry to the in-mem cache if the entry is made dirty.
+                    // SAFETY: The caller must ensure that if `provide_entry_in_callback` is true,
+                    // and if it's possible for `callback` to clone the entry
+                    // Arc, then it must also add the entry to the in-mem cache
+                    // if the entry is made dirty.
                     lock.as_ref()
                         .unwrap()
                         .get_internal_inner(pubkey, internal_callback);
@@ -1136,8 +1141,10 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> AccountsIndex<T, U> {
                                     if local_entry.ref_count() == 1
                                         && local_entry.slot_list_lock_read_len() == 1
                                     {
-                                        // Account was found in memory, but is a single ref single slot account
-                                        // For testing purposes, return None as this can be treated like
+                                        // Account was found in memory, but is a single ref single
+                                        // slot account
+                                        // For testing purposes, return None as this can be treated
+                                        // like
                                         // a normal account that was flushed to storage.
                                         entry = None;
                                     }
@@ -1314,8 +1321,8 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> AccountsIndex<T, U> {
         let mut num_existed_on_disk = 0;
 
         // offset bin processing in the 'binned' array by a random amount.
-        // This results in calls to insert_new_entry_if_missing_with_lock from different threads starting at different bins to avoid
-        // lock contention.
+        // This results in calls to insert_new_entry_if_missing_with_lock from different threads
+        // starting at different bins to avoid lock contention.
         let bins = self.bins();
         let random_bin_offset = rng().random_range(0..bins);
         let bin_calc = self.bin_calculator;
@@ -1420,7 +1427,8 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> AccountsIndex<T, U> {
     }
 
     /// Updates the given pubkey at the given slot with the new account information.
-    /// on return, the index's previous account info may be returned in 'reclaims' depending on 'previous_slot_entry_was_cached'
+    /// on return, the index's previous account info may be returned in 'reclaims' depending on
+    /// 'previous_slot_entry_was_cached'
     pub fn upsert(
         &self,
         new_slot: Slot,
@@ -1432,20 +1440,23 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> AccountsIndex<T, U> {
         reclaims: &mut ReclaimsSlotList<T>,
         reclaim: UpsertReclaim,
     ) {
-        // vast majority of updates are to item already in accounts index, so store as raw to avoid unnecessary allocations
+        // vast majority of updates are to item already in accounts index, so store as raw to avoid
+        // unnecessary allocations
         let store_raw = true;
 
         // We don't atomically update both primary index and secondary index together.
-        // This certainly creates a small time window with inconsistent state across the two indexes.
-        // However, this is acceptable because:
+        // This certainly creates a small time window with inconsistent state across the two
+        // indexes. However, this is acceptable because:
         //
-        //  - A strict consistent view at any given moment of time is not necessary, because the only
-        //  use case for the secondary index is `scan`, and `scans` are only supported/require consistency
-        //  on frozen banks, and this inconsistency is only possible on working banks.
+        //  - A strict consistent view at any given moment of time is not necessary, because the
+        //    only
+        //  use case for the secondary index is `scan`, and `scans` are only supported/require
+        // consistency  on frozen banks, and this inconsistency is only possible on working
+        // banks.
         //
         //  - The secondary index is never consulted as primary source of truth for gets/stores.
-        //  So, what the accounts_index sees alone is sufficient as a source of truth for other non-scan
-        //  account operations.
+        //  So, what the accounts_index sees alone is sufficient as a source of truth for other
+        // non-scan  account operations.
         let new_item = PreAllocatedAccountMapEntry::new(
             new_slot,
             account_info,
@@ -1636,10 +1647,11 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> AccountsIndex<T, U> {
     /// a) If slot < newest_root_in_slot_list, then we know the update is outdated by a later rooted
     /// update, namely the one in newest_root_in_slot_list
     ///
-    /// b) If slot > newest_root_in_slot_list, then because slot < max_clean_root_exclusive and we know there are
-    /// no roots in the slot list between newest_root_in_slot_list and max_clean_root_exclusive, (otherwise there
-    /// would be a bigger newest_root_in_slot_list, which is a contradiction), then we know slot must be
-    /// an unrooted slot less than max_clean_root_exclusive and thus safe to clean as well.
+    /// b) If slot > newest_root_in_slot_list, then because slot < max_clean_root_exclusive and we
+    /// know there are no roots in the slot list between newest_root_in_slot_list and
+    /// max_clean_root_exclusive, (otherwise there would be a bigger newest_root_in_slot_list,
+    /// which is a contradiction), then we know slot must be an unrooted slot less than
+    /// max_clean_root_exclusive and thus safe to clean as well.
     fn can_purge_older_entries(
         max_clean_root_exclusive: Slot,
         newest_root_in_slot_list: Slot,
@@ -2251,7 +2263,8 @@ pub mod tests {
 
         match upsert_method {
             Some(upsert_method) => {
-                // insert first entry for pubkey. This will use new_entry_after_update and not call update.
+                // insert first entry for pubkey. This will use new_entry_after_update and not call
+                // update.
                 index.upsert(
                     slot0,
                     slot0,
@@ -2293,7 +2306,8 @@ pub mod tests {
 
         match upsert_method {
             Some(upsert_method) => {
-                // insert second entry for pubkey. This will use update and NOT use new_entry_after_update.
+                // insert second entry for pubkey. This will use update and NOT use
+                // new_entry_after_update.
                 index.upsert(
                     slot1,
                     slot1,
@@ -3692,9 +3706,9 @@ pub mod tests {
         );
         assert_eq!(secondary_index.get(&secondary_key1), vec![account_key]);
 
-        // If we set a root at `later_slot`, and clean, then even though the account with secondary_key1
-        // was outdated by the update in the later slot, the primary account key is still alive,
-        // so both secondary keys will still be kept alive.
+        // If we set a root at `later_slot`, and clean, then even though the account with
+        // secondary_key1 was outdated by the update in the later slot, the primary account
+        // key is still alive, so both secondary keys will still be kept alive.
         index.add_root(later_slot);
         index.slot_list_mut(&account_key, |mut slot_list| {
             index.purge_older_root_entries(&mut slot_list, &mut ReclaimsSlotList::new(), None)
@@ -3957,7 +3971,8 @@ pub mod tests {
         // this is because of inclusive vs exclusive in the call to can_purge_older_entries
         assert!(!index.clean_rooted_entries(&key, &mut gc, Some(slot1)));
         // this will delete the entry because it is <= max_root_inclusive and NOT a root
-        // note this has to be slot2 because of inclusive vs exclusive in the call to can_purge_older_entries
+        // note this has to be slot2 because of inclusive vs exclusive in the call to
+        // can_purge_older_entries
         {
             let mut gc = ReclaimsSlotList::new();
             assert!(index.clean_rooted_entries(&key, &mut gc, Some(slot2)));

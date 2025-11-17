@@ -180,7 +180,8 @@ impl Stats {
 
     /// This is an estimate of the # of items in mem that are awaiting flushing to disk.
     /// returns (# items in mem) - (# items we intend to hold in mem for performance heuristics)
-    /// The result is also an estimate because 'held_in_mem' is based on a stat that is swapped out when stats are reported.
+    /// The result is also an estimate because 'held_in_mem' is based on a stat that is swapped out
+    /// when stats are reported.
     pub fn get_remaining_items_to_flush_estimate(&self) -> usize {
         let in_mem = self.count_in_mem.load(Ordering::Relaxed) as u64;
         let held_in_mem = self.held_in_mem.slot_list_cached.load(Ordering::Relaxed)

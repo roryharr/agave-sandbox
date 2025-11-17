@@ -52,7 +52,8 @@ pub enum StorageAccess {
     #[deprecated(since = "4.0.0")]
     Mmap,
     /// storages should be accessed by File I/O
-    /// ancient storages are created by 1-shot write to pack multiple accounts together more efficiently with new formats
+    /// ancient storages are created by 1-shot write to pack multiple accounts together more
+    /// efficiently with new formats
     #[default]
     File,
 }

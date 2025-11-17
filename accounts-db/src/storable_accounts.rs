@@ -15,7 +15,8 @@ use {
     },
 };
 
-/// hold a ref to an account to store. The account could be represented in memory a few different ways
+/// hold a ref to an account to store. The account could be represented in memory a few different
+/// ways
 #[derive(Debug, Copy, Clone)]
 pub enum AccountForStorage<'a> {
     AddressAndAccount((&'a Pubkey, &'a AccountSharedData)),
@@ -172,7 +173,8 @@ impl<'a: 'b, 'b> StorableAccounts<'a> for (Slot, &'b [(&'a Pubkey, &'a AccountSh
         self.1[index].0
     }
     fn slot(&self, _index: usize) -> Slot {
-        // per-index slot is not unique per slot when per-account slot is not included in the source data
+        // per-index slot is not unique per slot when per-account slot is not included in the source
+        // data
         self.target_slot()
     }
     fn target_slot(&self) -> Slot {
@@ -201,7 +203,8 @@ impl<'a: 'b, 'b> StorableAccounts<'a> for (Slot, &'b [(Pubkey, AccountSharedData
         &self.1[index].0
     }
     fn slot(&self, _index: usize) -> Slot {
-        // per-index slot is not unique per slot when per-account slot is not included in the source data
+        // per-index slot is not unique per slot when per-account slot is not included in the source
+        // data
         self.target_slot()
     }
     fn target_slot(&self) -> Slot {
@@ -268,8 +271,9 @@ impl<'a> StorableAccountsBySlot<'a> {
     /// on the starting_offsets based on the assumption that the
     /// starting_offsets are always sorted.
     fn find_internal_index(&self, index: usize) -> (usize, usize) {
-        // special case for when there is only one slot - just return the first index without searching.
-        // This happens when we are just shrinking a single slot storage, which happens very often.
+        // special case for when there is only one slot - just return the first index without
+        // searching. This happens when we are just shrinking a single slot storage, which
+        // happens very often.
         if !self.contains_multiple_slots {
             return (0, index);
         }
@@ -375,7 +379,8 @@ pub mod tests {
         /// given an overall index for all accounts in self:
         /// return (slots_and_accounts index, index within those accounts)
         /// This is the baseline unoptimized implementation. It is not used in the validator. It
-        /// is used for testing an optimized version - `find_internal_index`, in the actual implementation.
+        /// is used for testing an optimized version - `find_internal_index`, in the actual
+        /// implementation.
         fn find_internal_index_loop(&self, index: usize) -> (usize, usize) {
             // search offsets for the accounts slice that contains 'index'.
             // This could be a binary search.
@@ -401,7 +406,8 @@ pub mod tests {
 
     /// this is used in the test for generation of storages
     /// this is no longer used in the validator.
-    /// It is very tricky to get these right. There are already tests for this. It is likely worth it to leave this here for a while until everything has settled.
+    /// It is very tricky to get these right. There are already tests for this. It is likely worth
+    /// it to leave this here for a while until everything has settled.
     impl<'a> StorableAccounts<'a> for (Slot, &'a [&'a StoredAccountInfo<'a>]) {
         fn account<Ret>(
             &self,
@@ -422,7 +428,8 @@ pub mod tests {
             self.1[index].pubkey()
         }
         fn slot(&self, _index: usize) -> Slot {
-            // per-index slot is not unique per slot when per-account slot is not included in the source data
+            // per-index slot is not unique per slot when per-account slot is not included in the
+            // source data
             self.0
         }
         fn target_slot(&self) -> Slot {
@@ -433,7 +440,8 @@ pub mod tests {
         }
     }
 
-    /// this is no longer used. It is very tricky to get these right. There are already tests for this. It is likely worth it to leave this here for a while until everything has settled.
+    /// this is no longer used. It is very tricky to get these right. There are already tests for
+    /// this. It is likely worth it to leave this here for a while until everything has settled.
     impl<'a, T: ReadableAccount + Sync> StorableAccounts<'a> for (Slot, &'a [&'a (Pubkey, T)])
     where
         AccountForStorage<'a>: From<(&'a Pubkey, &'a T)>,
@@ -455,7 +463,8 @@ pub mod tests {
             &self.1[index].0
         }
         fn slot(&self, _index: usize) -> Slot {
-            // per-index slot is not unique per slot when per-account slot is not included in the source data
+            // per-index slot is not unique per slot when per-account slot is not included in the
+            // source data
             self.target_slot()
         }
         fn target_slot(&self) -> Slot {
@@ -466,7 +475,8 @@ pub mod tests {
         }
     }
 
-    /// this is no longer used. It is very tricky to get these right. There are already tests for this. It is likely worth it to leave this here for a while until everything has settled.
+    /// this is no longer used. It is very tricky to get these right. There are already tests for
+    /// this. It is likely worth it to leave this here for a while until everything has settled.
     /// this tuple contains a single different source slot that applies to all accounts
     /// accounts are StoredAccountInfo
     impl<'a> StorableAccounts<'a> for (Slot, &'a [&'a StoredAccountInfo<'a>], Slot) {
@@ -717,7 +727,8 @@ pub mod tests {
                 .collect();
             let raw2_refs = raw2.iter().collect::<Vec<_>>();
 
-            // enumerate through permutations of # entries (ie. accounts) in each slot. Each one is 0..=entries.
+            // enumerate through permutations of # entries (ie. accounts) in each slot. Each one is
+            // 0..=entries.
             for entries0 in 0..=entries {
                 let remaining1 = entries.saturating_sub(entries0);
                 for entries1 in 0..=remaining1 {

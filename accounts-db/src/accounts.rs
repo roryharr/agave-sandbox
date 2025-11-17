@@ -180,7 +180,8 @@ impl Accounts {
     }
 
     /// same as `load_with_fixed_root` except:
-    /// if the account is not already in the read cache, it is NOT put in the read cache on successful load
+    /// if the account is not already in the read cache, it is NOT put in the read cache on
+    /// successful load
     pub fn load_with_fixed_root_do_not_populate_read_cache(
         &self,
         ancestors: &Ancestors,
@@ -954,7 +955,8 @@ mod tests {
             results1,
             vec![
                 Ok(()), // Read-only account (keypair1) can be referenced multiple times
-                Err(TransactionError::AccountInUse), // Read-only account (keypair1) cannot also be locked as writable
+                Err(TransactionError::AccountInUse), /* Read-only account (keypair1) cannot also
+                                                      * be locked as writable */
             ],
         );
         assert!(accounts
@@ -1219,8 +1221,11 @@ mod tests {
             results,
             vec![
                 Ok(()), // Read-only account (keypair0) can be referenced multiple times
-                Err(TransactionError::WouldExceedMaxBlockCostLimit), // is not locked due to !qos_results[1].is_ok()
-                Ok(()), // Read-only account (keypair0) can be referenced multiple times
+                Err(TransactionError::WouldExceedMaxBlockCostLimit), /* is not locked due to !qos_results[1].is_ok() */
+                Ok(()),                                              /* Read-only account
+                                                                      * (keypair0) can be
+                                                                      * referenced multiple
+                                                                      * times */
             ],
         );
 

@@ -3,8 +3,8 @@ use std::{
     time::Duration,
 };
 
-// encapsulate complications of unneeded mutex and Condvar to give us event behavior of wait and notify
-// this will likely be wrapped in an arc somehow
+// encapsulate complications of unneeded mutex and Condvar to give us event behavior of wait and
+// notify this will likely be wrapped in an arc somehow
 #[derive(Default, Debug)]
 pub struct WaitableCondvar {
     pub mutex: Mutex<()>,
@@ -71,7 +71,11 @@ pub mod tests {
         // just wait, but 1 less pass - verifies that notify_all works with multiple and with 1
         let handle2 = Builder::new().spawn(move || {
             for _pass in 0..(passes - 1) {
-                assert!(!cv2__.wait_timeout(Duration::from_millis(10000))); // long enough to not be intermittent, short enough to fail if we really don't get notified
+                assert!(!cv2__.wait_timeout(Duration::from_millis(10000))); // long enough to not be
+                                                                            // intermittent, short
+                                                                            // enough to fail if we
+                                                                            // really don't get
+                                                                            // notified
             }
         });
         for _pass in 0..passes {

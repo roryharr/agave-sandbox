@@ -34,15 +34,16 @@ pub struct BucketMapHolder<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>>
 
     pub count_buckets_flushed: AtomicUsize,
 
-    /// These three ages are individual atomics because their values are read many times from code during runtime.
-    /// Instead of accessing the single age and doing math each time, each value is incremented each time the age occurs, which is `AGE_MS`.
-    /// Callers can ask for the precomputed value they already want.
-    /// rolling 'current' age
+    /// These three ages are individual atomics because their values are read many times from code
+    /// during runtime. Instead of accessing the single age and doing math each time, each
+    /// value is incremented each time the age occurs, which is `AGE_MS`. Callers can ask for
+    /// the precomputed value they already want. rolling 'current' age
     pub age: AtomicAge,
     /// rolling age that is 'ages_to_stay_in_cache' + 'age'
     pub future_age_to_flush: AtomicAge,
     /// rolling age that is effectively 'age' - 1
-    /// these items are expected to be flushed from the accounts write cache or otherwise modified before this age occurs
+    /// these items are expected to be flushed from the accounts write cache or otherwise modified
+    /// before this age occurs
     pub future_age_to_flush_cached: AtomicAge,
 
     pub stats: Stats,
@@ -56,12 +57,13 @@ pub struct BucketMapHolder<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>>
 
     pub threads: usize,
 
-    /// how many ages should elapse from the last time an item is used where the item will remain in the cache
+    /// how many ages should elapse from the last time an item is used where the item will remain
+    /// in the cache
     pub ages_to_stay_in_cache: Age,
 
-    /// startup is a special time for flush to focus on moving everything to disk as fast and efficiently as possible
-    /// with less thread count limitations. LRU and access patterns are not important. Freeing memory
-    /// and writing to disk in parallel are.
+    /// startup is a special time for flush to focus on moving everything to disk as fast and
+    /// efficiently as possible with less thread count limitations. LRU and access patterns are
+    /// not important. Freeing memory and writing to disk in parallel are.
     /// Note startup is an optimization and is not required for correctness.
     startup: AtomicBool,
     _phantom: PhantomData<T>,
@@ -83,9 +85,11 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> BucketMapHolder<T, U>
     }
 
     pub fn increment_age(&self) {
-        // since we are about to change age, there are now 0 buckets that have been flushed at this age
-        // this should happen before the age.fetch_add
-        // Otherwise, as soon as we increment the age, a thread could race us and flush before we swap this out since it detects the age has moved forward and a bucket will be eligible for flushing.
+        // since we are about to change age, there are now 0 buckets that have been flushed at this
+        // age this should happen before the age.fetch_add
+        // Otherwise, as soon as we increment the age, a thread could race us and flush before we
+        // swap this out since it detects the age has moved forward and a bucket will be eligible
+        // for flushing.
         let previous = self.count_buckets_flushed.swap(0, Ordering::AcqRel);
         // fetch_add is defined to wrap.
         // That's what we want. 0..255, then back to 0.
@@ -278,8 +282,8 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> BucketMapHolder<T, U>
     }
 
     /// Check progress this age.
-    /// Return ms to wait to get closer to the wait target and spread out work over the entire age interval.
-    /// Goal is to avoid cpu spikes at beginning of age interval.
+    /// Return ms to wait to get closer to the wait target and spread out work over the entire age
+    /// interval. Goal is to avoid cpu spikes at beginning of age interval.
     fn throttling_wait_ms(&self) -> Option<u64> {
         let interval_ms = self.age_interval_ms();
         let elapsed_ms = self.age_timer.elapsed_ms();
@@ -294,7 +298,8 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> BucketMapHolder<T, U>
             // all bins flushed, so this thread can sleep
             true
         } else {
-            // at least 1 thread running for each bin that still needs to be flushed, so this thread can sleep
+            // at least 1 thread running for each bin that still needs to be flushed, so this thread
+            // can sleep
             let active = self.stats.active_threads.load(Ordering::Relaxed);
             bins_flushed.saturating_add(active as usize) >= self.bins
         }
@@ -344,7 +349,8 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> BucketMapHolder<T, U>
                 self.stats
                     .bg_waiting_us
                     .fetch_add(m.as_us(), Ordering::Relaxed);
-                // likely some time has elapsed. May have been waiting for age time interval to elapse.
+                // likely some time has elapsed. May have been waiting for age time interval to
+                // elapse.
                 if can_advance_age {
                     self.maybe_advance_age();
                 }
@@ -433,10 +439,12 @@ pub mod tests {
             // inc all
             for _ in 0..bins {
                 assert!(!test.all_buckets_flushed_at_current_age());
-                // cannot call this because based on timing, it may fire: test.bucket_flushed_at_current_age();
+                // cannot call this because based on timing, it may fire:
+                // test.bucket_flushed_at_current_age();
             }
 
-            // this would normally happen once time went off and all buckets had been flushed at the previous age
+            // this would normally happen once time went off and all buckets had been flushed at the
+            // previous age
             test.count_buckets_flushed
                 .fetch_add(bins, Ordering::Release);
             test.increment_age();
@@ -450,7 +458,8 @@ pub mod tests {
         let test = BucketMapHolder::<u64, u64>::new(bins, &AccountsIndexConfig::default(), 1);
         let bins = test.bins as u64;
         let interval_ms = test.age_interval_ms();
-        // 90% of time elapsed, all but 1 bins flushed, should not wait since we'll end up right on time
+        // 90% of time elapsed, all but 1 bins flushed, should not wait since we'll end up right on
+        // time
         let elapsed_ms = interval_ms * 89 / 100;
         let bins_flushed = bins - 1;
         let result = test.throttling_wait_ms_internal(interval_ms, elapsed_ms, bins_flushed);
@@ -494,9 +503,10 @@ pub mod tests {
         let now = Instant::now();
         test.bucket_flushed_at_current_age(true); // done with age 0
         (0..threads).into_par_iter().for_each(|_| {
-            // This test used to be more strict with time, but in a parallel, multi test environment,
-            // sometimes threads starve and this test intermittently fails. So, give it more time than it should require.
-            // This may be aggravated by the strategy of only allowing thread 0 to advance the age.
+            // This test used to be more strict with time, but in a parallel, multi test
+            // environment, sometimes threads starve and this test intermittently fails.
+            // So, give it more time than it should require. This may be aggravated by
+            // the strategy of only allowing thread 0 to advance the age.
             while now.elapsed().as_millis() < (time as u128) * 100 {
                 if test.maybe_advance_age() {
                     test.bucket_flushed_at_current_age(true);

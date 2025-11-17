@@ -25,8 +25,9 @@ pub struct AccountStorage {
     /// map from Slot -> the single append vec for the slot
     map: AccountStorageMap,
     /// while shrink is operating on a slot, there can be 2 append vecs active for that slot
-    /// Once the index has been updated to only refer to the new append vec, the single entry for the slot in 'map' can be updated.
-    /// Entries in 'shrink_in_progress_map' can be found by 'get_account_storage_entry'
+    /// Once the index has been updated to only refer to the new append vec, the single entry for
+    /// the slot in 'map' can be updated. Entries in 'shrink_in_progress_map' can be found by
+    /// 'get_account_storage_entry'
     shrink_in_progress_map: RwLock<IntMap<Slot, Arc<AccountStorageEntry>>>,
 }
 
@@ -41,14 +42,18 @@ impl AccountStorage {
     /// then the new append vec is dropped from 'shrink_in_progress_map'.
     /// So, it is possible for a race with this fn and dropping 'shrink_in_progress'.
     /// Callers to this function have 2 choices:
-    /// 1. hold the account index read lock for the pubkey so that the account index entry cannot be changed prior to or during this call. (scans do this)
+    /// 1. hold the account index read lock for the pubkey so that the account index entry cannot be
+    ///    changed prior to or during this call. (scans do this)
     /// 2. expect to be ready to start over and read the index again if this function returns None
     ///
-    /// Operations like shrinking or write cache flushing may have updated the index between when the caller read the index and called this function to
-    /// load from the append vec specified in the index.
+    /// Operations like shrinking or write cache flushing may have updated the index between when
+    /// the caller read the index and called this function to load from the append vec specified
+    /// in the index.
     ///
-    /// In practice, this fn will return the entry from the map in the very first lookup unless a shrink is in progress.
-    /// The third lookup will only be called if a requesting thread exactly interposes itself between the 2 map manipulations in the drop of 'shrink_in_progress'.
+    /// In practice, this fn will return the entry from the map in the very first lookup unless a
+    /// shrink is in progress. The third lookup will only be called if a requesting thread
+    /// exactly interposes itself between the 2 map manipulations in the drop of
+    /// 'shrink_in_progress'.
     pub(crate) fn get_account_storage_entry(
         &self,
         slot: Slot,
@@ -77,7 +82,8 @@ impl AccountStorage {
     }
 
     /// return the append vec for 'slot' if it exists
-    /// This is only ever called when shrink is not possibly running and there is a max of 1 append vec per slot.
+    /// This is only ever called when shrink is not possibly running and there is a max of 1 append
+    /// vec per slot.
     pub fn get_slot_storage_entry(&self, slot: Slot) -> Option<Arc<AccountStorageEntry>> {
         assert!(
             self.no_shrink_in_progress(),
@@ -162,11 +168,12 @@ impl AccountStorage {
     }
 
     /// called when shrinking begins on a slot and append vec.
-    /// When 'ShrinkInProgress' is dropped by caller, the old store will be replaced with 'new_store' in the storage map.
-    /// Fails if there are no existing stores at the slot.
+    /// When 'ShrinkInProgress' is dropped by caller, the old store will be replaced with
+    /// 'new_store' in the storage map. Fails if there are no existing stores at the slot.
     /// 'new_store' will be replacing the current store at 'slot' in 'map'
     /// So, insert 'new_store' into 'shrink_in_progress_map'.
-    /// This allows tx processing loads to find the items in 'shrink_in_progress_map' after the index is updated and item is now located in 'new_store'.
+    /// This allows tx processing loads to find the items in 'shrink_in_progress_map' after the
+    /// index is updated and item is now located in 'new_store'.
     pub(crate) fn shrinking_in_progress(
         &self,
         slot: Slot,
@@ -264,7 +271,8 @@ pub struct ShrinkInProgress<'a> {
     slot: Slot,
 }
 
-/// called when the shrink is no longer in progress. This means we can release the old append vec and update the map of slot -> append vec
+/// called when the shrink is no longer in progress. This means we can release the old append vec
+/// and update the map of slot -> append vec
 impl Drop for ShrinkInProgress<'_> {
     fn drop(&mut self) {
         assert_eq!(
@@ -426,9 +434,9 @@ pub struct NextItem<'a> {
 /// Select the `nth` (`0 <= nth < range.len()`) value from a `range`, choosing values alternately
 /// from its start or end according to a `start_rate : end_rate` ratio.
 ///
-/// For every `start_rate` values selected from the start, `end_rate` values are selected from the end.
-/// The resulting sequence alternates in a balanced and interleaved fashion between the range's start and end.
-/// ```
+/// For every `start_rate` values selected from the start, `end_rate` values are selected from the
+/// end. The resulting sequence alternates in a balanced and interleaved fashion between the range's
+/// start and end. ```
 fn select_from_range_with_start_end_rates(
     range: Range<usize>,
     nth: usize,

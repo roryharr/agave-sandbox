@@ -117,23 +117,23 @@ pub mod tests {
         // to correct slots. Cache flush can skip writes if accounts have already been written to
         // a newer slot
         let slot0 = 0;
-        let storage0 = accounts_db.create_and_insert_store(slot0, /*size*/ 4_096, "");
+        let storage0 = accounts_db.create_and_insert_store(slot0, /* size */ 4_096, "");
         storage0
             .accounts
-            .write_accounts(&(slot0, [(&key1, &account)].as_slice()), /*skip*/ 0);
+            .write_accounts(&(slot0, [(&key1, &account)].as_slice()), /* skip */ 0);
 
         let slot1 = 1;
-        let storage1 = accounts_db.create_and_insert_store(slot1, /*size*/ 4_096, "");
+        let storage1 = accounts_db.create_and_insert_store(slot1, /* size */ 4_096, "");
         storage1
             .accounts
-            .write_accounts(&(slot1, [(&key1, &account)].as_slice()), /*skip*/ 0);
+            .write_accounts(&(slot1, [(&key1, &account)].as_slice()), /* skip */ 0);
 
         // Account with key2 is updated in a single slot, should get notified once
         let slot2 = 2;
-        let storage2 = accounts_db.create_and_insert_store(slot2, /*size*/ 4_096, "");
+        let storage2 = accounts_db.create_and_insert_store(slot2, /* size */ 4_096, "");
         storage2
             .accounts
-            .write_accounts(&(slot2, [(&key2, &account)].as_slice()), /*skip*/ 0);
+            .write_accounts(&(slot2, [(&key2, &account)].as_slice()), /* skip */ 0);
 
         // Do the notification
         let notifier = GeyserTestPlugin::default();
@@ -182,8 +182,8 @@ pub mod tests {
         let notifier = Arc::new(notifier);
         accounts.set_geyser_plugin_notifier(Some(notifier.clone()));
 
-        // Account with key1 is updated twice in two different slots -- should only get notified twice.
-        // Account with key2 is updated slot0, should get notified once
+        // Account with key1 is updated twice in two different slots -- should only get notified
+        // twice. Account with key2 is updated slot0, should get notified once
         // Account with key3 is updated in slot1, should get notified once
         let key1 = solana_pubkey::new_rand();
         let account1_lamports1: u64 = 1;

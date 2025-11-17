@@ -157,7 +157,8 @@ impl RollingBitField {
                     break;
                 }
 
-                // move the min item from bits to excess and then purge from min to make room for this new max
+                // move the min item from bits to excess and then purge from min to make room for
+                // this new max
                 let inserted = self.excess.insert(self.min);
                 assert!(inserted);
 
@@ -167,7 +168,8 @@ impl RollingBitField {
                 self.purge(&key);
 
                 if self.all_items_in_excess() {
-                    // if we moved the last existing item to excess, then we are ready to insert the new item in the bits
+                    // if we moved the last existing item to excess, then we are ready to insert the
+                    // new item in the bits
                     bits_empty = true;
                     break;
                 }
@@ -244,16 +246,18 @@ impl RollingBitField {
             }
         } else {
             // The idea is that there are no items in the bitfield anymore.
-            // But, there MAY be items in excess. The model works such that items < min go into excess.
-            // So, after purging all items from bitfield, we hold max to be what it previously was, but set min to max.
-            // Thus, if we lookup >= max, answer is always false without having to look in excess.
-            // If we changed max here to 0, we would lose the ability to know the range of items in excess (if any).
+            // But, there MAY be items in excess. The model works such that items < min go into
+            // excess. So, after purging all items from bitfield, we hold max to be what
+            // it previously was, but set min to max. Thus, if we lookup >= max, answer
+            // is always false without having to look in excess. If we changed max here
+            // to 0, we would lose the ability to know the range of items in excess (if any).
             // So, now, with min updated = max:
             // If we lookup < max, then we first check min.
             // If >= min, then we look in bitfield.
             // Otherwise, we look in excess since the request is < min.
-            // So, resetting min like this after a remove results in the correct behavior for the model.
-            // Later, if we insert and there are 0 items total (excess + bitfield), then we reset min/max to reflect the new item only.
+            // So, resetting min like this after a remove results in the correct behavior for the
+            // model. Later, if we insert and there are 0 items total (excess +
+            // bitfield), then we reset min/max to reflect the new item only.
             self.min = self.max_exclusive;
         }
     }
@@ -632,7 +636,8 @@ pub mod tests {
         let start = 100;
         let mut bitfield = setup_wide(width, start).bitfield;
 
-        let slot = start + 2 - width; // this item would make our width exactly equal to what is allowed, but it is also inserting prior to min
+        let slot = start + 2 - width; // this item would make our width exactly equal to what is allowed, but it is also inserting
+                                      // prior to min
         bitfield.insert(slot);
         assert_eq!(1, bitfield.excess.len());
         assert!(bitfield.contains(&slot));
@@ -686,7 +691,8 @@ pub mod tests {
         tester.insert(slot);
         assert!(tester.bitfield.excess.is_empty());
 
-        // insert a slot before the previous one. this is 'excess' since we don't use this pattern in normal operation
+        // insert a slot before the previous one. this is 'excess' since we don't use this pattern
+        // in normal operation
         let slot2 = slot - 1;
         tester.insert(slot2);
         assert_eq!(tester.bitfield.excess.len(), 1);
@@ -725,7 +731,8 @@ pub mod tests {
                     for slot in start..max {
                         // subsequent roots to add
                         for slot2 in (slot + 1)..max {
-                            // reverse_slots = 1 means add slots in reverse order (max to min). This causes us to add second and later slots to excess.
+                            // reverse_slots = 1 means add slots in reverse order (max to min). This
+                            // causes us to add second and later slots to excess.
                             for reverse_slots in [false, true].iter().cloned() {
                                 let maybe_reverse = |slot| {
                                     if reverse_slots {

@@ -20,7 +20,8 @@ use {
 #[derive(Debug)]
 pub struct AccountMapEntry<T> {
     /// number of alive slots that contain >= 1 instances of account data for this pubkey
-    /// where alive represents a slot that has not yet been removed by clean via AccountsDB::clean_stored_dead_slots() for containing no up to date account information
+    /// where alive represents a slot that has not yet been removed by clean via
+    /// AccountsDB::clean_stored_dead_slots() for containing no up to date account information
     ref_count: AtomicRefCount,
     /// list of slots in which this pubkey was updated
     /// Note that 'clean' removes outdated entries (ie. older roots) from this slot_list
@@ -121,16 +122,16 @@ impl<T: IndexValue> AccountMapEntry<T> {
 
     /// Acquire a read lock on the slot list and return accessor for interpreting its representation
     ///
-    /// Do not call any locking function (`slot_list_*lock*`) on the same `AccountMapEntry` until accessor
-    /// they return is dropped.
+    /// Do not call any locking function (`slot_list_*lock*`) on the same `AccountMapEntry` until
+    /// accessor they return is dropped.
     pub fn slot_list_read_lock(&self) -> SlotListReadGuard<'_, T> {
         SlotListReadGuard(self.slot_list.read().unwrap())
     }
 
     /// Acquire a write lock on the slot list and return accessor for modifying it
     ///
-    /// Do not call any locking function (`slot_list_*lock*`) on the same `AccountMapEntry` until accessor
-    /// they return is dropped.
+    /// Do not call any locking function (`slot_list_*lock*`) on the same `AccountMapEntry` until
+    /// accessor they return is dropped.
     pub fn slot_list_write_lock(&self) -> SlotListWriteGuard<'_, T> {
         SlotListWriteGuard(self.slot_list.write().unwrap())
     }
@@ -268,7 +269,8 @@ impl<T: IndexValue> PreAllocatedAccountMapEntry<T> {
     /// 1. new empty (refcount=0, slot_list={})
     /// 2. update(slot, account_info)
     ///
-    /// This code is called when the first entry [ie. (slot,account_info)] for a pubkey is inserted into the index.
+    /// This code is called when the first entry [ie. (slot,account_info)] for a pubkey is inserted
+    /// into the index.
     pub fn new<U: DiskIndexValue + From<T> + Into<T>>(
         slot: Slot,
         account_info: T,

@@ -1,7 +1,8 @@
 //! helpers for squashing append vecs into ancient append vecs
 //! an ancient append vec is:
 //! 1. a slot that is older than an epoch old
-//! 2. multiple 'slots' squashed into a single older (ie. ancient) slot for convenience and performance
+//! 2. multiple 'slots' squashed into a single older (ie. ancient) slot for convenience and
+//!    performance
 //!
 //! Otherwise, an ancient append vec is the same as any other append vec
 use {
@@ -38,8 +39,7 @@ struct PackedAncientStorageTuning {
     /// Shrink enough of these ancient append vecs to realize this
     /// percentage of the total dead data that needs to be shrunk
     /// - shrinking too much, burns too much time and disk i/o,
-    /// - shrinking too little could cause us to never catch up,
-    ///   and have old data accumulate.
+    /// - shrinking too little could cause us to never catch up, and have old data accumulate.
     percent_of_alive_shrunk_data: u64,
     /// number of ancient slots we should aim to have. If we have more than this, combine further.
     max_ancient_slots: usize,
@@ -65,7 +65,8 @@ struct SlotInfo {
     /// true if this should be shrunk due to ratio
     should_shrink: bool,
     /// this slot is a high slot #
-    /// It is important to include some high slot #s so that we have new slots to try each time pack runs.
+    /// It is important to include some high slot #s so that we have new slots to try each time
+    /// pack runs.
     is_high_slot: bool,
 }
 
@@ -127,7 +128,8 @@ impl AncientSlotInfos {
             } else {
                 let already_ideal_size = u64::from(ideal_size) * 80 / 100;
                 if alive_bytes > already_ideal_size {
-                    // do not include this append vec at all. It is already ideal size and not a candidate for shrink.
+                    // do not include this append vec at all. It is already ideal size and not a
+                    // candidate for shrink.
                     return was_randomly_shrunk;
                 }
             }
@@ -187,8 +189,9 @@ impl AncientSlotInfos {
         // shrink enough slots to write 'percent_of_alive_shrunk_data'% of the total alive data
         // from slots that exceeded the shrink threshold.
         // The goal is to limit overall i/o in this pass while making progress.
-        // Simultaneously, we cannot allow the overall budget to be dominated by ancient storages that need to be shrunk.
-        // So, we have to limit how much of the total resulting budget can be allocated to re-packing/shrinking ancient storages.
+        // Simultaneously, we cannot allow the overall budget to be dominated by ancient storages
+        // that need to be shrunk. So, we have to limit how much of the total resulting
+        // budget can be allocated to re-packing/shrinking ancient storages.
         let threshold_bytes =
             (self.total_alive_bytes_shrink.0 * tuning.percent_of_alive_shrunk_data / 100).min(
                 u64::from(tuning.max_resulting_storages)
@@ -205,9 +208,10 @@ impl AncientSlotInfos {
             self.best_slots_to_shrink
                 .push_back((info.slot, info.capacity));
             if bytes_to_shrink_due_to_ratio.0 >= threshold_bytes {
-                // we exceeded the amount to shrink due to alive ratio, so don't shrink this one just due to 'should_shrink'
-                // It MAY be shrunk based on total capacity still.
-                // Mark it as false for 'should_shrink' so it gets evaluated solely based on # of files.
+                // we exceeded the amount to shrink due to alive ratio, so don't shrink this one
+                // just due to 'should_shrink' It MAY be shrunk based on total
+                // capacity still. Mark it as false for 'should_shrink' so it gets
+                // evaluated solely based on # of files.
                 info.should_shrink = false;
             } else {
                 bytes_to_shrink_due_to_ratio += info.alive_bytes;
@@ -235,7 +239,8 @@ impl AncientSlotInfos {
         tuning: &PackedAncientStorageTuning,
         stats: &ShrinkAncientStats,
     ) {
-        // these indexes into 'all_infos' are useless once we truncate 'all_infos', so make sure they're cleared out to avoid any issues
+        // these indexes into 'all_infos' are useless once we truncate 'all_infos', so make sure
+        // they're cleared out to avoid any issues
         self.shrink_indexes.clear();
         let total_storages = self.all_infos.len();
         let mut cumulative_bytes = Saturating(0u64);
@@ -253,11 +258,13 @@ impl AncientSlotInfos {
             // combined ancient storages are less than the threshold, then
             // we've gone too far, so get rid of this entry and all after it.
             // Every storage after this one is larger than the ones we've chosen.
-            // if we ever get to more than `max_resulting_storages` required ancient storages, that is enough to stop for now.
-            // It will take a lot of time for the pack algorithm to create that many, and that is bad for system performance.
+            // if we ever get to more than `max_resulting_storages` required ancient storages, that
+            // is enough to stop for now. It will take a lot of time for the pack
+            // algorithm to create that many, and that is bad for system performance.
             // This should be a limit that only affects extreme testing environments.
-            // We do not stop including entries until we have dealt with all the high slot #s. This allows the algorithm to continue
-            // to make progress each time it is called. There are exceptions that can cause the pack to fail, such as accounts with multiple
+            // We do not stop including entries until we have dealt with all the high slot #s. This
+            // allows the algorithm to continue to make progress each time it is called.
+            // There are exceptions that can cause the pack to fail, such as accounts with multiple
             // refs.
             if !info.is_high_slot
                 && (storages_remaining + ancient_storages_required < low_threshold
@@ -307,7 +314,7 @@ impl AncientSlotInfos {
 
         // sort by:
         // 1. `high_slot`: we want to include new, high slots each time so that we try new slots
-        //     each time alg runs and have several high target slots for packed storages.
+        //    each time alg runs and have several high target slots for packed storages.
         // 2. 'should_shrink' so we make progress on shrinking ancient storages
         // 3. smallest capacity to largest so that we remove the most slots possible
         self.all_infos.sort_unstable_by(|l, r| {
@@ -346,8 +353,9 @@ impl AccountsDb {
     /// Combine account data from storages in 'sorted_slots' into packed storages.
     /// This keeps us from accumulating storages for each slot older than an epoch.
     /// After this function the number of alive roots is <= # alive roots when it was called.
-    /// In practice, the # of alive roots after will be significantly less than # alive roots when called.
-    /// Trying to reduce # roots and storages (one per root) required to store all the data in ancient slots
+    /// In practice, the # of alive roots after will be significantly less than # alive roots when
+    /// called. Trying to reduce # roots and storages (one per root) required to store all the
+    /// data in ancient slots
     pub(crate) fn combine_ancient_slots_packed(
         &self,
         sorted_slots: Vec<Slot>,
@@ -461,8 +469,8 @@ impl AccountsDb {
             })
             .collect::<Vec<_>>();
 
-        // Sort highest slot to lowest slot. This way, we will put the multi ref accounts with the highest slots in the highest
-        // packed slot.
+        // Sort highest slot to lowest slot. This way, we will put the multi ref accounts with the
+        // highest slots in the highest packed slot.
         many_refs_newest.sort_unstable_by(|a, b| b.slot.cmp(&a.slot));
         metrics.newest_alive_packed_count += many_refs_newest.len();
 
@@ -480,18 +488,21 @@ impl AccountsDb {
             return;
         }
 
-        // for the accounts which are one ref and can be put anywhere, we want to put the accounts from the LARGEST storages at the end.
-        // This causes us to keep the accounts we're re-packing from already existing ancient storages together with other normal one ref accounts.
-        // The alternative could cause us to mix newly ancient slots produced by flush (containing accounts touched more recently) with previously
-        // packed ancient storages which over time contained enough dead accounts that the storage needed to be shrunk by being re-packed.
-        // The end result of this sort should cause older, colder accounts (previously packed into large storages and then re-packed/shrunk) to
+        // for the accounts which are one ref and can be put anywhere, we want to put the accounts
+        // from the LARGEST storages at the end. This causes us to keep the accounts we're
+        // re-packing from already existing ancient storages together with other normal one ref
+        // accounts. The alternative could cause us to mix newly ancient slots produced by
+        // flush (containing accounts touched more recently) with previously packed ancient
+        // storages which over time contained enough dead accounts that the storage needed to be
+        // shrunk by being re-packed. The end result of this sort should cause older, colder
+        // accounts (previously packed into large storages and then re-packed/shrunk) to
         // be re-packed together with other older/colder accounts.
         accounts_to_combine
             .accounts_to_combine
             .sort_unstable_by(|a, b| a.capacity.cmp(&b.capacity));
 
-        // pack the accounts with 1 ref or refs > 1 but the slot we're packing is the highest alive slot for the pubkey.
-        // Note the `chain` below combining the 2 types of refs.
+        // pack the accounts with 1 ref or refs > 1 but the slot we're packing is the highest alive
+        // slot for the pubkey. Note the `chain` below combining the 2 types of refs.
         let pack = PackedAncientStorage::pack(
             many_refs_newest.iter().chain(
                 accounts_to_combine
@@ -590,7 +601,8 @@ impl AccountsDb {
         };
         let mut randoms = 0;
         let max_slot = slots.iter().max().cloned().unwrap_or_default();
-        // heuristic to include some # of newly eligible ancient slots so that the pack algorithm always makes progress
+        // heuristic to include some # of newly eligible ancient slots so that the pack algorithm
+        // always makes progress
         let high_slot_boundary = max_slot.saturating_sub(HIGH_SLOT_OFFSET);
         let is_high_slot = |slot| slot >= high_slot_boundary;
         for slot in &slots {
@@ -716,7 +728,8 @@ impl AccountsDb {
     }
 
     /// finish shrink operation on slots where a new storage was created
-    /// drop root and storage for all original slots whose contents were combined into other storages
+    /// drop root and storage for all original slots whose contents were combined into other
+    /// storages
     fn finish_combine_ancient_slots_packed_internal(
         &self,
         accounts_to_combine: AccountsToCombine<'_>,
@@ -749,11 +762,13 @@ impl AccountsDb {
                 true,
             );
 
-            // If the slot is dead, remove the need to shrink the storage as the storage entries will be purged.
+            // If the slot is dead, remove the need to shrink the storage as the storage entries
+            // will be purged.
             self.shrink_candidate_slots.lock().unwrap().remove(&slot);
 
             if reopen {
-                // 'shrink_in_progress' is dead now. We can safely 'reopen' the new storage for 'slot'.
+                // 'shrink_in_progress' is dead now. We can safely 'reopen' the new storage for
+                // 'slot'.
                 self.reopen_storage_as_readonly_shrinking_in_progress_ok(slot);
             }
         }
@@ -763,12 +778,11 @@ impl AccountsDb {
 
     /// given all accounts per ancient slot, in slots that we want to combine together:
     /// 1. Look up each pubkey in the index
-    /// 2. separate, by slot, into:
-    ///    2a. pubkeys with refcount = 1. This means this pubkey exists NOWHERE else in accounts db.
-    ///    2b. pubkeys with refcount > 1
+    /// 2. separate, by slot, into: 2a. pubkeys with refcount = 1. This means this pubkey exists
+    ///    NOWHERE else in accounts db. 2b. pubkeys with refcount > 1
     ///
-    /// Note that the return value can contain fewer items than 'accounts_per_storage' if we find storages which won't be affected.
-    /// 'accounts_per_storage' should be sorted by slot
+    /// Note that the return value can contain fewer items than 'accounts_per_storage' if we find
+    /// storages which won't be affected. 'accounts_per_storage' should be sorted by slot
     fn calc_accounts_to_combine<'a>(
         &self,
         accounts_per_storage: &'a mut [(&'a SlotInfo, GetUniqueAccountsResult)],
@@ -782,12 +796,13 @@ impl AccountsDb {
         let mut target_slots_sorted = Vec::with_capacity(len);
 
         // `shrink_collect` all accounts in the append vecs we want to combine.
-        // We are no longer doing eager unref in shrink_collect. Therefore, we will no longer need to iter them serially?
-        // There is a subtle difference for zero lamport accounts, which can lead to having more multi-refs than before?
-        // Consider account X in both slot x, and x+1 and x+2.
-        // With eager unref, we will only collect `one_ref`` X at slot x+2 after shrink.
-        // Without eager unref, we will collect X at `multi-ref` after shrink.
-        // Packing multi-ref is less efficient than `one_ref``. But it might be ok - in next round of clean, hopefully, it can turn this from multi-ref into one-ref.
+        // We are no longer doing eager unref in shrink_collect. Therefore, we will no longer need
+        // to iter them serially? There is a subtle difference for zero lamport accounts,
+        // which can lead to having more multi-refs than before? Consider account X in both
+        // slot x, and x+1 and x+2. With eager unref, we will only collect `one_ref`` X at
+        // slot x+2 after shrink. Without eager unref, we will collect X at `multi-ref`
+        // after shrink. Packing multi-ref is less efficient than `one_ref``. But it might
+        // be ok - in next round of clean, hopefully, it can turn this from multi-ref into one-ref.
         let mut accounts_to_combine = accounts_per_storage
             .iter_mut()
             .map(|(info, unique_accounts)| {
@@ -814,7 +829,8 @@ impl AccountsDb {
             // We want ceiling, so we add 1.
             let min_resulting_packed_slots =
                 alive_bytes.saturating_sub(1) as u64 / u64::from(tuning.ideal_storage_size) + 1;
-            // assert that iteration is in descending slot order since the code below relies on this.
+            // assert that iteration is in descending slot order since the code below relies on
+            // this.
             if let Some(last_slot) = last_slot {
                 assert!(last_slot > shrink_collect.slot);
             }
@@ -836,14 +852,17 @@ impl AccountsDb {
                 }
 
                 if (target_slots_sorted.len() as u64) >= required_packed_slots {
-                    // we have prepared to pack enough normal target slots, that form now on we can safely pack
-                    // any 'many ref' slots.
+                    // we have prepared to pack enough normal target slots, that form now on we can
+                    // safely pack any 'many ref' slots.
                     many_ref_slots = IncludeManyRefSlots::Include;
                 } else {
                     // Skip this because too few valid slots have been processed so far.
-                    // There are 'many ref newest' accounts in this slot. They must be packed into slots that are >= the current slot value.
-                    // We require `min_resulting_packed_slots` target slots. If we have not encountered enough slots already without `many ref newest` accounts, then keep trying.
-                    // On the next pass, THIS slot will be older relative to newly ancient slot #s, so those newly ancient slots will be higher in this list.
+                    // There are 'many ref newest' accounts in this slot. They must be packed into
+                    // slots that are >= the current slot value. We require
+                    // `min_resulting_packed_slots` target slots. If we have not encountered enough
+                    // slots already without `many ref newest` accounts, then keep trying.
+                    // On the next pass, THIS slot will be older relative to newly ancient slot #s,
+                    // so those newly ancient slots will be higher in this list.
                     self.shrink_ancient_stats
                         .many_ref_slots_skipped
                         .fetch_add(1, Ordering::Relaxed);
@@ -857,21 +876,28 @@ impl AccountsDb {
             if !many_refs_old_alive.accounts.is_empty() {
                 many_refs_old_alive_count += many_refs_old_alive.accounts.len();
                 many_refs_old_alive.accounts.iter().for_each(|account| {
-                    // these accounts could indicate clean bugs or low memory conditions where we are forced to flush non-roots
+                    // these accounts could indicate clean bugs or low memory conditions where we
+                    // are forced to flush non-roots
                     log::info!(
                         "ancient append vec: found unpackable account: {}, {}",
                         many_refs_old_alive.slot,
                         account.pubkey()
                     );
                 });
-                // There are alive accounts with ref_count > 1, where the entry for the account in the index is NOT the highest slot. (`many_refs_old_alive`)
-                // This means this account must remain IN this slot. There could be alive or dead references to this same account in any older slot.
-                // Moving it to a lower slot could move it before an alive or dead entry to this same account.
-                // Moving it to a higher slot could move it ahead of other slots where this account is also alive. We know a higher slot exists that contains this account.
-                // So, moving this account to a different slot could result in the moved account being before or after other instances of this account newer or older.
-                // This would fail the invariant that the highest slot # where an account exists defines the most recent account.
-                // It could be a clean error or a transient condition that will resolve if we encounter this situation.
-                // The count of these accounts per call will be reported by metrics in `unpackable_slots_count`
+                // There are alive accounts with ref_count > 1, where the entry for the account in
+                // the index is NOT the highest slot. (`many_refs_old_alive`)
+                // This means this account must remain IN this slot. There could be alive or dead
+                // references to this same account in any older slot. Moving it to a
+                // lower slot could move it before an alive or dead entry to this same account.
+                // Moving it to a higher slot could move it ahead of other slots where this account
+                // is also alive. We know a higher slot exists that contains this account.
+                // So, moving this account to a different slot could result in the moved account
+                // being before or after other instances of this account newer or older.
+                // This would fail the invariant that the highest slot # where an account exists
+                // defines the most recent account. It could be a clean error or a
+                // transient condition that will resolve if we encounter this situation.
+                // The count of these accounts per call will be reported by metrics in
+                // `unpackable_slots_count`
                 if shrink_collect.pubkeys_to_unref.is_empty()
                     && shrink_collect.alive_accounts.one_ref.accounts.is_empty()
                     && shrink_collect
@@ -880,15 +906,17 @@ impl AccountsDb {
                         .accounts
                         .is_empty()
                 {
-                    // all accounts in this append vec are alive and have > 1 ref, so nothing to be done for this append vec
+                    // all accounts in this append vec are alive and have > 1 ref, so nothing to be
+                    // done for this append vec
                     remove.push(i);
                     continue;
                 }
                 accounts_keep_slots
                     .insert(shrink_collect.slot, std::mem::take(many_refs_old_alive));
             } else {
-                // No alive accounts in this slot have a ref_count > 1. So, ALL alive accounts in this slot can be written to any other slot
-                // we find convenient. There is NO other instance of any account to conflict with.
+                // No alive accounts in this slot have a ref_count > 1. So, ALL alive accounts in
+                // this slot can be written to any other slot we find convenient.
+                // There is NO other instance of any account to conflict with.
                 target_slots_sorted.push(shrink_collect.slot);
             }
         }
@@ -941,9 +969,10 @@ impl AccountsDb {
     /// For each slot and alive accounts in 'accounts_to_combine'
     /// create a PackedAncientStorage that only contains the given alive accounts.
     /// This will represent only the accounts with ref_count > 1 from the original storage.
-    /// These accounts need to be rewritten in their same slot, Ideally with no other accounts in the slot.
-    /// Other accounts would have ref_count = 1.
-    /// ref_count = 1 accounts will be combined together with other slots into larger append vecs elsewhere.
+    /// These accounts need to be rewritten in their same slot, Ideally with no other accounts in
+    /// the slot. Other accounts would have ref_count = 1.
+    /// ref_count = 1 accounts will be combined together with other slots into larger append vecs
+    /// elsewhere.
     fn write_ancient_accounts_to_same_slot_multiple_refs<'a, 'b: 'a>(
         &'b self,
         accounts_to_combine: impl Iterator<Item = &'a AliveAccounts<'a>>,
@@ -965,31 +994,34 @@ impl AccountsDb {
 struct AccountsToCombine<'a> {
     /// slots and alive accounts that must remain in the slot they are currently in
     /// because the account exists in more than 1 slot in accounts db
-    /// This hashmap contains an entry for each slot that contains at least one account with ref_count > 1.
-    /// The value of the entry is all alive accounts in that slot whose ref_count > 1.
-    /// Any OTHER accounts in that slot whose ref_count = 1 are in 'accounts_to_combine' because they can be moved
-    /// to any slot.
-    /// We want to keep the ref_count > 1 accounts by themselves, expecting the multiple ref_counts will be resolved
-    /// soon and we can clean the duplicates up (which maybe THIS one).
+    /// This hashmap contains an entry for each slot that contains at least one account with
+    /// ref_count > 1. The value of the entry is all alive accounts in that slot whose
+    /// ref_count > 1. Any OTHER accounts in that slot whose ref_count = 1 are in
+    /// 'accounts_to_combine' because they can be moved to any slot.
+    /// We want to keep the ref_count > 1 accounts by themselves, expecting the multiple ref_counts
+    /// will be resolved soon and we can clean the duplicates up (which maybe THIS one).
     accounts_keep_slots: HashMap<Slot, AliveAccounts<'a>>,
     /// all the rest of alive accounts that can move slots and should be combined
     /// This includes all accounts with ref_count = 1 from the slots in 'accounts_keep_slots'.
-    /// There is one entry here for each storage we are processing. Even if all accounts are in 'accounts_keep_slots'.
+    /// There is one entry here for each storage we are processing. Even if all accounts are in
+    /// 'accounts_keep_slots'.
     accounts_to_combine: Vec<ShrinkCollect<'a, ShrinkCollectAliveSeparatedByRefs<'a>>>,
     /// slots that contain alive accounts that can move into ANY other ancient slot
     /// these slots will NOT be in 'accounts_keep_slots'
-    /// Some of these slots will have ancient append vecs created at them to contain everything in 'accounts_to_combine'
-    /// The rest will become dead slots with no accounts in them.
+    /// Some of these slots will have ancient append vecs created at them to contain everything in
+    /// 'accounts_to_combine' The rest will become dead slots with no accounts in them.
     /// Sort order is lowest to highest.
     target_slots_sorted: Vec<Slot>,
-    /// when scanning, this many slots contained accounts that could not be packed because accounts with ref_count > 1 existed.
+    /// when scanning, this many slots contained accounts that could not be packed because accounts
+    /// with ref_count > 1 existed.
     unpackable_slots_count: usize,
 }
 
 #[derive(Default)]
 /// intended contents of a packed ancient storage
 struct PackedAncientStorage<'a> {
-    /// accounts to move into this storage, along with the slot the accounts are currently stored in
+    /// accounts to move into this storage, along with the slot the accounts are currently stored
+    /// in
     accounts: Vec<(Slot, &'a [&'a AccountFromStorage])>,
     /// total bytes required to hold 'accounts'
     bytes: u64,
@@ -1015,14 +1047,17 @@ impl<'a> PackedAncientStorage<'a> {
             let mut bytes_total = 0usize;
             let mut accounts_to_write = Vec::default();
 
-            // walk through each set of alive accounts to pack the current new storage up to ideal_size
+            // walk through each set of alive accounts to pack the current new storage up to
+            // ideal_size
             let mut full = false;
             while !full && current_alive_accounts.is_some() {
                 let alive_accounts = current_alive_accounts.unwrap();
                 if partial_inner_index >= alive_accounts.accounts.len() {
-                    // current_alive_accounts have all been written, so advance to next set from accounts_to_combine
+                    // current_alive_accounts have all been written, so advance to next set from
+                    // accounts_to_combine
                     current_alive_accounts = accounts_to_combine.next();
-                    // reset partial progress since we're starting over with a new set of alive accounts
+                    // reset partial progress since we're starting over with a new set of alive
+                    // accounts
                     partial_inner_index = 0;
                     partial_bytes_written = Saturating(0);
                     continue;
@@ -1037,16 +1072,18 @@ impl<'a> PackedAncientStorage<'a> {
                     bytes_total = bytes_total_with_this_slot;
                 } else {
                     partial_inner_index_max_exclusive = partial_inner_index;
-                    // adding all the alive accounts in this storage would exceed the ideal size, so we have to break these accounts up
-                    // look at each account and stop when we exceed the ideal size
+                    // adding all the alive accounts in this storage would exceed the ideal size, so
+                    // we have to break these accounts up look at each account
+                    // and stop when we exceed the ideal size
                     while partial_inner_index_max_exclusive < alive_accounts.accounts.len() {
                         let account = alive_accounts.accounts[partial_inner_index_max_exclusive];
                         let account_size = account.stored_size();
                         let new_size = bytes_total.saturating_add(account_size);
                         if new_size > ideal_size && bytes_total > 0 {
                             full = true;
-                            // partial_inner_index_max_exclusive is the index of the first account that puts us over the ideal size
-                            // so, save it for next time
+                            // partial_inner_index_max_exclusive is the index of the first account
+                            // that puts us over the ideal size so, save
+                            // it for next time
                             break;
                         }
                         // this account fits
@@ -1066,11 +1103,13 @@ impl<'a> PackedAncientStorage<'a> {
                     ));
                 }
                 // start next storage with the account we ended with
-                // this could be the end of the current alive accounts or could be anywhere within that vec
+                // this could be the end of the current alive accounts or could be anywhere within
+                // that vec
                 partial_inner_index = partial_inner_index_max_exclusive;
             }
             if accounts_to_write.is_empty() {
-                // if we returned without any accounts to write, then we have exhausted source data and have packaged all the storages we need
+                // if we returned without any accounts to write, then we have exhausted source data
+                // and have packaged all the storages we need
                 break;
             }
             // we know the full contents of this packed storage now
@@ -1086,10 +1125,11 @@ impl<'a> PackedAncientStorage<'a> {
 /// capacity of an ancient append vec
 #[allow(clippy::assertions_on_constants, dead_code)]
 pub const fn get_ancient_append_vec_capacity() -> u64 {
-    // There is a trade-off for selecting the ancient append vec size. Smaller non-ancient append vec are getting
-    // combined into large ancient append vec. Too small size of ancient append vec will result in too many ancient append vec
-    // memory mapped files. Too big size will make it difficult to clean and shrink them. Hence, we choose approximately
-    // 128MB for the ancient append vec size.
+    // There is a trade-off for selecting the ancient append vec size. Smaller non-ancient append
+    // vec are getting combined into large ancient append vec. Too small size of ancient append
+    // vec will result in too many ancient append vec memory mapped files. Too big size will
+    // make it difficult to clean and shrink them. Hence, we choose approximately 128MB for the
+    // ancient append vec size.
     const RESULT: u64 = 128 * 1024 * 1024;
 
     use crate::append_vec::MAXIMUM_APPEND_VEC_FILE_SIZE;
@@ -1285,7 +1325,8 @@ pub mod tests {
     fn test_pack_ancient_storages_one_partial() {
         // n slots
         // m accounts per slot
-        // divide into different ideal sizes so that we combine multiple slots sometimes and combine partial slots
+        // divide into different ideal sizes so that we combine multiple slots sometimes and combine
+        // partial slots
         agave_logger::setup();
         let total_accounts_per_storage = 10;
         let account_size = 184;
@@ -1392,8 +1433,8 @@ pub mod tests {
         // n slots
         // different number of accounts in each slot
         // each account has different size
-        // divide into different ideal sizes so that we combine multiple slots sometimes and combine partial slots
-        // compare at end that all accounts are in result exactly once
+        // divide into different ideal sizes so that we combine multiple slots sometimes and combine
+        // partial slots compare at end that all accounts are in result exactly once
         agave_logger::setup();
         let total_accounts_per_storage = 10;
         let account_size = 184;
@@ -1470,7 +1511,8 @@ pub mod tests {
                 result.iter().enumerate().for_each(|(i, packed)| {
                     if i + 1 < result.len() && ideal_size > largest_account_size {
                         // cannot assert this on the last packed storage - it may be small
-                        // cannot assert this when the ideal size is too small to hold the largest account size
+                        // cannot assert this when the ideal size is too small to hold the largest
+                        // account size
                         assert!(
                             packed.bytes >= ideal_size - largest_account_size,
                             "packed size too small: bytes: {}, ideal: {}, largest: {}",
@@ -1693,13 +1735,18 @@ pub mod tests {
                             && many_ref_slots == IncludeManyRefSlots::Skip
                         {
                             // In this test setup, 2.5 regular slots fits into 1 ancient slot.
-                            // When there are two_refs and when slots < 3, all regular slots can fit into one ancient slots.
-                            // Therefore, we should have all slots that can be combined for slots < 3.
-                            // However, when slots >=3, we need more than one ancient slots. The pack algorithm will need to first
-                            // find at least [ceiling(num_slots/2.5) - 1] slots that's don't have many_refs before we can pack slots with many_refs.
-                            // Since we decrease the number of alive bytes we'll be writing, when we encounter slots that can't be packed,
-                            // we now reduce the number required ideal packed storages. As a result, the last
-                            // slot can be packed, and the number of accounts to combine should be 2.
+                            // When there are two_refs and when slots < 3, all regular slots can fit
+                            // into one ancient slots. Therefore, we
+                            // should have all slots that can be combined for slots < 3.
+                            // However, when slots >=3, we need more than one ancient slots. The
+                            // pack algorithm will need to first find at
+                            // least [ceiling(num_slots/2.5) - 1] slots that's don't have many_refs
+                            // before we can pack slots with many_refs.
+                            // Since we decrease the number of alive bytes we'll be writing, when we
+                            // encounter slots that can't be packed,
+                            // we now reduce the number required ideal packed storages. As a result,
+                            // the last slot can be packed, and the
+                            // number of accounts to combine should be 2.
                             2
                         } else {
                             num_slots
@@ -1819,10 +1866,12 @@ pub mod tests {
                                     &tuning,
                                     many_ref_slots,
                                 );
-                                // if we are only trying to pack a single slot of multi-refs, it will succeed
-                                // if num_slots = 2 and skip multi-ref slots, accounts_to_combine should contain
-                                // one element (storage), because we don't count alive bytes of skipped accounts
-                                // when we compute required target storages, and the second slot can be combined.
+                                // if we are only trying to pack a single slot of multi-refs, it
+                                // will succeed if num_slots = 2 and
+                                // skip multi-ref slots, accounts_to_combine should contain
+                                // one element (storage), because we don't count alive bytes of
+                                // skipped accounts when we compute
+                                // required target storages, and the second slot can be combined.
                                 let expected_number_accounts_to_combine = if !two_refs
                                     || many_ref_slots == IncludeManyRefSlots::Include
                                     || num_slots == 1
@@ -1866,7 +1915,8 @@ pub mod tests {
                                 } else {
                                     vec![]
                                 };
-                                // all accounts should be in one_ref and all slots are available as target slots
+                                // all accounts should be in one_ref and all slots are available as
+                                // target slots
                                 assert_eq!(
                                     accounts_to_combine.target_slots_sorted,
                                     expected_target_slots_sorted,
@@ -1911,7 +1961,8 @@ pub mod tests {
                                     ));
                                 }
 
-                                // test write_ancient_accounts_to_same_slot_multiple_refs since we built interesting 'AccountsToCombine'
+                                // test write_ancient_accounts_to_same_slot_multiple_refs since we
+                                // built interesting 'AccountsToCombine'
                                 let write_ancient_accounts = match method {
                                     TestWriteMultipleRefs::MultipleRefs => {
                                         let mut write_ancient_accounts =
@@ -1946,7 +1997,8 @@ pub mod tests {
         // with 2 accounts
         // 1 with 1 ref
         // 1 with 2 refs (and the other ref is from a newer slot)
-        // So, the other alive ref will cause the account with 2 refs to be put into many_refs_old_alive and then accounts_keep_slots
+        // So, the other alive ref will cause the account with 2 refs to be put into
+        // many_refs_old_alive and then accounts_keep_slots
         for method in TestWriteMultipleRefs::iter() {
             let num_slots = 1;
             // creating 1 more sample slot/storage, but effectively act like 1 slot
@@ -2076,7 +2128,8 @@ pub mod tests {
                     .accounts
                     .is_empty()));
 
-            // test write_ancient_accounts_to_same_slot_multiple_refs since we built interesting 'AccountsToCombine'
+            // test write_ancient_accounts_to_same_slot_multiple_refs since we built interesting
+            // 'AccountsToCombine'
             let write_ancient_accounts = match method {
                 TestWriteMultipleRefs::MultipleRefs => {
                     let mut write_ancient_accounts = WriteAncientAccounts::default();
@@ -2145,8 +2198,9 @@ pub mod tests {
         // 1 storage
         // 2 accounts
         // 1 with 1 ref
-        // 1 with 2 refs, with the idea that the other ref is from an older slot, so this one is the newer index entry
-        // The result will be that the account, even though it has refcount > 1, can be moved to a newer slot.
+        // 1 with 2 refs, with the idea that the other ref is from an older slot, so this one is the
+        // newer index entry The result will be that the account, even though it has
+        // refcount > 1, can be moved to a newer slot.
         for method in TestWriteMultipleRefs::iter() {
             let num_slots = 1;
             let (db, storages, slots, infos) = get_sample_storages(num_slots, None);
@@ -2259,7 +2313,8 @@ pub mod tests {
                     .accounts
                     .is_empty()));
 
-            // test write_ancient_accounts_to_same_slot_multiple_refs since we built interesting 'AccountsToCombine'
+            // test write_ancient_accounts_to_same_slot_multiple_refs since we built interesting
+            // 'AccountsToCombine'
             let write_ancient_accounts = match method {
                 TestWriteMultipleRefs::MultipleRefs => {
                     let mut write_ancient_accounts = WriteAncientAccounts::default();
@@ -2275,7 +2330,8 @@ pub mod tests {
                 }
             };
             assert!(write_ancient_accounts.shrinks_in_progress.is_empty());
-            // assert that we wrote the 2_ref account (and the 1 ref account) to the newly shrunk append vec
+            // assert that we wrote the 2_ref account (and the 1 ref account) to the newly shrunk
+            // append vec
             let storage = db.storage.get_slot_storage_entry(slot1).unwrap();
             let accounts_shrunk_same_slot = storage
                 .accounts
@@ -2412,7 +2468,8 @@ pub mod tests {
                 let mut tuning = PackedAncientStorageTuning {
                     percent_of_alive_shrunk_data: 100,
                     max_ancient_slots: 0,
-                    // irrelevant for what this test is trying to test, but necessary to avoid minimums
+                    // irrelevant for what this test is trying to test, but necessary to avoid
+                    // minimums
                     ideal_storage_size: NonZeroU64::new(get_ancient_append_vec_capacity()).unwrap(),
                     can_randomly_shrink,
                     ..default_tuning()
@@ -2440,7 +2497,8 @@ pub mod tests {
                 let should_shrink = db.is_candidate_for_shrink(&storage);
                 assert_storage_info(infos.all_infos.first().unwrap(), &storage, should_shrink);
                 if should_shrink {
-                    // data size is so small compared to min aligned file size that the storage is marked as should_shrink
+                    // data size is so small compared to min aligned file size that the storage is
+                    // marked as should_shrink
                     assert_eq!(
                         infos.shrink_indexes,
                         if !matches!(method, TestCollectInfo::CollectSortFilterInfo) {
@@ -2487,7 +2545,8 @@ pub mod tests {
                 let tuning = PackedAncientStorageTuning {
                     percent_of_alive_shrunk_data: 100,
                     max_ancient_slots: 0,
-                    // irrelevant for what this test is trying to test, but necessary to avoid minimums
+                    // irrelevant for what this test is trying to test, but necessary to avoid
+                    // minimums
                     ideal_storage_size: NonZeroU64::new(get_ancient_append_vec_capacity()).unwrap(),
                     can_randomly_shrink,
                     ..default_tuning()
@@ -2514,7 +2573,8 @@ pub mod tests {
         };
         for alive in [true, false] {
             for slots in 0..4 {
-                // 1_040_000 is big enough relative to page size to cause shrink ratio to be triggered
+                // 1_040_000 is big enough relative to page size to cause shrink ratio to be
+                // triggered
                 for data_size in [None, Some(1_040_000)] {
                     let (db, slot1) = create_db_with_storages_and_index(alive, slots, data_size);
                     let slot_vec = (slot1..(slot1 + slots as Slot)).collect::<Vec<_>>();
@@ -2541,7 +2601,8 @@ pub mod tests {
                                 let should_shrink = db.is_candidate_for_shrink(storage);
                                 assert_storage_info(info, storage, should_shrink);
                                 if should_shrink {
-                                    // data size is so small compared to min aligned file size that the storage is marked as should_shrink
+                                    // data size is so small compared to min aligned file size that
+                                    // the storage is marked as should_shrink
                                     assert_eq!(
                                         infos.shrink_indexes,
                                         slot_vec
@@ -2577,12 +2638,13 @@ pub mod tests {
         };
         for method in TestCollectInfo::iter() {
             for slot1_is_alive in [false, true] {
-                let alives = [false /*dummy*/, slot1_is_alive, !slot1_is_alive];
+                let alives = [false /* dummy */, slot1_is_alive, !slot1_is_alive];
                 let slots = 2;
-                // 1_040_000 is big enough relative to page size to cause shrink ratio to be triggered
+                // 1_040_000 is big enough relative to page size to cause shrink ratio to be
+                // triggered
                 for data_size in [None, Some(1_040_000)] {
                     let (db, slot1) =
-                        create_db_with_storages_and_index(true /*alive*/, slots, data_size);
+                        create_db_with_storages_and_index(true /* alive */, slots, data_size);
                     assert_eq!(slot1, 1); // make sure index into alives will be correct
                     assert_eq!(alives[slot1 as usize], slot1_is_alive);
                     let slot_vec = (slot1..(slot1 + slots as Slot)).collect::<Vec<_>>();
@@ -2635,7 +2697,8 @@ pub mod tests {
                             let should_shrink = db.is_candidate_for_shrink(storage);
                             assert_storage_info(info, storage, should_shrink);
                             if should_shrink {
-                                // data size is so small compared to min aligned file size that the storage is marked as should_shrink
+                                // data size is so small compared to min aligned file size that the
+                                // storage is marked as should_shrink
                                 assert_eq!(
                                     infos.shrink_indexes,
                                     if !matches!(method, TestCollectInfo::CollectSortFilterInfo) {
@@ -2659,7 +2722,7 @@ pub mod tests {
     }
 
     fn create_test_infos(count: usize) -> AncientSlotInfos {
-        let (db, slot1) = create_db_with_storages_and_index(true /*alive*/, 1, None);
+        let (db, slot1) = create_db_with_storages_and_index(true /* alive */, 1, None);
         let storage = db.storage.get_slot_storage_entry(slot1).unwrap();
         AncientSlotInfos {
             all_infos: (0..count)
@@ -2732,9 +2795,10 @@ pub mod tests {
                     infos.all_infos.last_mut().unwrap().capacity = 0; // sort to beginning
                 }
                 infos.all_infos.last_mut().unwrap().alive_bytes = ideal_storage_size_large;
-                // if we use max_storages = 3 or 4, then the low limit is 1 or 2. To get below 2 requires a result of 1, which packs everyone.
-                // This isn't what we want for this test. So, we make max_storages big enough that we can get to something reasonable (like 3)
-                // for a low mark.
+                // if we use max_storages = 3 or 4, then the low limit is 1 or 2. To get below 2
+                // requires a result of 1, which packs everyone. This isn't what we
+                // want for this test. So, we make max_storages big enough that we can get to
+                // something reasonable (like 3) for a low mark.
                 let max_storages = 6;
 
                 let tuning = PackedAncientStorageTuning {
@@ -2881,7 +2945,8 @@ pub mod tests {
             let ideal_storage_size_large = get_ancient_append_vec_capacity();
             let mut infos = create_test_infos(1);
             let max_storages = 1;
-            // 1 storage, 1 max, but 1 storage does not fill the entire new combined storage, so truncate nothing
+            // 1 storage, 1 max, but 1 storage does not fill the entire new combined storage, so
+            // truncate nothing
             let tuning = PackedAncientStorageTuning {
                 max_ancient_slots: max_storages,
                 ideal_storage_size: NonZeroU64::new(ideal_storage_size_large).unwrap(),
@@ -2898,7 +2963,8 @@ pub mod tests {
                 ..default_tuning()
             };
             infos.all_infos[0].alive_bytes = ideal_storage_size_large + 1; // too big for 1 ideal storage
-                                                                           // 1 storage, 1 max, but 1 overflows the entire new combined storage, so truncate nothing
+                                                                           // 1 storage, 1 max, but 1 overflows the entire new combined storage, so truncate
+                                                                           // nothing
             test(filter, &mut infos, &tuning);
             assert_eq!(infos.all_infos.len(), usize::from(!filter));
 
@@ -2935,8 +3001,8 @@ pub mod tests {
                 ..default_tuning()
             };
 
-            // none truncated because the one storage calculates to be larger than 1 ideal storage, so we need to
-            // combine
+            // none truncated because the one storage calculates to be larger than 1 ideal storage,
+            // so we need to combine
             test(filter, &mut infos, &tuning);
             assert_eq!(
                 infos
@@ -2963,8 +3029,8 @@ pub mod tests {
             // max is 4
             // 5 storages
             // storage[4] is big enough to cause us to need another storage
-            // so, storage[0..=2] can be combined into 1, resulting in 3 remaining storages, which is
-            // the goal, so we only have to combine the first 3 to hit the goal
+            // so, storage[0..=2] can be combined into 1, resulting in 3 remaining storages, which
+            // is the goal, so we only have to combine the first 3 to hit the goal
             let mut infos = create_test_infos(5);
             infos.all_infos[4].alive_bytes = ideal_storage_size_large;
             let max_storages = 4;
@@ -2999,15 +3065,16 @@ pub mod tests {
         };
         for method in TestCollectInfo::iter() {
             for slot1_shrink in [false, true] {
-                let shrinks = [false /*dummy*/, slot1_shrink, !slot1_shrink];
+                let shrinks = [false /* dummy */, slot1_shrink, !slot1_shrink];
                 let slots = 2;
-                // 1_040_000 is big enough relative to page size to cause shrink ratio to be triggered
+                // 1_040_000 is big enough relative to page size to cause shrink ratio to be
+                // triggered
                 let data_sizes = shrinks
                     .iter()
                     .map(|shrink| (!shrink).then_some(1_040_000))
                     .collect::<Vec<_>>();
                 let (db, slot1) =
-                    create_db_with_storages_and_index(true /*alive*/, 1, data_sizes[1]);
+                    create_db_with_storages_and_index(true /* alive */, 1, data_sizes[1]);
                 create_storages_and_update_index(
                     &db,
                     None,
@@ -3052,7 +3119,8 @@ pub mod tests {
                         .iter()
                         .any(|info| info.slot == storage.slot()));
                 });
-                // data size is so small compared to min aligned file size that the storage is marked as should_shrink
+                // data size is so small compared to min aligned file size that the storage is
+                // marked as should_shrink
                 assert_eq!(
                     infos.shrink_indexes,
                     match method {
@@ -3137,7 +3205,8 @@ pub mod tests {
                 for num_slots in 0..4 {
                     for combine_into in 0..=num_slots {
                         if combine_into == num_slots && num_slots > 0 {
-                            // invalid combination when num_slots > 0, but required to hit num_slots=0, combine_into=0
+                            // invalid combination when num_slots > 0, but required to hit
+                            // num_slots=0, combine_into=0
                             continue;
                         }
                         let (db, storages, slots, _infos) =
@@ -3203,7 +3272,8 @@ pub mod tests {
                                     let packed = PackedAncientStorage { accounts, bytes };
 
                                     let accounts_to_combine = AccountsToCombine {
-                                        // target slots are supposed to be read in reverse order, so test that
+                                        // target slots are supposed to be read in reverse order, so
+                                        // test that
                                         target_slots_sorted: vec![
                                             Slot::MAX, // this asserts if it gets used
                                             Slot::MAX,
@@ -3286,9 +3356,11 @@ pub mod tests {
                     );
                     let tuning = PackedAncientStorageTuning {
                         percent_of_alive_shrunk_data,
-                        // 0 so that we combine everything with regard to the overall # of slots limit
+                        // 0 so that we combine everything with regard to the overall # of slots
+                        // limit
                         max_ancient_slots: 0,
-                        // irrelevant for what this test is trying to test, but necessary to avoid minimums
+                        // irrelevant for what this test is trying to test, but necessary to avoid
+                        // minimums
                         ideal_storage_size: NonZeroU64::new(get_ancient_append_vec_capacity())
                             .unwrap(),
                         can_randomly_shrink: false,
@@ -3308,7 +3380,8 @@ pub mod tests {
 
                     if expected_infos == 2 {
                         let modify = if method == TestShouldShrink::FilterAncientSlots {
-                            // filter_ancient_slots modifies in several ways and doesn't retain the values to compare
+                            // filter_ancient_slots modifies in several ways and doesn't retain the
+                            // values to compare
                             percent_of_alive_shrunk_data == 89 || percent_of_alive_shrunk_data == 90
                         } else {
                             infos.all_infos[infos.shrink_indexes[0]].alive_bytes
@@ -3316,7 +3389,8 @@ pub mod tests {
                                     / 100
                         };
                         if modify {
-                            // if the sorting ends up putting the bigger alive_bytes storage first, then only 1 will be shrunk due to 'should_shrink'
+                            // if the sorting ends up putting the bigger alive_bytes storage first,
+                            // then only 1 will be shrunk due to 'should_shrink'
                             expected_infos = 1;
                         }
                     }
@@ -3343,7 +3417,7 @@ pub mod tests {
 
     #[test]
     fn test_sort_shrink_indexes_by_bytes_saved() {
-        let (db, slot1) = create_db_with_storages_and_index(true /*alive*/, 1, None);
+        let (db, slot1) = create_db_with_storages_and_index(true /* alive */, 1, None);
         let storage = db.storage.get_slot_storage_entry(slot1).unwrap();
         // ignored
         let slot = 0;
@@ -3495,15 +3569,18 @@ pub mod tests {
         const MAX_RECYCLE_STORES: usize = 1000;
         agave_logger::setup();
 
-        // When we pack ancient append vecs, the packed append vecs are recycled first if possible. This means they aren't dropped directly.
-        // This test tests that we are releasing Arc refcounts for storages when we pack them into ancient append vecs.
+        // When we pack ancient append vecs, the packed append vecs are recycled first if possible.
+        // This means they aren't dropped directly. This test tests that we are releasing
+        // Arc refcounts for storages when we pack them into ancient append vecs.
         let db = AccountsDb::new_single_for_tests();
         let initial_slot = 0;
-        // create append vecs that we'll fill the recycler with when we pack them into 1 packed append vec
+        // create append vecs that we'll fill the recycler with when we pack them into 1 packed
+        // append vec
         create_storages_and_update_index(&db, None, initial_slot, MAX_RECYCLE_STORES, true, None);
         let max_slot_inclusive = initial_slot + (MAX_RECYCLE_STORES as Slot) - 1;
         let range = initial_slot..(max_slot_inclusive + 1);
-        // storages with Arc::strong_count > 1 cannot be pulled out of the recycling bin, so hold refcounts so these storages are never re-used by the actual test code
+        // storages with Arc::strong_count > 1 cannot be pulled out of the recycling bin, so hold
+        // refcounts so these storages are never re-used by the actual test code
         let _storages_hold_to_prevent_recycling = range
             .filter_map(|slot| db.storage.get_slot_storage_entry(slot))
             .collect::<Vec<_>>();
@@ -3624,7 +3701,8 @@ pub mod tests {
                                 .is_empty());
                         }
                         2 => {
-                            // multiple slot list, ref_count=2, this is NOT newest alive, so many_refs_old_alive
+                            // multiple slot list, ref_count=2, this is NOT newest alive, so
+                            // many_refs_old_alive
                             let slot_list = vec![
                                 (
                                     slot,
@@ -3754,7 +3832,8 @@ pub mod tests {
 
             pubkeys_to_unref.iter().for_each(|k| {
                 for slot in 0..2 {
-                    // each upsert here (to a different slot) adds a refcount of 1 since entry is NOT cached
+                    // each upsert here (to a different slot) adds a refcount of 1 since entry is
+                    // NOT cached
                     db.accounts_index.upsert(
                         slot,
                         slot,
@@ -3837,7 +3916,7 @@ pub mod tests {
         let data_size = 1_000_000;
         let num_slots = tuning.max_ancient_slots;
         let (db, slot1) =
-            create_db_with_storages_and_index(true /*alive*/, num_slots, Some(data_size));
+            create_db_with_storages_and_index(true /* alive */, num_slots, Some(data_size));
         let non_ancient_slot = slot1 + (2 * tuning.max_ancient_slots) as u64;
         create_storages_and_update_index(&db, None, non_ancient_slot, 1, true, Some(data_size));
         let mut slot_vec = (slot1..(slot1 + num_slots as Slot)).collect::<Vec<_>>();

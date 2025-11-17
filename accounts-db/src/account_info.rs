@@ -1,7 +1,8 @@
-//! AccountInfo represents a reference to AccountSharedData in either an AppendVec or the write cache.
-//! AccountInfo is not persisted anywhere between program runs.
+//! AccountInfo represents a reference to AccountSharedData in either an AppendVec or the write
+//! cache. AccountInfo is not persisted anywhere between program runs.
 //! AccountInfo is purely runtime state.
-//! Note that AccountInfo is saved to disk buckets during runtime, but disk buckets are recreated at startup.
+//! Note that AccountInfo is saved to disk buckets during runtime, but disk buckets are recreated at
+//! startup.
 use {
     crate::{
         accounts_db::AccountsFileId,
@@ -26,7 +27,8 @@ impl StorageLocation {
     pub fn is_offset_equal(&self, other: &StorageLocation) -> bool {
         match self {
             StorageLocation::Cached => {
-                matches!(other, StorageLocation::Cached) // technically, 2 cached entries match in offset
+                matches!(other, StorageLocation::Cached) // technically, 2 cached entries match in
+                                                         // offset
             }
             StorageLocation::AppendVec(_, offset) => {
                 match other {
@@ -61,19 +63,21 @@ impl StorageLocation {
 pub type OffsetReduced = u32;
 
 /// This is an illegal value for 'offset'.
-/// Account size on disk would have to be pointing to the very last 8 byte value in the max sized append vec.
-/// That would mean there was a maximum size of 8 bytes for the last entry in the append vec.
-/// A pubkey alone is 32 bytes, so there is no way for a valid offset to be this high of a value.
-/// Realistically, a max offset is (1<<31 - 156) bytes or so for an account with zero data length. Of course, this
-/// depends on the layout on disk, compression, etc. But, 8 bytes per account will never be possible.
-/// So, we use this last value as a sentinel to say that the account info refers to an entry in the write cache.
+/// Account size on disk would have to be pointing to the very last 8 byte value in the max sized
+/// append vec. That would mean there was a maximum size of 8 bytes for the last entry in the append
+/// vec. A pubkey alone is 32 bytes, so there is no way for a valid offset to be this high of a
+/// value. Realistically, a max offset is (1<<31 - 156) bytes or so for an account with zero data
+/// length. Of course, this depends on the layout on disk, compression, etc. But, 8 bytes per
+/// account will never be possible. So, we use this last value as a sentinel to say that the account
+/// info refers to an entry in the write cache.
 const CACHED_OFFSET: OffsetReduced = (1 << (OffsetReduced::BITS - 1)) - 1;
 
 #[bitfield(bits = 32)]
 #[repr(C)]
 #[derive(Debug, Default, Copy, Clone, Eq, PartialEq)]
 pub struct PackedOffsetAndFlags {
-    /// this provides 2^31 bits, which when multiplied by 8 (sizeof(u64)) = 16G, which is the maximum size of an append vec
+    /// this provides 2^31 bits, which when multiplied by 8 (sizeof(u64)) = 16G, which is the
+    /// maximum size of an append vec
     offset_reduced: B31,
     /// use 1 bit to specify that the entry is zero lamport
     is_zero_lamport: bool,
@@ -84,8 +88,8 @@ pub struct AccountInfo {
     /// index identifying the append storage
     store_id: AccountsFileId,
 
-    /// offset = 'packed_offset_and_flags.offset_reduced()' * ALIGN_BOUNDARY_OFFSET into the storage
-    /// Note this is a smaller type than 'Offset'
+    /// offset = 'packed_offset_and_flags.offset_reduced()' * ALIGN_BOUNDARY_OFFSET into the
+    /// storage Note this is a smaller type than 'Offset'
     account_offset_and_flags: PackedOffsetAndFlags,
 }
 
@@ -178,10 +182,13 @@ mod test {
     #[test]
     fn test_limits() {
         for offset in [
-            // MAXIMUM_APPEND_VEC_FILE_SIZE is too big. That would be an offset at the first invalid byte in the max file size.
-            // MAXIMUM_APPEND_VEC_FILE_SIZE - 8 bytes would reference the very last 8 bytes in the file size. It makes no sense to reference that since element sizes are always more than 8.
-            // MAXIMUM_APPEND_VEC_FILE_SIZE - 16 bytes would reference the second to last 8 bytes in the max file size. This is still likely meaningless, but it is 'valid' as far as the index
-            // is concerned.
+            // MAXIMUM_APPEND_VEC_FILE_SIZE is too big. That would be an offset at the first
+            // invalid byte in the max file size. MAXIMUM_APPEND_VEC_FILE_SIZE - 8
+            // bytes would reference the very last 8 bytes in the file size. It makes no sense to
+            // reference that since element sizes are always more than 8.
+            // MAXIMUM_APPEND_VEC_FILE_SIZE - 16 bytes would reference the second to last 8 bytes
+            // in the max file size. This is still likely meaningless, but it is 'valid' as far as
+            // the index is concerned.
             (MAXIMUM_APPEND_VEC_FILE_SIZE - 2 * (ALIGN_BOUNDARY_OFFSET as u64)) as Offset,
             0,
             ALIGN_BOUNDARY_OFFSET,

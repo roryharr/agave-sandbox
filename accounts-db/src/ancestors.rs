@@ -33,7 +33,8 @@ impl Default for Ancestors {
 
 impl From<Vec<Slot>> for Ancestors {
     fn from(mut source: Vec<Slot>) -> Ancestors {
-        // bitfield performs optimally when we insert the minimum value first so that it knows the correct start/end values
+        // bitfield performs optimally when we insert the minimum value first so that it knows the
+        // correct start/end values
         source.sort_unstable();
         let mut result = Ancestors::default();
         source.into_iter().for_each(|slot| {
