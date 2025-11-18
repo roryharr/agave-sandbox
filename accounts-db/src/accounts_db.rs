@@ -835,6 +835,16 @@ pub struct AccountStorageEntry {
     /// 2. The account was set to zero lamports and is older than the last
     ///    full snapshot. In this case, slot is set to the snapshot slot
     obsolete_accounts: RwLock<ObsoleteAccounts>,
+
+    /// number of times this storage has been shrunk
+    number_of_times_shrunk: u64,
+
+    /// Is this a squashed slot?
+    is_ancient: bool,
+
+    // The ancient slot at the last time this storage was shrunk
+    ancient_slot_at_shrink_time: u64,
+
 }
 
 impl AccountStorageEntry {
@@ -858,6 +868,9 @@ impl AccountStorageEntry {
             alive_bytes: AtomicUsize::new(0),
             zero_lamport_single_ref_offsets: RwLock::default(),
             obsolete_accounts: RwLock::default(),
+            number_of_times_shrunk: 0,
+            is_ancient: false,
+            ancient_slot_at_shrink_time: 0,
         }
     }
 
@@ -879,6 +892,9 @@ impl AccountStorageEntry {
                 self.zero_lamport_single_ref_offsets.read().unwrap().clone(),
             ),
             obsolete_accounts: RwLock::new(self.obsolete_accounts.read().unwrap().clone()),
+            number_of_times_shrunk: self.number_of_times_shrunk,
+            is_ancient: self.is_ancient,
+            ancient_slot_at_shrink_time: self.ancient_slot_at_shrink_time,
         })
     }
 
@@ -896,6 +912,9 @@ impl AccountStorageEntry {
             alive_bytes: AtomicUsize::new(0),
             zero_lamport_single_ref_offsets: RwLock::default(),
             obsolete_accounts: RwLock::new(obsolete_accounts),
+            is_ancient: false,
+            number_of_times_shrunk: 0,
+            ancient_slot_at_shrink_time: 0,
         }
     }
 
@@ -1415,15 +1434,25 @@ impl AccountsDb {
         next_id
     }
 
-    fn new_storage_entry(&self, slot: Slot, path: &Path, size: u64) -> AccountStorageEntry {
-        AccountStorageEntry::new(
-            path,
+    fn new_storage_entry(&self, slot: Slot, path: &Path, size: u64, number_of_times_shrunk: u64, is_ancient: bool, oldest_non_ancient_slot: u64) -> AccountStorageEntry {
+        let id = self.next_id();
+
+        let tail = AccountsFile::file_name(slot, id);
+        let path = Path::new(path).join(tail);
+        let accounts = self.accounts_file_provider.new_writable(path, size, self.storage_access);
+
+        AccountStorageEntry {
+            id,
             slot,
-            self.next_id(),
-            size,
-            self.accounts_file_provider,
-            self.storage_access,
-        )
+            accounts,
+            count: AtomicUsize::new(0),
+            alive_bytes: AtomicUsize::new(0),
+            zero_lamport_single_ref_offsets: RwLock::default(),
+            obsolete_accounts: RwLock::default(),
+            number_of_times_shrunk,
+            is_ancient,
+            ancient_slot_at_shrink_time: oldest_non_ancient_slot,
+        }
     }
 
     /// While scanning cleaning candidates obtain slots that can be
@@ -3117,8 +3146,10 @@ impl AccountsDb {
     }
 
     /// Shrinks `store` by rewriting the alive accounts to a new storage
-    fn shrink_storage(&self, store: Arc<AccountStorageEntry>) {
+    fn shrink_storage(&self, store: Arc<AccountStorageEntry>, oldest_non_ancient_slot: u64) {
         let slot = store.slot();
+        let number_of_times_shrunk = store.number_of_times_shrunk;
+        let is_ancient = store.is_ancient;
         if self.accounts_cache.contains(slot) {
             // It is not correct to shrink a slot while it is in the write cache until flush is complete and the slot is removed from the write cache.
             // There can exist a window after a slot is made a root and before the write cache flushing for that slot begins and then completes.
@@ -3184,7 +3215,7 @@ impl AccountsDb {
         let mut stats_sub = ShrinkStatsSub::default();
         let mut rewrite_elapsed = Measure::start("rewrite_elapsed");
         let (shrink_in_progress, time_us) =
-            measure_us!(self.get_store_for_shrink(slot, shrink_collect.alive_total_bytes as u64));
+            measure_us!(self.get_store_for_shrink(slot, shrink_collect.alive_total_bytes as u64, number_of_times_shrunk, is_ancient, oldest_non_ancient_slot));
         stats_sub.create_and_insert_store_elapsed_us = Saturating(time_us);
 
         // here, we're writing back alive_accounts. That should be an atomic operation
@@ -3312,8 +3343,8 @@ impl AccountsDb {
     }
 
     /// return a store that can contain 'size' bytes
-    pub fn get_store_for_shrink(&self, slot: Slot, size: u64) -> ShrinkInProgress<'_> {
-        let shrunken_store = self.create_store(slot, size, "shrink", self.shrink_paths.as_slice());
+    pub fn get_store_for_shrink(&self, slot: Slot, size: u64, number_of_times_shrunk: u64, is_ancient: bool, oldest_non_ancient_slot: u64) -> ShrinkInProgress<'_> {
+        let shrunken_store = self.create_store(slot, size, "shrink", self.shrink_paths.as_slice(), number_of_times_shrunk, is_ancient, oldest_non_ancient_slot);
         self.storage.shrinking_in_progress(slot, shrunken_store)
     }
 
@@ -3327,7 +3358,7 @@ impl AccountsDb {
             .get_slot_storage_entry_shrinking_in_progress_ok(slot)
         {
             if Self::is_shrinking_productive(&store) {
-                self.shrink_storage(store)
+                self.shrink_storage(store, 0)
             }
         }
     }
@@ -3502,6 +3533,8 @@ impl AccountsDb {
 
     pub fn shrink_candidate_slots(&self, epoch_schedule: &EpochSchedule) -> usize {
         let oldest_non_ancient_slot = self.get_oldest_non_ancient_slot(epoch_schedule);
+        let mut ancient_min= None;
+        let mut ancient_max= None;
 
         let shrink_candidates_slots =
             std::mem::take(&mut *self.shrink_candidate_slots.lock().unwrap());
@@ -3541,6 +3574,9 @@ impl AccountsDb {
                         && capacity == store.capacity()
                         && Self::is_candidate_for_shrink(self, &store)
                     {
+                        let slots_since_ancient = oldest_non_ancient_slot.saturating_sub(slot);
+                        ancient_min = Some(ancient_min.unwrap_or(slots_since_ancient as i64).min(slots_since_ancient as i64));
+                        ancient_max = Some(ancient_max.unwrap_or(slots_since_ancient as i64).max(slots_since_ancient as i64));
                         let ancient_bytes_added_to_shrink = store.alive_bytes() as u64;
                         shrink_slots.insert(slot, store);
                         self.shrink_stats
@@ -3579,7 +3615,7 @@ impl AccountsDb {
                                 .num_ancient_slots_shrunk
                                 .fetch_add(1, Ordering::Relaxed);
                         }
-                        self.shrink_storage(slot_shrink_candidate);
+                        self.shrink_storage(slot_shrink_candidate, oldest_non_ancient_slot);
                     });
             })
         });
@@ -3599,7 +3635,9 @@ impl AccountsDb {
             ("shrink_all_us", shrink_all_us, i64),
             ("candidates_count", candidates_count, i64),
             ("selected_count", num_selected, i64),
-            ("deferred_to_next_round_count", pended_counts, i64)
+            ("deferred_to_next_round_count", pended_counts, i64),
+            ("ancient_min_slots_since", ancient_min, Option<i64>),
+            ("ancient_max_slots_since", ancient_max, Option<i64>),
         );
 
         num_selected
@@ -4357,12 +4395,15 @@ impl AccountsDb {
         size: u64,
         from: &str,
         paths: &[PathBuf],
+        number_of_times_shrunk: u64,
+        is_ancient: bool,
+        oldest_non_ancient_slot: u64,
     ) -> Arc<AccountStorageEntry> {
         self.stats
             .create_store_count
             .fetch_add(1, Ordering::Relaxed);
         let path_index = rng().random_range(0..paths.len());
-        let store = Arc::new(self.new_storage_entry(slot, Path::new(&paths[path_index]), size));
+        let store = Arc::new(self.new_storage_entry(slot, Path::new(&paths[path_index]), size, number_of_times_shrunk, is_ancient, oldest_non_ancient_slot));
 
         debug!(
             "creating store: {} slot: {} len: {} size: {} from: {} path: {}",
@@ -4393,7 +4434,7 @@ impl AccountsDb {
         from: &str,
         paths: &[PathBuf],
     ) -> Arc<AccountStorageEntry> {
-        let store = self.create_store(slot, size, from, paths);
+        let store = self.create_store(slot, size, from, paths, 0, false, 0);
         let store_for_index = store.clone();
 
         self.insert_store(slot, store_for_index);

@@ -5532,7 +5532,7 @@ fn test_mark_dirty_dead_stores() {
         let size = 1;
         let old_store = db.create_and_insert_store(slot, size, "test");
         let old_id = old_store.id();
-        let shrink_in_progress = db.get_store_for_shrink(slot, 100);
+        let shrink_in_progress = db.get_store_for_shrink(slot, 100, 0, false, 0);
         let dead_storages =
             db.mark_dirty_dead_stores(slot, add_dirty_stores, Some(shrink_in_progress), false);
         assert!(db.storage.get_slot_storage_entry(slot).is_some());
