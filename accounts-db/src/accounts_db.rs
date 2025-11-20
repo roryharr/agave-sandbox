@@ -3146,7 +3146,8 @@ impl AccountsDb {
     }
 
     /// Shrinks `store` by rewriting the alive accounts to a new storage
-    fn shrink_storage(&self, store: Arc<AccountStorageEntry>, oldest_non_ancient_slot: u64) {
+    fn shrink_storage(&self, store: Arc<AccountStorageEntry>, oldest_non_ancient_slot: u64)
+    -> (bool, u64) {
         let slot = store.slot();
         let number_of_times_shrunk = store.number_of_times_shrunk;
         let is_ancient = store.is_ancient;
@@ -3162,7 +3163,7 @@ impl AccountsDb {
             // Clean causes us to mark accounts as dead, which causes shrink to later take a look at the slot.
             // This could be an assert, but it could lead to intermittency in tests.
             // It is 'correct' to ignore calls to shrink when a slot is still in the write cache.
-            return;
+            return (false, 0);
         }
         let mut unique_accounts =
             self.get_unique_accounts_from_storage_for_shrink(&store, &self.shrink_stats);
@@ -3197,7 +3198,7 @@ impl AccountsDb {
             self.shrink_stats
                 .skipped_shrink
                 .fetch_add(1, Ordering::Relaxed);
-            return;
+            return (false , 0);
         }
 
         self.unref_shrunk_dead_accounts(shrink_collect.pubkeys_to_unref.iter().cloned(), slot);
@@ -3250,6 +3251,7 @@ impl AccountsDb {
 
         Self::update_shrink_stats(&self.shrink_stats, stats_sub, true);
         self.shrink_stats.report();
+        (is_ancient, number_of_times_shrunk)
     }
 
     pub(crate) fn update_shrink_stats(
@@ -3358,7 +3360,7 @@ impl AccountsDb {
             .get_slot_storage_entry_shrinking_in_progress_ok(slot)
         {
             if Self::is_shrinking_productive(&store) {
-                self.shrink_storage(store, 0)
+                self.shrink_storage(store, 0);
             }
         }
     }
@@ -3533,8 +3535,6 @@ impl AccountsDb {
 
     pub fn shrink_candidate_slots(&self, epoch_schedule: &EpochSchedule) -> usize {
         let oldest_non_ancient_slot = self.get_oldest_non_ancient_slot(epoch_schedule);
-        let mut ancient_min= None;
-        let mut ancient_max= None;
 
         let shrink_candidates_slots =
             std::mem::take(&mut *self.shrink_candidate_slots.lock().unwrap());
@@ -3574,9 +3574,6 @@ impl AccountsDb {
                         && capacity == store.capacity()
                         && Self::is_candidate_for_shrink(self, &store)
                     {
-                        let slots_since_ancient = oldest_non_ancient_slot.saturating_sub(slot);
-                        ancient_min = Some(ancient_min.unwrap_or(slots_since_ancient as i64).min(slots_since_ancient as i64));
-                        ancient_max = Some(ancient_max.unwrap_or(slots_since_ancient as i64).max(slots_since_ancient as i64));
                         let ancient_bytes_added_to_shrink = store.alive_bytes() as u64;
                         shrink_slots.insert(slot, store);
                         self.shrink_stats
@@ -3603,6 +3600,12 @@ impl AccountsDb {
             .then_some(|| self.active_stats.activate(ActiveStatItem::Shrink));
 
         let num_selected = shrink_slots.len();
+        let ancient_min = Arc::new(Mutex::new(None));
+        let ancient_max = Arc::new(Mutex::new(None));
+        let shrink_again: Arc<Mutex<i64>> = Arc::new(Mutex::new(0));
+        let shrink_crazy: Arc<Mutex<i64>> = Arc::new(Mutex::new(0));
+        let shrink_wtf: Arc<Mutex<i64>> = Arc::new(Mutex::new(0));
+        let shrinking_ancient_soon: Arc<Mutex<i64>> = Arc::new(Mutex::new(0));
         let (_, shrink_all_us) = measure_us!({
             self.thread_pool_background.install(|| {
                 shrink_slots
@@ -3615,7 +3618,39 @@ impl AccountsDb {
                                 .num_ancient_slots_shrunk
                                 .fetch_add(1, Ordering::Relaxed);
                         }
-                        self.shrink_storage(slot_shrink_candidate, oldest_non_ancient_slot);
+                        let (is_ancient, number_of_times_shrunk) = self.shrink_storage(slot_shrink_candidate, oldest_non_ancient_slot);
+                        if is_ancient
+                        {
+                            let slots_since_ancient = oldest_non_ancient_slot.saturating_sub(slot);
+                            {
+                                let mut ancient_min_lock = ancient_min.lock().unwrap();
+                                *ancient_min_lock = Some(ancient_min_lock.unwrap_or(slots_since_ancient as i64).min(slots_since_ancient as i64));
+                            }
+                            {
+                                let mut ancient_max_lock = ancient_max.lock().unwrap();
+                                *ancient_max_lock = Some(ancient_max_lock.unwrap_or(slots_since_ancient as i64).max(slots_since_ancient as i64));
+                            }
+                            if slots_since_ancient < 360 * 25
+                            {
+                                *shrinking_ancient_soon.lock().unwrap() += 1;
+                            }
+                        }
+                        else
+                        {
+                            if number_of_times_shrunk >= 10
+                            {
+                                *shrink_wtf.lock().unwrap() += 1;
+                            }
+                            else if number_of_times_shrunk >= 5
+                            {
+                                *shrink_crazy.lock().unwrap() +=1;
+                            }
+                            else if number_of_times_shrunk >=1
+                            {
+                                *shrink_again.lock().unwrap() +=1;
+                            }
+
+                        }
                     });
             })
         });
@@ -3636,8 +3671,12 @@ impl AccountsDb {
             ("candidates_count", candidates_count, i64),
             ("selected_count", num_selected, i64),
             ("deferred_to_next_round_count", pended_counts, i64),
-            ("ancient_min_slots_since", ancient_min, Option<i64>),
-            ("ancient_max_slots_since", ancient_max, Option<i64>),
+            ("ancient_min_slots_since", *ancient_min.lock().unwrap(), Option<i64>),
+            ("ancient_max_slots_since", *ancient_max.lock().unwrap(), Option<i64>),
+            ("shrink_again_count", *shrink_again.lock().unwrap(), i64),
+            ("shrink_crazy_count", *shrink_crazy.lock().unwrap(), i64),
+            ("shrink_wtf_count", *shrink_wtf.lock().unwrap(), i64),
+            ("shrinking_ancient_soon_count", *shrinking_ancient_soon.lock().unwrap(), i64),
         );
 
         num_selected
