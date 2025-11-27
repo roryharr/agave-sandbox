@@ -55,6 +55,7 @@ pub enum StorageAccess {
     /// ancient storages are created by 1-shot write to pack multiple accounts together more efficiently with new formats
     #[default]
     File,
+    Memory,
 }
 
 #[derive(Debug)]
@@ -386,6 +387,8 @@ pub enum InternalsForArchive<'a> {
     Mmap(&'a [u8]),
     /// Accessing the internals is done via File I/O
     FileIo(&'a Path),
+    /// Accessing the internals is done via vector
+    Memory(Vec<u8>),
 }
 
 /// Information after storing accounts

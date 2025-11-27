@@ -44,7 +44,7 @@ use {
         ptr, slice,
         sync::{
             atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
-            Arc, Mutex, MutexGuard,
+            Arc, Mutex, MutexGuard, RwLock,
         },
     },
     thiserror::Error,
@@ -135,6 +135,8 @@ enum AppendVecFileBacking {
     Mmap(MmapMut),
     /// This was opened as a read only file
     File(File),
+    /// This was opened directly in memory
+    Memory(RwLock<Vec<u8>>),
 }
 
 /// Validates and serializes appends (when `append_guard` is called) such that only
@@ -235,6 +237,7 @@ impl Drop for AppendVec {
                     .open_as_file_io
                     .fetch_sub(1, Ordering::Relaxed);
             }
+            AppendVecFileBacking::Memory(_) => {}
         }
         if self.remove_file_on_drop.load(Ordering::Acquire) {
             // If we're reopening in readonly mode, we don't delete the file. See
@@ -310,6 +313,12 @@ impl AppendVec {
                     .fetch_add(1, Ordering::Relaxed);
                 AppendVecFileBacking::File(data)
             }
+            StorageAccess::Memory => {
+                APPEND_VEC_STATS
+                    .open_as_file_io
+                    .fetch_add(1, Ordering::Relaxed);
+                AppendVecFileBacking::Memory(RwLock::new(Vec::with_capacity(size)))
+            }
         };
         APPEND_VEC_STATS.files_open.fetch_add(1, Ordering::Relaxed);
 
@@ -357,6 +366,7 @@ impl AppendVec {
                 AppendVecFileBacking::File(file) => {
                     file.sync_all()?;
                 }
+                AppendVecFileBacking::Memory(_) => {}
             }
             APPEND_VEC_STATS.files_dirty.fetch_sub(1, Ordering::Relaxed);
         }
@@ -366,9 +376,12 @@ impl AppendVec {
     /// Return AppendVec opened in read-only file-io mode or `None` if it already is such
     pub(crate) fn reopen_as_readonly_file_io(&self) -> Option<Self> {
         if matches!(self.read_write_state, ReadWriteState::ReadOnly)
-            && matches!(self.backing, AppendVecFileBacking::File(_))
-        {
+            && (matches!(self.backing, AppendVecFileBacking::File(_)))        {
             // Early return if already in read-only mode *and* already a file-io
+            return None;
+        }
+        if matches!(self.backing, AppendVecFileBacking::Memory(_)) {
+            // Can't reopen a memory-only append vec as file-io
             return None;
         }
 
@@ -383,6 +396,7 @@ impl AppendVec {
         let mut new =
             AppendVec::new_from_file_unchecked(self.path.clone(), self.len(), StorageAccess::File)
                 .ok()?;
+
         if self.is_dirty.swap(false, Ordering::AcqRel) {
             // *move* the dirty-ness to the new append vec
             *new.is_dirty.get_mut() = true;
@@ -597,6 +611,15 @@ impl AppendVec {
                 let data = unsafe { slice::from_raw_parts(src, len) };
                 write_buffer_to_file(file, data, pos as u64)?;
             }
+
+            AppendVecFileBacking::Memory(vec) => {
+                let data = unsafe { slice::from_raw_parts(src, len) };
+                let mut vec = vec.write().unwrap();
+                if vec.len() < pos {
+                    vec.resize(pos, 0);
+                }
+                vec.extend_from_slice(data);
+            }
         }
         *offset = pos + len;
         Ok(())
@@ -779,9 +802,25 @@ impl AppendVec {
                     };
                     callback(account)
                 })
+                }
+                AppendVecFileBacking::Memory(vec) => {
+                    let vec = vec.read().unwrap();
+                    let slice = ValidSlice(&vec);
+                    let (meta, next) = Self::get_type::<StoredMeta>(slice, offset)?;
+                    let (account_meta, next) = Self::get_type::<AccountMeta>(slice, next)?;
+                    let (_hash, next) = Self::get_type::<ObsoleteAccountHash>(slice, next)?;
+                    let (data, next) = Self::get_slice(slice, next, meta.data_len as usize)?;
+                    let stored_size = next - offset;
+                    Some(callback(StoredAccountMeta {
+                        meta,
+                        account_meta,
+                        data,
+                        offset,
+                        stored_size,
+                    }))
+                }
             }
         }
-    }
 
     /// calls `callback` with the stored account fixed portion for the account at `offset` if its data doesn't overrun
     /// the internal buffer. Otherwise return None.
@@ -817,6 +856,20 @@ impl AppendVec {
                 });
                 let (meta, next) = Self::get_type::<StoredMeta>(valid_bytes, 0)?;
                 let (account_meta, _) = Self::get_type::<AccountMeta>(valid_bytes, next)?;
+                let stored_size = aligned_stored_size_checked(meta.data_len as usize)?;
+
+                Some(callback(StoredAccountNoData {
+                    meta,
+                    account_meta,
+                    offset,
+                    stored_size,
+                }))
+            }
+            AppendVecFileBacking::Memory(vec) => {
+                let vec = vec.read().unwrap();
+                let slice = ValidSlice(&vec);
+                let (meta, next) = Self::get_type::<StoredMeta>(slice, offset)?;
+                let (account_meta, _) = Self::get_type::<AccountMeta>(slice, next)?;
                 let stored_size = aligned_stored_size_checked(meta.data_len as usize)?;
 
                 Some(callback(StoredAccountNoData {
@@ -889,8 +942,11 @@ impl AppendVec {
                         account_meta.executable,
                         account_meta.rent_epoch,
                     )
+                })},
+                AppendVecFileBacking::Memory(_) => self
+                .get_stored_account_meta_callback(offset, |account| {
+                    create_account_shared_data(&account)
                 })
-            }
         }
     }
 
@@ -1068,6 +1124,22 @@ impl AppendVec {
                     }
                 }
             }
+            AppendVecFileBacking::Memory(_vec) => {
+                let mut offset = 0;
+                while self
+                    .get_stored_account_meta_callback(offset, |account| {
+                        offset += account.stored_size();
+                        if account.is_zero_lamport() && account.pubkey() == &Pubkey::default() {
+                            // we passed the last useful account
+                            return false;
+                        }
+
+                        callback(account);
+                        true
+                    })
+                    .unwrap_or_default()
+                {}
+            }
         }
         Ok(())
     }
@@ -1129,6 +1201,21 @@ impl AppendVec {
                         slice::from_raw_parts(buffer.as_ptr() as *const u8, bytes_read)
                     });
                     let Some((stored_meta, _)) = Self::get_type::<StoredMeta>(bytes, 0) else {
+                        break;
+                    };
+                    let next = Self::next_account_offset(offset, stored_meta);
+                    if next.offset_to_end_of_data > self_len {
+                        // data doesn't fit, so don't include
+                        break;
+                    }
+                    account_sizes.push(stored_meta.data_len as usize);
+                }
+            }
+            AppendVecFileBacking::Memory(vec) => {
+                let vec = vec.read().unwrap();
+                let slice = ValidSlice(&vec);
+                for &offset in sorted_offsets {
+                    let Some((stored_meta, _)) = Self::get_type::<StoredMeta>(slice, offset) else {
                         break;
                     };
                     let next = Self::next_account_offset(offset, stored_meta);
@@ -1228,6 +1315,39 @@ impl AppendVec {
                     reader.consume(stored_size);
                 }
             }
+            AppendVecFileBacking::Memory(vec) => {
+                let mut offset = 0;
+                let vec = vec.read().unwrap();
+                let slice = ValidSlice(&vec);
+                loop {
+                    let Some((stored_meta, next)) = Self::get_type::<StoredMeta>(slice, offset)
+                    else {
+                        break;
+                    };
+                    let Some((account_meta, _)) = Self::get_type::<AccountMeta>(slice, next) else {
+                        break;
+                    };
+                    if account_meta.lamports == 0 && stored_meta.pubkey == Pubkey::default() {
+                        // we passed the last useful account
+                        break;
+                    }
+                    let Some(stored_size) = stored_size_checked(stored_meta.data_len as usize)
+                    else {
+                        break;
+                    };
+                    if offset + stored_size > self_len {
+                        break;
+                    }
+                    let stored_size = u64_align!(stored_size);
+                    callback(StoredAccountNoData {
+                        meta: stored_meta,
+                        account_meta,
+                        offset,
+                        stored_size,
+                    });
+                    offset += stored_size;
+                }
+            }
         }
         Ok(())
     }
@@ -1319,6 +1439,7 @@ impl AppendVec {
             AppendVecFileBacking::File(_file) => InternalsForArchive::FileIo(self.path()),
             // note this returns the entire mmap slice, even bytes that we consider invalid
             AppendVecFileBacking::Mmap(mmap) => InternalsForArchive::Mmap(mmap),
+            AppendVecFileBacking::Memory(vec) => InternalsForArchive::Memory(vec.read().unwrap().to_vec()),
         }
     }
 }

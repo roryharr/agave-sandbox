@@ -54,6 +54,7 @@ impl<'a> AccountStorageReader<'a> {
 
         let file = match internals {
             InternalsForArchive::Mmap(_internals) => None,
+            InternalsForArchive::Memory(ref _internals) => None,
             InternalsForArchive::FileIo(path) => Some(File::open(path)?),
         };
 
@@ -103,7 +104,7 @@ impl Read for AccountStorageReader<'_> {
 
             let bytes_to_read = bytes_left_in_buffer.min(bytes_to_read_from_file);
 
-            let read_size = match self.internals {
+            let read_size = match &self.internals {
                 InternalsForArchive::Mmap(data) => (&data
                     [self.current_offset..self.current_offset + bytes_to_read])
                     .read(&mut buf[total_read..][..bytes_to_read])?,
@@ -116,6 +117,9 @@ impl Read for AccountStorageReader<'_> {
                     file.seek(SeekFrom::Start(self.current_offset as u64))?;
                     file.read(&mut buf[total_read..][..bytes_to_read])?
                 }
+                InternalsForArchive::Memory(data) => (&data
+                    [self.current_offset..self.current_offset + bytes_to_read])
+                    .read(&mut buf[total_read..][..bytes_to_read])?,
             };
 
             if read_size == 0 {
@@ -302,6 +306,10 @@ mod tests {
             StorageAccess::Mmap => assert!(matches!(
                 storage.accounts.internals_for_archive(),
                 InternalsForArchive::Mmap(_)
+            )),
+            StorageAccess::Memory => assert!(matches!(
+                storage.accounts.internals_for_archive(),
+                InternalsForArchive::Memory(_)
             )),
         }
 
