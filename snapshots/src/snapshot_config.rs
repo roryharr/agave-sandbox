@@ -102,7 +102,7 @@ impl SnapshotConfig {
 
     /// Should snapshots be generated?
     pub fn should_generate_snapshots(&self) -> bool {
-        true
+        self.usage == SnapshotUsage::LoadAndGenerate
     }
 
     /// Should snapshots be loaded?
