@@ -769,7 +769,7 @@ fn test_fastboot_snapshots_teardown(exit_backpressure: bool) {
     agave_logger::setup();
     const FASTBOOT_SNAPSHOT_INTERVAL_SLOTS: Slot = 4;
     // Queue a few fastboot snapshots to make sure the newest one is processed during teardown
-    const LAST_SLOT: Slot = FASTBOOT_SNAPSHOT_INTERVAL_SLOTS * 4 + 1;
+    const LAST_SLOT: Slot = FASTBOOT_SNAPSHOT_INTERVAL_SLOTS * 4;
 
     // Test injects snapshots at specific slots, so disable automatic snapshots
     let snapshot_test_config =
@@ -810,24 +810,22 @@ fn test_fastboot_snapshots_teardown(exit_backpressure: bool) {
     let mint_keypair = &snapshot_test_config.genesis_config_info.mint_keypair;
     for slot in 1..=LAST_SLOT {
         // Make a new bank and process some transactions
-        {
-            let parent_bank = bank_forks.read().unwrap().get(slot - 1).unwrap();
-            let bank = bank_forks
-                .write()
-                .unwrap()
-                .insert(Bank::new_from_parent(parent_bank, &Pubkey::default(), slot))
-                .clone_without_scheduler();
+        let parent_bank = bank_forks.read().unwrap().get(slot - 1).unwrap();
+        let bank = bank_forks
+            .write()
+            .unwrap()
+            .insert(Bank::new_from_parent(parent_bank, &Pubkey::default(), slot))
+            .clone_without_scheduler();
 
-            let key = solana_pubkey::new_rand();
-            let tx = system_transaction::transfer(mint_keypair, &key, 1, bank.last_blockhash());
-            assert_eq!(bank.process_transaction(&tx), Ok(()));
+        let key = solana_pubkey::new_rand();
+        let tx = system_transaction::transfer(mint_keypair, &key, 1, bank.last_blockhash());
+        assert_eq!(bank.process_transaction(&tx), Ok(()));
 
-            let key = solana_pubkey::new_rand();
-            let tx = system_transaction::transfer(mint_keypair, &key, 0, bank.last_blockhash());
-            assert_eq!(bank.process_transaction(&tx), Ok(()));
+        let key = solana_pubkey::new_rand();
+        let tx = system_transaction::transfer(mint_keypair, &key, 0, bank.last_blockhash());
+        assert_eq!(bank.process_transaction(&tx), Ok(()));
 
-            bank.fill_bank_with_ticks_for_tests();
-        }
+        bank.fill_bank_with_ticks_for_tests();
 
         // Inject a fastboot snapshot at a specific slot
         if slot % FASTBOOT_SNAPSHOT_INTERVAL_SLOTS == 0 {
@@ -836,9 +834,7 @@ fn test_fastboot_snapshots_teardown(exit_backpressure: bool) {
                 .unwrap()
                 .set_root(slot, Some(&snapshot_controller), None);
 
-            let bank = bank_forks.read().unwrap().get(slot).unwrap();
             bank.force_flush_accounts_cache();
-            bank.squash();
             let snapshot_package = SnapshotPackage::new(
                 SnapshotKind::Fastboot,
                 &bank,
@@ -849,15 +845,6 @@ fn test_fastboot_snapshots_teardown(exit_backpressure: bool) {
                 .lock()
                 .unwrap()
                 .push(snapshot_package);
-
-            // Wait while the fastboot snapshot is processed
-            while pending_snapshot_packages
-                .lock()
-                .unwrap()
-                .snapshots_pending()
-            {
-                std::thread::sleep(Duration::from_millis(100));
-            }
         }
     }
 

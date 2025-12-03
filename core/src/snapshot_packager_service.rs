@@ -60,6 +60,18 @@ impl SnapshotPackagerService {
                 let mut teardown_state = None;
                 loop {
                     if exit.load(Ordering::Relaxed) {
+                        let teardown_state = if let Some(fastboot_package) =
+                            Self::get_pending_fastboot_package(&pending_snapshot_packages)
+                        {
+                            Some(TeardownState {
+                                snapshot_slot: fastboot_package.slot,
+                                snapshot_storages: fastboot_package.snapshot_storages.clone(),
+                                bank_snapshot_package: Some(fastboot_package.bank_snapshot_package),
+                            })
+                        } else {
+                            teardown_state
+                        };
+
                         if let Some(teardown_state) = teardown_state {
                             info!("Received exit request, tearing down...");
                             let (_, dur) = meas_dur!(Self::teardown(
@@ -89,7 +101,7 @@ impl SnapshotPackagerService {
                         // With exit backpressure, we will delay flushing snapshot storages
                         // until we receive a graceful exit request.
                         // Save the snapshot storages here, so we can flush later (as needed).
-                        // For fastboot snapshots, the bank snapshot is saved and
+                        // For fastboot snapshot packages, the bank snapshot is saved and
                         // the rest of the snapshotting process is skipped
                         if snapshot_kind == SnapshotKind::Fastboot {
                             teardown_state = Some(TeardownState {
@@ -219,6 +231,13 @@ impl SnapshotPackagerService {
         pending_snapshot_packages.lock().unwrap().pop()
     }
 
+    /// Returns any pending fastboot packages
+    fn get_pending_fastboot_package(
+        pending_snapshot_packages: &Mutex<PendingSnapshotPackages>,
+    ) -> Option<SnapshotPackage> {
+        pending_snapshot_packages.lock().unwrap().pop_fastboot()
+    }
+
     /// Performs final operations before gracefully shutting down
     fn teardown(state: TeardownState, snapshot_config: &SnapshotConfig) {
         let start = Instant::now();
@@ -230,6 +249,7 @@ impl SnapshotPackagerService {
         } = state;
 
         if let Some(bank_snapshot_package) = bank_snapshot_package {
+            info!("Serializing bank snapshot...");
             let result = snapshot_utils::serialize_snapshot(
                 &snapshot_config.bank_snapshots_dir,
                 snapshot_config.snapshot_version,
@@ -247,7 +267,10 @@ impl SnapshotPackagerService {
                 // the mark_bank_snapshot_as_loadable file, so return early.
                 return;
             }
+            info!("Serializing bank snapshot... Done in {:?}", start.elapsed());
         }
+
+        info!("Flushing account storages...");
         for storage in &snapshot_storages {
             let result = storage.flush();
             if let Err(err) = result {
