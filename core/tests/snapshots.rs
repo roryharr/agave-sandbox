@@ -851,7 +851,11 @@ fn test_fastboot_snapshots_teardown(exit_backpressure: bool) {
                 .push(snapshot_package);
 
             // Wait while the fastboot snapshot is processed
-            while !pending_snapshot_packages.lock().unwrap().is_empty() {
+            while pending_snapshot_packages
+                .lock()
+                .unwrap()
+                .snapshots_pending()
+            {
                 std::thread::sleep(Duration::from_millis(100));
             }
         }
@@ -882,7 +886,7 @@ fn test_fastboot_snapshots_teardown(exit_backpressure: bool) {
     .unwrap();
 
     let bank_constructed = snapshot_bank_utils::bank_from_snapshot_dir(
-        &[snapshot_test_config.accounts_dir.clone()],
+        &[snapshot_test_config.accounts_dir],
         &bank_snapshot,
         &snapshot_test_config.genesis_config_info.genesis_config,
         &RuntimeConfig::default(),
