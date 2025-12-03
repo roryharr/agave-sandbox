@@ -352,6 +352,7 @@ pub struct ValidatorConfig {
     pub accounts_db_skip_shrink: bool,
     pub accounts_db_force_initial_clean: bool,
     pub staked_nodes_overrides: Arc<RwLock<HashMap<Pubkey, u64>>>,
+    pub validator_snapshot: Arc<RwLock<AtomicBool>>,
     pub validator_exit: Arc<RwLock<Exit>>,
     pub validator_exit_backpressure: HashMap<String, Arc<AtomicBool>>,
     pub no_wait_for_vote_to_start_leader: bool,
@@ -433,6 +434,7 @@ impl ValidatorConfig {
             staked_nodes_overrides: Arc::new(RwLock::new(HashMap::new())),
             validator_exit: Arc::new(RwLock::new(Exit::default())),
             validator_exit_backpressure: HashMap::default(),
+            validator_snapshot: Arc::new(RwLock::new(AtomicBool::new(false))),
             no_wait_for_vote_to_start_leader: true,
             accounts_db_config: ACCOUNTS_DB_CONFIG_FOR_TESTING,
             wait_to_vote_slot: None,
@@ -943,6 +945,7 @@ impl Validator {
             snapshot_request_sender.clone(),
             config.snapshot_config.clone(),
             bank_forks.read().unwrap().root(),
+            config.validator_snapshot.clone(),
         ));
 
         let pending_snapshot_packages = Arc::new(Mutex::new(PendingSnapshotPackages::default()));

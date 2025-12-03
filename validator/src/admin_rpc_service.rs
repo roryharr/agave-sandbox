@@ -53,6 +53,7 @@ pub struct AdminRpcRequestMetadata {
     pub start_progress: Arc<RwLock<ValidatorStartProgress>>,
     pub validator_exit: Arc<RwLock<Exit>>,
     pub validator_exit_backpressure: HashMap<String, Arc<AtomicBool>>,
+    pub validator_snapshot: Arc<RwLock<AtomicBool>>,
     pub authorized_voter_keypairs: Arc<RwLock<Vec<Arc<Keypair>>>>,
     pub tower_storage: Arc<dyn TowerStorage>,
     pub staked_nodes_overrides: Arc<RwLock<HashMap<Pubkey, u64>>>,
@@ -295,9 +296,13 @@ impl AdminRpc for AdminRpcImpl {
         thread::Builder::new()
             .name("solProcessExit".into())
             .spawn(move || {
+                meta.validator_snapshot
+                    .write()
+                    .unwrap()
+                    .store(true, Ordering::Relaxed);
                 // Delay exit signal until this RPC request completes, otherwise the caller of `exit` might
                 // receive a confusing error as the validator shuts down before a response is sent back.
-                thread::sleep(Duration::from_millis(100));
+                thread::sleep(Duration::from_millis(1000));
 
                 info!("validator exit requested");
                 meta.validator_exit.write().unwrap().exit();

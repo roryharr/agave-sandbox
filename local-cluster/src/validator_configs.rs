@@ -55,6 +55,7 @@ pub fn safe_clone_config(config: &ValidatorConfig) -> ValidatorConfig {
             .keys()
             .map(|name| (name.clone(), Arc::new(AtomicBool::new(false))))
             .collect(),
+        validator_snapshot: Arc::new(RwLock::new(AtomicBool::new(false))),
         poh_hashes_per_batch: config.poh_hashes_per_batch,
         process_ledger_before_services: config.process_ledger_before_services,
         no_wait_for_vote_to_start_leader: config.no_wait_for_vote_to_start_leader,

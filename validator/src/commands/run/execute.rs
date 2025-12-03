@@ -610,6 +610,7 @@ pub fn execute(
         enable_scheduler_bindings: matches.is_present("enable_scheduler_bindings"),
         banking_trace_dir_byte_limit: parse_banking_trace_dir_byte_limit(matches),
         validator_exit: Arc::new(RwLock::new(Exit::default())),
+        validator_snapshot: Arc::new(RwLock::new(AtomicBool::new(false))),
         validator_exit_backpressure: [(
             SnapshotPackagerService::NAME.to_string(),
             Arc::new(AtomicBool::new(false)),
@@ -702,6 +703,7 @@ pub fn execute(
             start_time: std::time::SystemTime::now(),
             validator_exit: validator_config.validator_exit.clone(),
             validator_exit_backpressure: validator_config.validator_exit_backpressure.clone(),
+            validator_snapshot: validator_config.validator_snapshot.clone(),
             start_progress: start_progress.clone(),
             authorized_voter_keypairs: authorized_voter_keypairs.clone(),
             post_init: admin_service_post_init.clone(),
