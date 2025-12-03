@@ -257,7 +257,6 @@ impl SnapshotPackagerService {
                 snapshot_storages.as_slice(),
                 false,
             );
-
             if let Err(err) = result {
                 warn!(
                     "Failed to serialize bank '{}': {err}",
@@ -337,7 +336,10 @@ struct TeardownState {
     snapshot_slot: Slot,
     /// The storages of the latest snapshot
     snapshot_storages: Vec<Arc<AccountStorageEntry>>,
-    /// The bank snapshot package of the latest snapshot. Stored if the last snapshot
-    /// handled a fastboot snapshot.
+    /// For fastboot snapshots archiving is not required so serialization of the bank snapshot
+    /// can be deferred until teardown. In this case `bank_snapshot_package` will be `Some` and
+    /// during teardown the bank snapshot will be serialized to storage. For other snapshot types
+    /// `bank_snapshot_package` will be `None` because the serialization would have already occurred
+    /// when the snapshot archive was written.
     bank_snapshot_package: Option<BankSnapshotPackage>,
 }
