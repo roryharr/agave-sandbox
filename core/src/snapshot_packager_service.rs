@@ -61,7 +61,7 @@ impl SnapshotPackagerService {
                 loop {
                     if exit.load(Ordering::Relaxed) {
                         let teardown_state = if let Some(fastboot_package) =
-                            Self::get_pending_fastboot_package(&pending_snapshot_packages)
+                            Self::get_pending_fastboot_snapshot_package(&pending_snapshot_packages)
                         {
                             Some(TeardownState {
                                 snapshot_slot: fastboot_package.slot,
@@ -231,8 +231,8 @@ impl SnapshotPackagerService {
         pending_snapshot_packages.lock().unwrap().pop()
     }
 
-    /// Returns any pending fastboot packages
-    fn get_pending_fastboot_package(
+    /// Returns any pending fastboot snapshot packages
+    fn get_pending_fastboot_snapshot_package(
         pending_snapshot_packages: &Mutex<PendingSnapshotPackages>,
     ) -> Option<SnapshotPackage> {
         pending_snapshot_packages.lock().unwrap().pop_fastboot()
