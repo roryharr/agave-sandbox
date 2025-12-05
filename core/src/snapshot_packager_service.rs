@@ -60,18 +60,6 @@ impl SnapshotPackagerService {
                 let mut teardown_state = None;
                 loop {
                     if exit.load(Ordering::Relaxed) {
-                        let teardown_state = if let Some(fastboot_package) =
-                            Self::get_pending_fastboot_snapshot_package(&pending_snapshot_packages)
-                        {
-                            Some(TeardownState {
-                                snapshot_slot: fastboot_package.slot,
-                                snapshot_storages: fastboot_package.snapshot_storages.clone(),
-                                bank_snapshot_package: Some(fastboot_package.bank_snapshot_package),
-                            })
-                        } else {
-                            teardown_state
-                        };
-
                         if let Some(teardown_state) = teardown_state {
                             info!("Received exit request, tearing down...");
                             let (_, dur) = meas_dur!(Self::teardown(
@@ -231,17 +219,8 @@ impl SnapshotPackagerService {
         pending_snapshot_packages.lock().unwrap().pop()
     }
 
-    /// Returns any pending fastboot snapshot packages
-    fn get_pending_fastboot_snapshot_package(
-        pending_snapshot_packages: &Mutex<PendingSnapshotPackages>,
-    ) -> Option<SnapshotPackage> {
-        pending_snapshot_packages.lock().unwrap().pop_fastboot()
-    }
-
     /// Performs final operations before gracefully shutting down
     fn teardown(state: TeardownState, snapshot_config: &SnapshotConfig) {
-        let start = Instant::now();
-
         let TeardownState {
             snapshot_slot,
             snapshot_storages,
@@ -249,6 +228,7 @@ impl SnapshotPackagerService {
         } = state;
 
         if let Some(bank_snapshot_package) = bank_snapshot_package {
+            let start = Instant::now();
             info!("Serializing bank snapshot...");
             let result = snapshot_utils::serialize_snapshot(
                 &snapshot_config.bank_snapshots_dir,
@@ -270,6 +250,7 @@ impl SnapshotPackagerService {
         }
 
         info!("Flushing account storages...");
+        let start = Instant::now();
         for storage in &snapshot_storages {
             let result = storage.flush();
             if let Err(err) = result {

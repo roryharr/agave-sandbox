@@ -845,6 +845,11 @@ fn test_fastboot_snapshots_teardown(exit_backpressure: bool) {
                 .lock()
                 .unwrap()
                 .push(snapshot_package);
+
+            // Wait while the fastboot snapshot is processed
+            while !pending_snapshot_packages.lock().unwrap().is_empty() {
+                std::thread::sleep(Duration::from_millis(100));
+            }
         }
     }
 

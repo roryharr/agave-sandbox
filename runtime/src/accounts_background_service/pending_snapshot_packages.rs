@@ -114,11 +114,6 @@ impl PendingSnapshotPackages {
         }
     }
 
-    /// Returns the next fastboot snapshot package to handle
-    pub fn pop_fastboot(&mut self) -> Option<SnapshotPackage> {
-        self.fastboot.take()
-    }
-
     #[cfg(feature = "dev-context-only-utils")]
     pub fn is_empty(&self) -> bool {
         self.incremental.is_none() && self.full.is_none() && self.fastboot.is_none()
