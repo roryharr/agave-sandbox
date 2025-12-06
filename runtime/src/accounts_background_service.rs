@@ -127,6 +127,7 @@ impl Debug for SnapshotRequest {
 pub enum SnapshotRequestKind {
     FullSnapshot,
     IncrementalSnapshot,
+    FastbootSnapshot,
 }
 
 pub struct SnapshotRequestHandler {
@@ -668,6 +669,7 @@ fn new_snapshot_kind(snapshot_request: &SnapshotRequest) -> Option<SnapshotKind>
                 None
             }
         }
+        SnapshotRequestKind::FastbootSnapshot => Some(SnapshotKind::Fastboot),
     }
 }
 
@@ -704,8 +706,13 @@ fn cmp_snapshot_request_kinds_by_priority(
     match (a, b) {
         (Kind::FullSnapshot, Kind::FullSnapshot) => Equal,
         (Kind::FullSnapshot, Kind::IncrementalSnapshot) => Greater,
+        (Kind::FullSnapshot, Kind::FastbootSnapshot) => Greater,
         (Kind::IncrementalSnapshot, Kind::FullSnapshot) => Less,
         (Kind::IncrementalSnapshot, Kind::IncrementalSnapshot) => Equal,
+        (Kind::IncrementalSnapshot, Kind::FastbootSnapshot) => Greater,
+        (Kind::FastbootSnapshot, Kind::FullSnapshot) => Less,
+        (Kind::FastbootSnapshot, Kind::IncrementalSnapshot) => Less,
+        (Kind::FastbootSnapshot, Kind::FastbootSnapshot) => Equal,
     }
 }
 

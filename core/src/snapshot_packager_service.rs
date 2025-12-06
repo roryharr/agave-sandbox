@@ -12,9 +12,7 @@ use {
     solana_perf::thread::renice_this_thread,
     solana_runtime::{
         accounts_background_service::PendingSnapshotPackages,
-        snapshot_controller::SnapshotController,
-        snapshot_package::{BankSnapshotPackage, SnapshotPackage},
-        snapshot_utils,
+        snapshot_controller::SnapshotController, snapshot_package::SnapshotPackage, snapshot_utils,
     },
     std::{
         sync::{
@@ -60,7 +58,7 @@ impl SnapshotPackagerService {
                 let mut teardown_state = None;
                 loop {
                     if exit.load(Ordering::Relaxed) {
-                        if let Some(teardown_state) = teardown_state {
+                        if let Some(teardown_state) = &teardown_state {
                             info!("Received exit request, tearing down...");
                             let (_, dur) = meas_dur!(Self::teardown(
                                 teardown_state,
@@ -70,6 +68,8 @@ impl SnapshotPackagerService {
                         }
                         break;
                     }
+
+                    let snapshot_pending = snapshot_controller.is_shutdown_snapshot_pending();
 
                     let Some(snapshot_package) =
                         Self::get_next_snapshot_package(&pending_snapshot_packages)
@@ -183,6 +183,10 @@ impl SnapshotPackagerService {
                         ));
 
                     let handling_time_us = measure_handling.end_as_us();
+
+                    if snapshot_pending {
+                        snapshot_controller.shutdown_snapshot_completed();
+                    }
                     datapoint_info!(
                         "snapshot_packager_service",
                         ("enqueued_time_us", enqueued_time.as_micros(), i64),
@@ -251,7 +255,7 @@ impl SnapshotPackagerService {
 
         info!("Flushing account storages...");
         let start = Instant::now();
-        for storage in &snapshot_storages {
+        for storage in &state.snapshot_storages {
             let result = storage.flush();
             if let Err(err) = result {
                 warn!(
@@ -267,15 +271,15 @@ impl SnapshotPackagerService {
 
         let bank_snapshot_dir = snapshot_paths::get_bank_snapshot_dir(
             &snapshot_config.bank_snapshots_dir,
-            snapshot_slot,
+            state.snapshot_slot,
         );
 
         info!("Hard linking account storages...");
         let start = Instant::now();
         let result = snapshot_utils::hard_link_storages_to_snapshot(
             &bank_snapshot_dir,
-            snapshot_slot,
-            &snapshot_storages,
+            state.snapshot_slot,
+            &state.snapshot_storages,
         );
         if let Err(err) = result {
             warn!("Failed to hard link account storages: {err}");
@@ -292,8 +296,8 @@ impl SnapshotPackagerService {
         let start = Instant::now();
         let result = snapshot_utils::write_obsolete_accounts_to_snapshot(
             &bank_snapshot_dir,
-            &snapshot_storages,
-            snapshot_slot,
+            &state.snapshot_storages,
+            state.snapshot_slot,
         );
         if let Err(err) = result {
             warn!("Failed to serialize obsolete accounts: {err}");
@@ -317,10 +321,4 @@ struct TeardownState {
     snapshot_slot: Slot,
     /// The storages of the latest snapshot
     snapshot_storages: Vec<Arc<AccountStorageEntry>>,
-    /// For fastboot snapshots archiving is not required so serialization of the bank snapshot
-    /// can be deferred until teardown. In this case `bank_snapshot_package` will be `Some` and
-    /// during teardown the bank snapshot will be serialized to storage. For other snapshot types
-    /// `bank_snapshot_package` will be `None` because the serialization would have already occurred
-    /// when the snapshot archive was written.
-    bank_snapshot_package: Option<BankSnapshotPackage>,
 }
