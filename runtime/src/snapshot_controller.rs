@@ -12,7 +12,7 @@ use {
     std::{
         sync::{
             atomic::{AtomicU64, Ordering},
-            Arc,
+            Arc, Mutex,
         },
         time::Instant,
     },
@@ -22,11 +22,19 @@ struct SnapshotGenerationIntervals {
     full_snapshot_interval: SnapshotInterval,
     incremental_snapshot_interval: SnapshotInterval,
 }
+#[derive(PartialEq, Debug)]
+enum ShutdownSnapshotState {
+    NotRequested,
+    Requested,
+    Pending,
+    Completed,
+}
 
 pub struct SnapshotController {
     abs_request_sender: SnapshotRequestSender,
     snapshot_config: SnapshotConfig,
     latest_abs_request_slot: AtomicU64,
+    shutdown_snapshot_state: Mutex<ShutdownSnapshotState>,
 }
 
 impl SnapshotController {
@@ -39,6 +47,7 @@ impl SnapshotController {
             abs_request_sender,
             snapshot_config,
             latest_abs_request_slot: AtomicU64::new(root_slot),
+            shutdown_snapshot_state: Mutex::new(ShutdownSnapshotState::NotRequested),
         }
     }
 
@@ -58,10 +67,33 @@ impl SnapshotController {
         self.latest_abs_request_slot.store(slot, Ordering::Relaxed);
     }
 
+    pub fn request_shutdown_snapshot(&self) {
+        let mut state = self.shutdown_snapshot_state.lock().unwrap();
+        assert_eq!(*state, ShutdownSnapshotState::NotRequested);
+        *state = ShutdownSnapshotState::Requested;
+    }
+
+    pub fn is_shutdown_snapshot_complete(&self) -> bool {
+        let state = self.shutdown_snapshot_state.lock().unwrap();
+        assert_ne!(*state, ShutdownSnapshotState::NotRequested);
+        *self.shutdown_snapshot_state.lock().unwrap() == ShutdownSnapshotState::Completed
+    }
+
+    pub fn is_shutdown_snapshot_pending(&self) -> bool {
+        *self.shutdown_snapshot_state.lock().unwrap() == ShutdownSnapshotState::Pending
+    }
+
+    pub fn shutdown_snapshot_completed(&self) {
+        let mut state = self.shutdown_snapshot_state.lock().unwrap();
+        assert_eq!(*state, ShutdownSnapshotState::Pending);
+        *state = ShutdownSnapshotState::Completed;
+    }
+
     pub fn handle_new_roots(&self, root: Slot, banks: &[&Arc<Bank>]) -> (bool, SquashTiming, u64) {
         let mut is_root_bank_squashed = false;
         let mut squash_timing = SquashTiming::default();
         let mut total_snapshot_ms = 0;
+        let mut fastboot_snapshot_state = self.shutdown_snapshot_state.lock().unwrap();
 
         if let Some(SnapshotGenerationIntervals {
             full_snapshot_interval,
@@ -90,6 +122,8 @@ impl SnapshotController {
                     Some((bank, SnapshotRequestKind::FullSnapshot))
                 } else if should_request_incremental_snapshot {
                     Some((bank, SnapshotRequestKind::IncrementalSnapshot))
+                } else if *fastboot_snapshot_state == ShutdownSnapshotState::Requested {
+                    Some((bank, SnapshotRequestKind::FastbootSnapshot))
                 } else {
                     None
                 }
@@ -111,6 +145,9 @@ impl SnapshotController {
                     enqueued: Instant::now(),
                 }) {
                     warn!("Error sending snapshot request for bank: {bank_slot}, err: {e:?}");
+                }
+                if *fastboot_snapshot_state == ShutdownSnapshotState::Requested {
+                    *fastboot_snapshot_state = ShutdownSnapshotState::Pending;
                 }
                 snapshot_time.stop();
                 total_snapshot_ms += snapshot_time.as_ms();

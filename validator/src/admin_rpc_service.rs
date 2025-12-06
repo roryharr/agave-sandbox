@@ -295,9 +295,20 @@ impl AdminRpc for AdminRpcImpl {
         thread::Builder::new()
             .name("solProcessExit".into())
             .spawn(move || {
-                // Delay exit signal until this RPC request completes, otherwise the caller of `exit` might
-                // receive a confusing error as the validator shuts down before a response is sent back.
-                thread::sleep(Duration::from_millis(100));
+                // Extract the snapshot controller if it exists
+                let binding = meta.post_init.read().unwrap();
+                let snapshot_controller = binding
+                    .as_ref()
+                    .map(|post_init| post_init.snapshot_controller.as_ref());
+
+                if let Some(snapshot_controller) = snapshot_controller {
+                    info!("Requesting fastboot snapshot before exit");
+                    snapshot_controller.request_shutdown_snapshot();
+
+                    while snapshot_controller.is_shutdown_snapshot_pending() {
+                        thread::sleep(Duration::from_millis(100));
+                    }
+                }
 
                 info!("validator exit requested");
                 meta.validator_exit.write().unwrap().exit();
@@ -1030,6 +1041,8 @@ pub fn load_staked_nodes_overrides(
 mod tests {
     use {
         super::*,
+        agave_snapshots::snapshot_config::SnapshotConfig,
+        crossbeam_channel::unbounded,
         serde_json::Value,
         solana_account::{Account, AccountSharedData},
         solana_accounts_db::{
@@ -1056,6 +1069,7 @@ mod tests {
         solana_runtime::{
             bank::{Bank, BankTestConfig},
             bank_forks::BankForks,
+            snapshot_controller::SnapshotController,
         },
         solana_system_interface::program as system_program,
         solana_tpu_client::tpu_client::DEFAULT_TPU_ENABLE_UDP,
@@ -1102,6 +1116,14 @@ mod tests {
                     ..ACCOUNTS_DB_CONFIG_FOR_TESTING
                 },
             });
+
+            let (snapshot_request_sender, _) = unbounded();
+            let snapshot_controller = Arc::new(SnapshotController::new(
+                snapshot_request_sender.clone(),
+                SnapshotConfig::default(),
+                bank_forks.read().unwrap().root(),
+            ));
+
             let vote_account = vote_keypair.pubkey();
             let start_progress = Arc::new(RwLock::new(ValidatorStartProgress::default()));
             let repair_whitelist = Arc::new(RwLock::new(HashSet::new()));
@@ -1128,6 +1150,7 @@ mod tests {
                     ),
                     node: None,
                     banking_control_sender: mpsc::channel(1).0,
+                    snapshot_controller,
                 }))),
                 staked_nodes_overrides: Arc::new(RwLock::new(HashMap::new())),
                 rpc_to_plugin_manager_sender: None,

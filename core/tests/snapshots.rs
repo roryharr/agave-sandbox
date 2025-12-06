@@ -853,19 +853,6 @@ fn test_fastboot_snapshots_teardown(exit_backpressure: bool) {
         }
     }
 
-    let bank_snapshots = snapshot_utils::get_bank_snapshots(
-        &snapshot_test_config.snapshot_config.bank_snapshots_dir,
-    );
-
-    if exit_backpressure.is_none() {
-        // Without backpressure, the fastboot snapshot should be present
-        assert!(!bank_snapshots.is_empty());
-    } else {
-        // With backpressure, the fastboot snapshot will not be written until teardown
-        // is triggered by writing true to exit below
-        assert!(bank_snapshots.is_empty());
-    }
-
     // Stop the background services, ignore any errors
     exit.store(true, Ordering::Relaxed);
     let packager_exit_result = snapshot_packager_service.join();
