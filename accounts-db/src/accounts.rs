@@ -565,7 +565,7 @@ impl Accounts {
             accounts.account_default_if_zero_lamport(index, |account| {
                 let txn = transactions
                     .map(|txs| *txs.get(index).expect("txs must be present if provided"));
-                let account_shared_data = account.to_account_shared_data();
+                let account_shared_data = account.take_account();
                 let pubkey = account.pubkey();
 
                 self.accounts_db.notify_account_at_accounts_update(
