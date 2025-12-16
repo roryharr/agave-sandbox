@@ -366,7 +366,16 @@ impl AppendVec {
                 AppendVecFileBacking::File(file) => {
                     file.sync_all()?;
                 }
-                AppendVecFileBacking::Memory(_) => {}
+                AppendVecFileBacking::Memory(vec) => {
+                    // Allocate a file and flush to it
+                    let mut file = OpenOptions::new()
+                        .read(true)
+                        .write(true)
+                        .create(true)
+                        .open(&self.path)?;
+                    file.write_all(&vec.read().unwrap())?;
+
+                }
             }
             APPEND_VEC_STATS.files_dirty.fetch_sub(1, Ordering::Relaxed);
         }
