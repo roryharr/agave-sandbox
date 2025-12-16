@@ -5,6 +5,7 @@ use {
     solana_clock::{Epoch, Slot},
     std::{io, ops::RangeInclusive, path::PathBuf, process::ExitStatus},
     thiserror::Error,
+    zeekstd,
 };
 
 #[derive(Error, Debug)]
@@ -243,8 +244,14 @@ pub enum ArchiveSnapshotPackageError {
     #[error("failed to create encoder: {0}")]
     CreateEncoder(#[source] io::Error),
 
+    #[error("failed to create zstd encoder: {0}")]
+    CreateEncoderZstd(#[source] zeekstd::Error),
+
     #[error("failed to encode archive: {0}")]
     FinishEncoder(#[source] io::Error),
+
+    #[error("failed to encode archive: {0}")]
+    FinishEncoderZstd(#[source] zeekstd::Error),
 
     #[error("failed to query archive metadata '{1}': {0}")]
     QueryArchiveMetadata(#[source] io::Error, PathBuf),

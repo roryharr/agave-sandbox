@@ -140,11 +140,13 @@ pub fn archive_snapshot(
 
         match archive_format {
             ArchiveFormat::TarZstd { config } => {
+                let opts = zeekstd::EncodeOptions::new()
+                    .compression_level(config.compression_level);
                 let mut encoder =
-                    zstd::stream::Encoder::new(archive_writer, config.compression_level)
-                        .map_err(E::CreateEncoder)?;
+                    zeekstd::Encoder::with_opts(archive_writer, opts)
+                    .map_err(E::CreateEncoderZstd)?;
                 do_archive_files(&mut encoder)?;
-                encoder.finish().map_err(E::FinishEncoder)?;
+                encoder.finish().map_err(E::FinishEncoderZstd)?;
             }
             ArchiveFormat::TarLz4 => {
                 let mut encoder = lz4::EncoderBuilder::new()
