@@ -41,7 +41,7 @@ use {
             Arc, RwLock,
         },
         thread::{self, Builder},
-        time::{Duration, SystemTime},
+        time::{Duration, Instant, SystemTime},
     },
     tokio::runtime::Runtime,
 };
@@ -307,7 +307,13 @@ impl AdminRpc for AdminRpcImpl {
                     info!("Requesting fastboot snapshot before exit");
                     snapshot_controller.request_shutdown_snapshot();
 
+                    let timeout = Duration::from_secs(5);
+                    let start_time = Instant::now();
                     while snapshot_controller.latest_bank_snapshot_slot() == latest_snapshot_slot {
+                        if start_time.elapsed() > timeout {
+                            warn!("Timeout waiting for snapshot to complete");
+                            break;
+                        }
                         thread::sleep(Duration::from_millis(100));
                     }
                     info!("Bank snapshot completed");
