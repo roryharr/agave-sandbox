@@ -5367,9 +5367,9 @@ impl AccountsDb {
                 if slot_diff == target_slot {
                     slot_diff_metrics.new_accounts +=  1; // First bucket for new (slot_diff == target_slot)
                 } else if slot_diff == 0 {
-                    slot_diff_metrics.buckets[1]  +=1; // Second bucket for slot_diff == 0
+                    slot_diff_metrics.buckets[0]  +=1; // Second bucket for slot_diff == 0
                 } else {
-                    let mut bucket = 2;
+                    let mut bucket = 1;
                     let mut value = slot_diff;
                     while value >= 10 && bucket < 10 {
                         value /= 10;

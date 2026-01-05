@@ -44,17 +44,16 @@ impl AgeBuckets {
         if self.last_report.should_update(1000) {
             datapoint_info!(
                 "accounts_age_store_cached",
-                ("new_accounts", self.new_accounts.load(Ordering::Relaxed), i64),
-                ("bucket_0", self.buckets[0].load(Ordering::Relaxed), i64),
-                ("bucket_1", self.buckets[1].load(Ordering::Relaxed), i64),
-                ("bucket_2", self.buckets[2].load(Ordering::Relaxed), i64),
-                ("bucket_3", self.buckets[3].load(Ordering::Relaxed), i64),
-                ("bucket_4", self.buckets[4].load(Ordering::Relaxed), i64),
-                ("bucket_5", self.buckets[5].load(Ordering::Relaxed), i64),
-                ("bucket_6", self.buckets[6].load(Ordering::Relaxed), i64),
-                ("bucket_7", self.buckets[7].load(Ordering::Relaxed), i64),
-                ("bucket_8", self.buckets[8].load(Ordering::Relaxed), i64),
-                ("bucket_9", self.buckets[9].load(Ordering::Relaxed), i64)
+                ("new", self.new_accounts.load(Ordering::Relaxed), i64),
+                ("0", self.buckets[0].swap(0, Ordering::Relaxed), i64),
+                ("1_10", self.buckets[1].swap(0, Ordering::Relaxed), i64),
+                ("10_100", self.buckets[2].swap(0, Ordering::Relaxed), i64),
+                ("100_1000", self.buckets[3].swap(0, Ordering::Relaxed), i64),
+                ("1000_10000", self.buckets[4].swap(0, Ordering::Relaxed), i64),
+                ("10000_100000", self.buckets[5].swap(0, Ordering::Relaxed), i64),
+                ("100000_1000000", self.buckets[6].swap(0, Ordering::Relaxed), i64),
+                ("1000000_10000000", self.buckets[7].swap(0, Ordering::Relaxed), i64),
+                ("10000000_100000000", self.buckets[8].swap(0, Ordering::Relaxed), i64),
             );
         }
     }
