@@ -49,17 +49,38 @@ impl AgeBuckets {
                 ("1_10", self.buckets[1].swap(0, Ordering::Relaxed), i64),
                 ("10_100", self.buckets[2].swap(0, Ordering::Relaxed), i64),
                 ("100_1000", self.buckets[3].swap(0, Ordering::Relaxed), i64),
-                ("1000_10000", self.buckets[4].swap(0, Ordering::Relaxed), i64),
-                ("10000_100000", self.buckets[5].swap(0, Ordering::Relaxed), i64),
-                ("100000_1000000", self.buckets[6].swap(0, Ordering::Relaxed), i64),
-                ("1000000_10000000", self.buckets[7].swap(0, Ordering::Relaxed), i64),
-                ("10000000_100000000", self.buckets[8].swap(0, Ordering::Relaxed), i64),
+                (
+                    "1000_10000",
+                    self.buckets[4].swap(0, Ordering::Relaxed),
+                    i64
+                ),
+                (
+                    "10000_100000",
+                    self.buckets[5].swap(0, Ordering::Relaxed),
+                    i64
+                ),
+                (
+                    "100000_1000000",
+                    self.buckets[6].swap(0, Ordering::Relaxed),
+                    i64
+                ),
+                (
+                    "1000000_10000000",
+                    self.buckets[7].swap(0, Ordering::Relaxed),
+                    i64
+                ),
+                (
+                    "10000000_100000000",
+                    self.buckets[8].swap(0, Ordering::Relaxed),
+                    i64
+                ),
             );
         }
     }
 
     pub fn accumulate(&self, other: &AgeBucketsNonAtomic) {
-        self.new_accounts.fetch_add(other.new_accounts, Ordering::Relaxed);
+        self.new_accounts
+            .fetch_add(other.new_accounts, Ordering::Relaxed);
         for (self_bucket, other_bucket) in self.buckets.iter().zip(other.buckets.iter()) {
             self_bucket.fetch_add(*other_bucket, Ordering::Relaxed);
         }

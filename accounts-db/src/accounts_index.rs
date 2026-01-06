@@ -1422,7 +1422,7 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> AccountsIndex<T, U> {
             .for_each(f);
     }
     /// Caches the given pubkey at the given slot with the new account information.
-    pub fn cache(&self, new_slot: Slot, pubkey: &Pubkey, account_info: T) -> Slot{
+    pub fn cache(&self, new_slot: Slot, pubkey: &Pubkey, account_info: T) -> Slot {
         // We don't atomically update both primary index and secondary index together.
         // This certainly creates a small time window with inconsistent state across the two indexes.
         // However, this is acceptable because:

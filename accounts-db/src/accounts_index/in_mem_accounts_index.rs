@@ -418,7 +418,11 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
         let (slot, new_entry) = new_value;
 
         // Find the highest slot in the current slot_list
-        let highest_slot = slot_list.iter().map(|(existing_slot, _)| *existing_slot).max().unwrap_or(0);
+        let highest_slot = slot_list
+            .iter()
+            .map(|(existing_slot, _)| *existing_slot)
+            .max()
+            .unwrap_or(0);
 
         if !slot_list
             .iter()
