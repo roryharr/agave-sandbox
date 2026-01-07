@@ -453,6 +453,18 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
         });
     }
 
+    pub fn get_slot_list_length(
+        &self,
+        pubkey: &Pubkey,
+    ) -> usize {
+        self.get_only_in_mem(pubkey, false, | entry |{
+            if let Some(entry) = entry {
+                entry.slot_list_lock_read_len()
+            } else {
+                panic!()
+            }})
+    }
+
     /// Gets an entry for `pubkey` and calls `callback` with it.
     /// If the entry is not in the index, an empty entry will be created and passed to `callback`.
     /// If the entry is in the index, it will be passed to `callback` as is.

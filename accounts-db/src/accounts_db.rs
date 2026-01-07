@@ -5003,7 +5003,18 @@ impl AccountsDb {
                     .as_mut()
                     .map(|should_flush_f| should_flush_f(key))
                     .unwrap_or(true);
-                if should_flush {
+                let purge_zero_lamport = if account.is_zero_lamport() {
+                    if self.accounts_index.get_bin(&key).get_slot_list_length(&key) == 1 {
+                        true
+                    }
+                    else {
+                        false
+                    }
+                }
+                else {
+                    false
+                };
+                if should_flush && !purge_zero_lamport {
                     flush_stats.num_bytes_flushed +=
                         AppendVec::calculate_stored_size(account.data().len()) as u64;
                     flush_stats.num_accounts_flushed += 1;
