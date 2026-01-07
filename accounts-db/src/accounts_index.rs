@@ -798,7 +798,7 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> AccountsIndex<T, U> {
         pubkey: &Pubkey,
         callback: impl FnOnce(Option<&AccountMapEntry<T>>) -> (bool, R),
     ) -> R {
-        self.get_bin(pubkey).get_internal_inner(pubkey, callback)
+        self.get_bin(pubkey).get_internal_inner(pubkey, callback, true)
     }
 
     /// Gets the index's entry for `pubkey`, with `ancestors` and `max_root`,
@@ -1124,7 +1124,7 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> AccountsIndex<T, U> {
                     // the entry to the in-mem cache if the entry is made dirty.
                     lock.as_ref()
                         .unwrap()
-                        .get_internal_inner(pubkey, internal_callback);
+                        .get_internal_inner(pubkey, internal_callback, false);
                 }
                 ScanFilter::OnlyAbnormal
                 | ScanFilter::OnlyAbnormalWithVerify
@@ -1147,7 +1147,7 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> AccountsIndex<T, U> {
                                 }
                                 internal_callback(entry);
                                 entry.is_some()
-                            });
+                            }, false);
                     if !found && matches!(filter, ScanFilter::OnlyAbnormalWithVerify) {
                         lock.as_ref().unwrap().get_internal_inner(pubkey, |entry| {
                             assert!(entry.is_some(), "{pubkey}, entry: {entry:?}");
@@ -1155,7 +1155,7 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> AccountsIndex<T, U> {
                             assert_eq!(entry.ref_count(), 1, "{pubkey}");
                             assert_eq!(entry.slot_list_lock_read_len(), 1, "{pubkey}");
                             (false, ())
-                        });
+                        }, false);
                     }
                 }
             }
@@ -1484,9 +1484,9 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> AccountsIndex<T, U> {
         map.get_internal_inner(pubkey, |entry| {
             (
                 false,
-                entry.map(|entry| entry.ref_count()).unwrap_or_default(),
+                entry.map(|entry| entry.ref_count(),).unwrap_or_default(),
             )
-        })
+        },false)
     }
 
     fn purge_secondary_indexes_by_inner_key(
@@ -1644,7 +1644,7 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> AccountsIndex<T, U> {
                 let entry = entry.expect("Expected entry to exist in accounts index");
                 self.clean_and_unref_slot_list_on_startup(entry, &mut reclaims);
                 (false, ())
-            });
+            },false);
         }
         reclaims
     }

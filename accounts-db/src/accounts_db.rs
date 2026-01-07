@@ -37,7 +37,7 @@ use {
         },
         accounts_cache::{AccountsCache, CachedAccount, SlotCache},
         accounts_db::stats::{
-            AccountsStats, AgeBuckets, AgeBucketsNonAtomic, CleanAccountsStats, FlushStats,
+            AccountsStats, AgeBuckets, CleanAccountsStats, FlushStats,
             ObsoleteAccountsStats, PurgeStats, ShrinkAncientStats, ShrinkStats, ShrinkStatsSub,
             StoreAccountsTiming,
         },
@@ -3819,9 +3819,9 @@ impl AccountsDb {
         pubkey: &Pubkey,
         load_hint: LoadHint,
     ) -> Option<(AccountSharedData, Slot)> {
-        let account = self.do_load(ancestors, pubkey, None, load_hint, LoadZeroLamports::None);
+        self.do_load(ancestors, pubkey, None, load_hint, LoadZeroLamports::None)
 
-        let mut slot_diff_metrics = AgeBucketsNonAtomic::default();
+        /*let mut slot_diff_metrics = AgeBucketsNonAtomic::default();
         if let Some(ref account) = account {
             let slot = account.1;
             let max_slot = ancestors.max_slot();
@@ -3842,7 +3842,7 @@ impl AccountsDb {
         }
         self.age_bucket.accumulate(&slot_diff_metrics);
         self.age_bucket.report();
-        account
+        account*/
     }
 
     /// load the account with `pubkey` into the read only accounts cache.

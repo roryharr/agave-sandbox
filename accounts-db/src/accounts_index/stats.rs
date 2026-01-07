@@ -4,6 +4,7 @@ use {
         in_mem_accounts_index::InMemAccountsIndex,
         DiskIndexValue, IndexValue, SlotListItem,
     },
+    crate::accounts_db::stats::AgeBuckets,
     solana_time_utils::AtomicInterval,
     std::{
         fmt::Debug,
@@ -63,6 +64,7 @@ pub struct Stats {
     bins: u64,
     pub flush_should_evict_us: AtomicU64,
     pub flush_read_lock_us: AtomicU64,
+    pub age_buckets: AgeBuckets,
 }
 
 impl Stats {
@@ -71,6 +73,11 @@ impl Stats {
             bins: bins as u64,
             ..Stats::default()
         }
+    }
+
+    pub fn accumulate_bin_stats(&self, other: &AgeBuckets)
+    {
+        self.age_buckets.accumulate_atomic(other);
     }
 
     pub fn inc_insert(&self) {
@@ -635,7 +642,9 @@ impl Stats {
                 ("inserts", self.inserts.swap(0, Ordering::Relaxed), i64),
                 ("deletes", self.deletes.swap(0, Ordering::Relaxed), i64),
                 ("keys", self.keys.swap(0, Ordering::Relaxed), i64),
+                ("age", storage.current_age(), i64),
             );
+            self.age_buckets.report();
         }
     }
 }

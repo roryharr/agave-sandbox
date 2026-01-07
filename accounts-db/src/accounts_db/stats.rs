@@ -85,6 +85,14 @@ impl AgeBuckets {
             self_bucket.fetch_add(*other_bucket, Ordering::Relaxed);
         }
     }
+
+    pub fn accumulate_atomic(&self, other: &AgeBuckets) {
+        self.new_accounts
+            .fetch_add(other.new_accounts.swap(0, Ordering::Relaxed), Ordering::Relaxed);
+        for (self_bucket, other_bucket) in self.buckets.iter().zip(other.buckets.iter()) {
+            self_bucket.fetch_add(other_bucket.swap(0, Ordering::Relaxed), Ordering::Relaxed);
+        }
+    }
 }
 
 #[derive(Debug, Default)]

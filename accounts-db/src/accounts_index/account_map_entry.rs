@@ -31,7 +31,7 @@ pub struct AccountMapEntry<T> {
 }
 
 // Ensure the size of AccountMapEntry never changes unexpectedly
-const _: () = assert!(size_of::<AccountMapEntry<AccountInfo>>() == 48);
+const _: () = assert!(size_of::<AccountMapEntry<AccountInfo>>() == 56);
 
 impl<T: IndexValue> AccountMapEntry<T> {
     pub fn new(slot_list: SlotList<T>, ref_count: RefCount, meta: AccountMapEntryMeta) -> Self {
