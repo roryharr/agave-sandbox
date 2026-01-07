@@ -4913,6 +4913,11 @@ impl AccountsDb {
                 flush_stats.store_accounts_timing.handle_reclaims_elapsed,
                 i64
             ),
+            (
+                "num_ephemeral_accounts_purged",
+                flush_stats.num_ephemeral_accounts_purged.0,
+                i64
+            )
         );
     }
 
@@ -5005,6 +5010,7 @@ impl AccountsDb {
                     .unwrap_or(true);
                 let purge_zero_lamport = if account.is_zero_lamport() {
                     if self.accounts_index.get_bin(&key).get_slot_list_length(&key) == 1 {
+                        flush_stats.num_ephemeral_accounts_purged += 1;
                         true
                     }
                     else {
