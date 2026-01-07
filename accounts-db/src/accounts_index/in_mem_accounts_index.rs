@@ -453,13 +453,13 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
         });
     }
 
-    pub fn get_slot_list_length(
+    pub fn get_min_slot(
         &self,
         pubkey: &Pubkey,
     ) -> usize {
         self.get_only_in_mem(pubkey, false, | entry |{
             if let Some(entry) = entry {
-                entry.slot_list_lock_read_len()
+                entry.slot_list_read_lock().iter().map(|(slot, _)| *slot as usize).min().unwrap_or(usize::MAX)
             } else {
                 panic!()
             }})

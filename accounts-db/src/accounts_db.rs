@@ -4949,6 +4949,7 @@ impl AccountsDb {
 
         // Always flush up to `requested_flush_root`, which is necessary for things like snapshotting.
         let flushed_roots: BTreeSet<Slot> = self.accounts_cache.clear_roots(requested_flush_root);
+        let min_slot = flushed_roots.iter().cloned().min().unwrap_or_default();
 
         // Iterate from highest to lowest so that we don't need to flush earlier
         // outdated updates in earlier roots
@@ -4956,7 +4957,7 @@ impl AccountsDb {
         let mut flush_stats = FlushStats::default();
         for &root in flushed_roots.iter().rev() {
             if let Some(stats) =
-                self.flush_slot_cache_with_clean(root, should_flush_f.as_mut(), max_clean_root)
+                self.flush_slot_cache_with_clean(root, should_flush_f.as_mut(), max_clean_root, min_slot)
             {
                 num_roots_flushed += 1;
                 flush_stats.accumulate(&stats);
@@ -4984,6 +4985,7 @@ impl AccountsDb {
         slot_cache: &SlotCache,
         mut should_flush_f: Option<&mut impl FnMut(&Pubkey) -> bool>,
         max_clean_root: Option<Slot>,
+        min_slot: Slot,
     ) -> FlushStats {
         let mut flush_stats = FlushStats::default();
         let iter_items: Vec<_> = slot_cache.iter().collect();
@@ -5009,7 +5011,7 @@ impl AccountsDb {
                     .map(|should_flush_f| should_flush_f(key))
                     .unwrap_or(true);
                 let purge_zero_lamport = if account.is_zero_lamport() {
-                    if self.accounts_index.get_bin(&key).get_slot_list_length(&key) == 1 {
+                    if self.accounts_index.get_bin(&key).get_min_slot(&key) >= min_slot as usize {
                         flush_stats.num_ephemeral_accounts_purged += 1;
                         true
                     }
@@ -5110,7 +5112,7 @@ impl AccountsDb {
 
     /// flush all accounts in this slot
     fn flush_slot_cache(&self, slot: Slot) -> Option<FlushStats> {
-        self.flush_slot_cache_with_clean(slot, None::<&mut fn(&_) -> bool>, None)
+        self.flush_slot_cache_with_clean(slot, None::<&mut fn(&_) -> bool>, None, slot)
     }
 
     /// `should_flush_f` is an optional closure that determines whether a given
@@ -5121,6 +5123,7 @@ impl AccountsDb {
         slot: Slot,
         should_flush_f: Option<&mut impl FnMut(&Pubkey) -> bool>,
         max_clean_root: Option<Slot>,
+        min_slot: Slot,
     ) -> Option<FlushStats> {
         if self
             .remove_unrooted_slots_synchronization
@@ -5140,7 +5143,7 @@ impl AccountsDb {
                 // still exists in the cache, we know the slot cannot be removed
                 // by any other threads past this point. We are now responsible for
                 // flushing this slot.
-                self.do_flush_slot_cache(slot, &slot_cache, should_flush_f, max_clean_root)
+                self.do_flush_slot_cache(slot, &slot_cache, should_flush_f, max_clean_root, min_slot)
             });
 
             // Nobody else should have been purging this slot, so should not have been removed
