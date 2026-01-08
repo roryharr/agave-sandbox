@@ -212,6 +212,10 @@ impl AccountsCache {
 
         slot_cache.insert(pubkey, account)
     }
+    pub fn remove_account(&self, slot: Slot, pubkey: &Pubkey)
+    {
+        self.slot_cache(slot).and_then(|slot_cache| slot_cache.remove(pubkey));
+    }
 
     pub fn load(&self, slot: Slot, pubkey: &Pubkey) -> Option<Arc<CachedAccount>> {
         self.slot_cache(slot)

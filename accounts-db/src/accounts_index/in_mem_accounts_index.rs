@@ -425,6 +425,38 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
         current.set_dirty(true);
     }
 
+    pub fn cache(
+        &self,
+        pubkey: &Pubkey,
+        new_value: PreAllocatedAccountMapEntry<T>,
+    )-> bool {
+        let (slot, account_info) = new_value.into();
+        assert!(account_info.is_cached());
+
+       if account_info.is_zero_lamport()
+        {
+            self.get_internal_inner(pubkey, |entry| {
+                    if let Some(entry) = entry
+                    {
+                        Self::cache_entry_at_slot(entry, (slot, account_info));
+                        self.set_age_to_future(entry, true);
+                        (false, false)
+                    } else
+                    {
+                        (false, true)
+                    }
+
+            })
+        } else {
+            self.get_or_create_index_entry_for_pubkey(pubkey, |entry| {
+                Self::cache_entry_at_slot(entry, (slot, account_info));
+                self.set_age_to_future(entry, true);
+
+            });
+            false
+        }
+    }
+
     pub fn upsert(
         &self,
         pubkey: &Pubkey,
@@ -434,13 +466,9 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
         reclaim: UpsertReclaim,
     ) {
         let (slot, account_info) = new_value.into();
-        let is_cached = account_info.is_cached();
+        assert!(!account_info.is_cached());
 
         self.get_or_create_index_entry_for_pubkey(pubkey, |entry| {
-            if is_cached {
-                Self::cache_entry_at_slot(entry, (slot, account_info));
-                self.set_age_to_future(entry, true);
-            } else {
                 let slot_list_length = Self::lock_and_update_slot_list(
                     entry,
                     (slot, account_info),
@@ -449,7 +477,6 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
                     reclaim,
                 );
                 self.set_age_to_future(entry, slot_list_length > 1);
-            }
         });
     }
 
