@@ -3932,6 +3932,13 @@ impl AccountsDb {
         pubkey: &Pubkey,
         should_put_in_read_cache: bool,
     ) -> Option<(AccountSharedData, Slot)> {
+        let (cache_result, found_in_cache) =
+            self.load_into_write_cache(ancestors, pubkey, false, LoadZeroLamports::None);
+
+        if found_in_cache {
+            return cache_result;
+        }
+
         let (slot, storage_location, _maybe_account_accessor) =
             self.read_index_for_accessor_or_load_slow(ancestors, pubkey, None, false)?;
         // Notice the subtle `?` at previous line, we bail out pretty early if missing.
@@ -3998,6 +4005,15 @@ impl AccountsDb {
         assert!(max_root.is_none());
 
         let starting_max_root = self.accounts_index.max_root_inclusive();
+        let (cache_result, found_in_cache) = self.load_into_write_cache(
+            ancestors,
+            pubkey,
+            load_into_read_cache_only,
+            load_zero_lamports,
+        );
+        if found_in_cache {
+            return cache_result;
+        }
 
         let (slot, storage_location, _maybe_account_accessor) =
             self.read_index_for_accessor_or_load_slow(ancestors, pubkey, max_root, false)?;
@@ -4072,6 +4088,49 @@ impl AccountsDb {
             }
         }
         Some((account, slot))
+    }
+
+    fn load_into_write_cache(
+        &self,
+        ancestors: &Ancestors,
+        pubkey: &Pubkey,
+        load_into_read_cache_only: bool,
+        load_zero_lamports: LoadZeroLamports,
+    ) -> (Option<(AccountSharedData, u64)>, bool) {
+        let mut cache_result = None;
+        let mut found_in_cache = false;
+        if let Some(mut slot) = self.accounts_index.is_in_write_cache(pubkey) {
+            // If it's in the write cache, lets start searching!
+            let min_slot = self.accounts_cache.fetch_min_slot();
+            while slot >= min_slot {
+                if let Some(account) = self.accounts_cache.load(slot, pubkey) {
+                    if self.accounts_index.matching_slot(ancestors, slot) {
+                        let new_account = AccountSharedData::clone(&account.account);
+                        drop(account);
+                        found_in_cache = true;
+                        if load_zero_lamports == LoadZeroLamports::None
+                            && new_account.is_zero_lamport()
+                        {
+                            cache_result = None;
+                            break;
+                        }
+                        if !load_into_read_cache_only {
+                            cache_result = Some((new_account.clone(), slot));
+                            break;
+                        } else {
+                            // goal is to load into read cache
+                            cache_result = None;
+                            break;
+                        }
+                    }
+                }
+                if slot == 0 {
+                    break;
+                }
+                slot -= 1;
+            }
+        }
+        (cache_result, found_in_cache)
     }
 
     fn get_account_accessor<'a>(
@@ -4305,7 +4364,10 @@ impl AccountsDb {
             .get_slot_storage_entry_shrinking_in_progress_ok(purged_slot)
             .is_none());
         let mut num_purged_keys = 0;
-        let (reclaims, _) = self.purge_keys_exact(pubkeys.into_iter().map(|key| {
+        let pubkeys_vec: Vec<_> = pubkeys.into_iter().collect();
+        self.accounts_index
+            .purge_keys_cache_exact(pubkeys_vec.iter().copied());
+        let (reclaims, _) = self.purge_keys_exact(pubkeys_vec.into_iter().map(|key| {
             num_purged_keys += 1;
             (key, purged_slot)
         }));
@@ -4834,6 +4896,9 @@ impl AccountsDb {
                     reclaim_method,
                     UpdateIndexThreadSelection::PoolWithThreshold,
                 ));
+            // Clear each pubkey in accounts from the cache
+            self.accounts_index
+                .purge_keys_cache_exact(accounts.iter().map(|(pubkey, _account)| **pubkey));
             flush_stats.store_accounts_timing = store_accounts_timing_inner;
             flush_stats.store_accounts_total_us = Saturating(store_accounts_total_inner_us);
 
@@ -5147,6 +5212,7 @@ impl AccountsDb {
         &self,
         accounts: &impl StorableAccounts<'a>,
         store_account: &BitVec,
+        new_account: &BitVec,
         update_index_thread_selection: UpdateIndexThreadSelection,
     ) {
         let target_slot = accounts.target_slot();
@@ -5159,15 +5225,13 @@ impl AccountsDb {
                     accounts.account(i, |account| {
                         let info =
                             AccountInfo::new(StorageLocation::Cached, account.is_zero_lamport());
-                        self.accounts_index.upsert(
-                            target_slot,
+                        self.accounts_index.upsert_cached(
                             target_slot,
                             account.pubkey(),
                             &account,
                             &self.account_indexes,
                             info,
-                            ReclaimsSlotList::default().as_mut(),
-                            UpsertReclaim::PreviousSlotEntryWasCached,
+                            new_account[i as u64],
                         );
                     });
                 }
@@ -5606,7 +5670,7 @@ impl AccountsDb {
 
         // Store the accounts in the write cache
         let mut store_accounts_time = Measure::start("store_accounts");
-        let (store_account, cache_account_store_stats) =
+        let (store_account, new_account, cache_account_store_stats) =
             self.write_accounts_to_cache(accounts.target_slot(), &accounts);
         store_accounts_time.stop();
         self.stats
@@ -5616,7 +5680,12 @@ impl AccountsDb {
         // Update the index
         let mut update_index_time = Measure::start("update_index");
 
-        self.update_index_cached_accounts(&accounts, &store_account, update_index_thread_selection);
+        self.update_index_cached_accounts(
+            &accounts,
+            &store_account,
+            &new_account,
+            update_index_thread_selection,
+        );
 
         update_index_time.stop();
         self.stats
@@ -5764,11 +5833,12 @@ impl AccountsDb {
         &self,
         slot: Slot,
         accounts_and_meta_to_store: &impl StorableAccounts<'b>,
-    ) -> (BitVec, CacheAccountStoreStats) {
+    ) -> (BitVec, BitVec, CacheAccountStoreStats) {
         let len = accounts_and_meta_to_store.len();
         let mut pubkey_set = HashSet::with_capacity_and_hasher(len, PubkeyHasherBuilder::default());
         let mut cache_account_store_stats = CacheAccountStoreStats::default();
         let mut store_account = BitVec::new_fill(false, len as u64);
+        let mut new_account = BitVec::new_fill(false, len as u64);
 
         (0..len).rev().for_each(|index| {
             accounts_and_meta_to_store.account_default_if_zero_lamport(index, |account| {
@@ -5789,13 +5859,17 @@ impl AccountsDb {
                     return;
                 }
 
-                self.accounts_cache
-                    .store(slot, pubkey, account.take_account());
+                new_account.set(
+                    index as u64,
+                    self.accounts_cache
+                        .store(slot, pubkey, account.take_account()),
+                );
+
                 store_account.set(index as u64, true);
             })
         });
 
-        (store_account, cache_account_store_stats)
+        (store_account, new_account, cache_account_store_stats)
     }
 
     fn write_accounts_to_storage<'a>(
@@ -7047,10 +7121,7 @@ impl AccountsDb {
         for i in 0..accounts.len() {
             if accounts.is_zero_lamport(i) {
                 let key = *accounts.pubkey(i);
-                if self
-                    .accounts_index
-                    .get_and_then(&key, |account| (true, account.is_none()))
-                {
+                if !self.accounts_index.contains(&key) {
                     // Account is not in the index, need to pre-populate with placeholder
                     pre_populate_zero_lamport.push((key, placeholder.clone()));
                 }

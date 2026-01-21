@@ -14,6 +14,7 @@ use {
     account_map_entry::{AccountMapEntry, PreAllocatedAccountMapEntry, SlotListWriteGuard},
     accounts_index_storage::AccountsIndexStorage,
     bucket_map_holder::Age,
+    dashmap::DashMap,
     in_mem_accounts_index::{
         ExistedLocation, InMemAccountsIndex, InsertNewEntryResults, StartupStats,
     },
@@ -27,7 +28,7 @@ use {
     solana_account::ReadableAccount,
     solana_clock::{BankId, Slot},
     solana_measure::measure::Measure,
-    solana_pubkey::Pubkey,
+    solana_pubkey::{Pubkey, PubkeyHasherBuilder},
     stats::Stats,
     std::{
         collections::{btree_map::BTreeMap, HashSet},
@@ -344,6 +345,8 @@ pub struct AccountsIndex<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> {
     pub active_scans: AtomicUsize,
     /// # of slots between latest max and latest scan
     pub max_distance_to_min_scan_slot: AtomicU64,
+
+    pub cached_account_maps: DashMap<Pubkey, (u64, u64), PubkeyHasherBuilder>,
 }
 
 impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> AccountsIndex<T, U> {
@@ -376,6 +379,7 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> AccountsIndex<T, U> {
             roots_removed: AtomicUsize::default(),
             active_scans: AtomicUsize::default(),
             max_distance_to_min_scan_slot: AtomicU64::default(),
+            cached_account_maps: DashMap::default(),
         }
     }
 
@@ -847,7 +851,10 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> AccountsIndex<T, U> {
 
     /// Is `pubkey` in the index?
     pub fn contains(&self, pubkey: &Pubkey) -> bool {
-        self.get_and_then(pubkey, |entry| (false, entry.is_some()))
+        if self.is_in_write_cache(pubkey).is_none() {
+            return self.get_and_then(pubkey, |entry| (false, entry.is_some()));
+        }
+        true
     }
 
     /// Is `pubkey`, with `ancestors` and `max_root`, in the index?
@@ -1020,6 +1027,23 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> AccountsIndex<T, U> {
         }
 
         rv.map(|index| slot_list.len() - 1 - index)
+    }
+
+    /// Like `latest_slot` but for a single `slot` value. Returns `Some(slot)` if the slot
+    /// would be considered the latest visible entry (either present in `ancestors` or
+    /// a live root <= `max_root_inclusive`), otherwise `None`.
+    pub(crate) fn matching_slot(&self, ancestors: &Ancestors, slot: Slot) -> bool {
+        // If ancestors explicitly contains this slot, prefer that.
+        if !ancestors.is_empty() && ancestors.contains_key(&slot) {
+            return true;
+        }
+
+        let roots_tracker = self.roots_tracker.read().unwrap();
+        if roots_tracker.alive_roots.contains(&slot) {
+            return true;
+        }
+
+        false
     }
 
     pub(crate) fn stats(&self) -> &Stats {
@@ -1422,6 +1446,61 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> AccountsIndex<T, U> {
                 }
             })
             .for_each(f);
+    }
+
+    /// Updates the given pubkey at the given slot with the new account information.
+    /// on return, the index's previous account info may be returned in 'reclaims' depending on 'previous_slot_entry_was_cached'
+    pub fn upsert_cached(
+        &self,
+        new_slot: Slot,
+        pubkey: &Pubkey,
+        account: &impl ReadableAccount,
+        account_indexes: &AccountSecondaryIndexes,
+        account_info: T,
+        is_new: bool,
+    ) {
+        let new_item =
+            PreAllocatedAccountMapEntry::new(new_slot, account_info, &self.storage.storage, true);
+        let map = self.get_bin(pubkey);
+        if is_new {
+            self.insert_cached_index_if_missing(pubkey, new_slot);
+        }
+        map.upsert_cached(pubkey, new_item);
+        self.update_secondary_indexes(pubkey, account, account_indexes);
+    }
+
+    pub fn purge_keys_cache_exact(&self, pubkeys: impl IntoIterator<Item = Pubkey>) {
+        for pubkey in pubkeys {
+            // Acquire a reference to the entry, copy the data out, then drop the guard
+            // before doing any mutation (remove/insert) to avoid deadlocking the DashMap.
+            if let dashmap::mapref::entry::Entry::Occupied(mut occupied_entry) =
+                self.cached_account_maps.entry(pubkey)
+            {
+                let (_slot, count) = occupied_entry.get_mut();
+                *count -= 1;
+                if *count == 0 {
+                    occupied_entry.remove_entry();
+                }
+            } else {
+                panic!();
+            }
+        }
+    }
+
+    pub fn is_in_write_cache(&self, pubkey: &Pubkey) -> Option<Slot> {
+        self.cached_account_maps
+            .get(pubkey)
+            .map(|account| account.0)
+    }
+
+    fn insert_cached_index_if_missing(&self, pubkey: &Pubkey, slot: Slot) {
+        self.cached_account_maps
+            .entry(*pubkey)
+            .and_modify(|(stored_slot, count)| {
+                *stored_slot = slot.max(*stored_slot);
+                *count += 1;
+            })
+            .or_insert((slot, 1));
     }
 
     /// Updates the given pubkey at the given slot with the new account information.
@@ -2289,16 +2368,27 @@ mod tests {
         match upsert_method {
             Some(upsert_method) => {
                 // insert first entry for pubkey. This will use new_entry_after_update and not call update.
-                index.upsert(
-                    slot0,
-                    slot0,
-                    &key,
-                    &AccountSharedData::default(),
-                    &AccountSecondaryIndexes::default(),
-                    account_infos[0],
-                    &mut gc,
-                    upsert_method,
-                );
+                if is_cached {
+                    index.upsert_cached(
+                        slot0,
+                        &key,
+                        &AccountSharedData::default(),
+                        &AccountSecondaryIndexes::default(),
+                        account_infos[0],
+                        true,
+                    );
+                } else {
+                    index.upsert(
+                        slot0,
+                        slot0,
+                        &key,
+                        &AccountSharedData::default(),
+                        &AccountSecondaryIndexes::default(),
+                        account_infos[0],
+                        &mut gc,
+                        upsert_method,
+                    );
+                }
             }
             None => {
                 let mut items = vec![(key, account_infos[0])];
@@ -2331,16 +2421,27 @@ mod tests {
         match upsert_method {
             Some(upsert_method) => {
                 // insert second entry for pubkey. This will use update and NOT use new_entry_after_update.
-                index.upsert(
-                    slot1,
-                    slot1,
-                    &key,
-                    &AccountSharedData::default(),
-                    &AccountSecondaryIndexes::default(),
-                    account_infos[1],
-                    &mut gc,
-                    upsert_method,
-                );
+                if is_cached {
+                    index.upsert_cached(
+                        slot1,
+                        &key,
+                        &AccountSharedData::default(),
+                        &AccountSecondaryIndexes::default(),
+                        account_infos[1],
+                        true,
+                    );
+                } else {
+                    index.upsert(
+                        slot1,
+                        slot1,
+                        &key,
+                        &AccountSharedData::default(),
+                        &AccountSecondaryIndexes::default(),
+                        account_infos[1],
+                        &mut gc,
+                        upsert_method,
+                    );
+                }
             }
             None => {
                 // this has the effect of aging out everything in the in-mem cache
@@ -2401,21 +2502,11 @@ mod tests {
 
     #[test_matrix(
         [false, true],
-        [None, Some(UpsertReclaim::PopulateReclaims), Some(UpsertReclaim::ReclaimOldSlots)],
-        [true, false]
+        [None, Some(UpsertReclaim::PopulateReclaims), Some(UpsertReclaim::ReclaimOldSlots)]
     )]
-    fn test_new_entry_and_update_code_paths(
-        use_disk: bool,
-        upsert_method: Option<UpsertReclaim>,
-        is_cached: bool,
-    ) {
-        if is_cached {
-            // account_info type that IS cached
-            test_new_entry_code_paths_helper([1.0, 2.0], true, upsert_method, use_disk);
-        } else {
-            // account_info type that is NOT cached
-            test_new_entry_code_paths_helper([1, 2], false, upsert_method, use_disk);
-        }
+    fn test_new_entry_and_update_code_paths(use_disk: bool, upsert_method: Option<UpsertReclaim>) {
+        // account_info type that is NOT cached
+        test_new_entry_code_paths_helper([1, 2], false, upsert_method, use_disk);
     }
 
     #[test]
@@ -2506,97 +2597,50 @@ mod tests {
     }
     #[test]
     fn test_insert_ignore_reclaims() {
-        {
-            // non-cached
-            let key = solana_pubkey::new_rand();
-            let index = AccountsIndex::<u64, u64>::default_for_tests();
-            let mut reclaims = ReclaimsSlotList::new();
-            let slot = 0;
-            let value = 1;
-            assert!(!value.is_cached());
-            index.upsert(
-                slot,
-                slot,
-                &key,
-                &AccountSharedData::default(),
-                &AccountSecondaryIndexes::default(),
-                value,
-                &mut reclaims,
-                UpsertReclaim::PopulateReclaims,
-            );
-            assert!(reclaims.is_empty());
-            index.upsert(
-                slot,
-                slot,
-                &key,
-                &AccountSharedData::default(),
-                &AccountSecondaryIndexes::default(),
-                value,
-                &mut reclaims,
-                UpsertReclaim::PopulateReclaims,
-            );
-            // reclaimed
-            assert!(!reclaims.is_empty());
-            reclaims.clear();
-            index.upsert(
-                slot,
-                slot,
-                &key,
-                &AccountSharedData::default(),
-                &AccountSecondaryIndexes::default(),
-                value,
-                &mut reclaims,
-                // since IgnoreReclaims, we should expect reclaims to be empty
-                UpsertReclaim::IgnoreReclaims,
-            );
-            // reclaims is ignored
-            assert!(reclaims.is_empty());
-        }
-        {
-            // cached
-            let key = solana_pubkey::new_rand();
-            let index = AccountsIndex::<AccountInfoTest, AccountInfoTest>::default_for_tests();
-            let mut reclaims = ReclaimsSlotList::new();
-            let slot = 0;
-            let value = 1.0;
-            assert!(value.is_cached());
-            index.upsert(
-                slot,
-                slot,
-                &key,
-                &AccountSharedData::default(),
-                &AccountSecondaryIndexes::default(),
-                value,
-                &mut reclaims,
-                UpsertReclaim::PopulateReclaims,
-            );
-            assert!(reclaims.is_empty());
-            index.upsert(
-                slot,
-                slot,
-                &key,
-                &AccountSharedData::default(),
-                &AccountSecondaryIndexes::default(),
-                value,
-                &mut reclaims,
-                UpsertReclaim::PopulateReclaims,
-            );
-            // No reclaims, since the entry replaced was cached
-            assert!(reclaims.is_empty());
-            index.upsert(
-                slot,
-                slot,
-                &key,
-                &AccountSharedData::default(),
-                &AccountSecondaryIndexes::default(),
-                value,
-                &mut reclaims,
-                // since IgnoreReclaims, we should expect reclaims to be empty
-                UpsertReclaim::IgnoreReclaims,
-            );
-            // reclaims is ignored
-            assert!(reclaims.is_empty());
-        }
+        // non-cached
+        let key = solana_pubkey::new_rand();
+        let index = AccountsIndex::<u64, u64>::default_for_tests();
+        let mut reclaims = ReclaimsSlotList::new();
+        let slot = 0;
+        let value = 1;
+        assert!(!value.is_cached());
+        index.upsert(
+            slot,
+            slot,
+            &key,
+            &AccountSharedData::default(),
+            &AccountSecondaryIndexes::default(),
+            value,
+            &mut reclaims,
+            UpsertReclaim::PopulateReclaims,
+        );
+        assert!(reclaims.is_empty());
+        index.upsert(
+            slot,
+            slot,
+            &key,
+            &AccountSharedData::default(),
+            &AccountSecondaryIndexes::default(),
+            value,
+            &mut reclaims,
+            UpsertReclaim::PopulateReclaims,
+        );
+        // reclaimed
+        assert!(!reclaims.is_empty());
+        reclaims.clear();
+        index.upsert(
+            slot,
+            slot,
+            &key,
+            &AccountSharedData::default(),
+            &AccountSecondaryIndexes::default(),
+            value,
+            &mut reclaims,
+            // since IgnoreReclaims, we should expect reclaims to be empty
+            UpsertReclaim::IgnoreReclaims,
+        );
+        // reclaims is ignored
+        assert!(reclaims.is_empty());
     }
 
     #[test]
@@ -2979,15 +3023,13 @@ mod tests {
         let index =
             AccountsIndex::<CacheableIndexValueTest, CacheableIndexValueTest>::default_for_tests();
         let mut reclaims = ReclaimsSlotList::new();
-        index.upsert(
-            0,
+        index.upsert_cached(
             0,
             &key,
             &AccountSharedData::default(),
             &AccountSecondaryIndexes::default(),
             CacheableIndexValueTest(true),
-            &mut reclaims,
-            UPSERT_RECLAIM_TEST_DEFAULT,
+            true,
         );
         // No reclaims should be returned on the first item
         assert!(reclaims.is_empty());
@@ -3316,27 +3358,23 @@ mod tests {
             UpsertReclaim::IgnoreReclaims,
         );
 
-        index.upsert(
-            1,
+        index.upsert_cached(
             1,
             &key,
             &AccountSharedData::default(),
             &AccountSecondaryIndexes::default(),
             CacheableIndexValueTest(true),
-            &mut gc,
-            UpsertReclaim::IgnoreReclaims,
+            true,
         );
 
         // Now insert a cached account at slot 2
-        index.upsert(
-            2,
+        index.upsert_cached(
             2,
             &key,
             &AccountSharedData::default(),
             &AccountSecondaryIndexes::default(),
             CacheableIndexValueTest(true),
-            &mut gc,
-            UpsertReclaim::IgnoreReclaims,
+            true,
         );
 
         // Replace the cached account at slot 2 with a uncached account
