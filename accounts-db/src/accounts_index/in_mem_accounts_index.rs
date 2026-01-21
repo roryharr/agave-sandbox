@@ -425,6 +425,16 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
         current.set_dirty(true);
     }
 
+    pub fn upsert_cached(&self, pubkey: &Pubkey, new_value: PreAllocatedAccountMapEntry<T>) {
+        let (slot, account_info) = new_value.into();
+        assert!(account_info.is_cached());
+
+        self.get_or_create_index_entry_for_pubkey(pubkey, |entry| {
+            Self::cache_entry_at_slot(entry, (slot, account_info));
+            self.set_age_to_future(entry, true);
+        });
+    }
+
     pub fn upsert(
         &self,
         pubkey: &Pubkey,
@@ -434,22 +444,17 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
         reclaim: UpsertReclaim,
     ) {
         let (slot, account_info) = new_value.into();
-        let is_cached = account_info.is_cached();
+        assert!(!account_info.is_cached());
 
         self.get_or_create_index_entry_for_pubkey(pubkey, |entry| {
-            if is_cached {
-                Self::cache_entry_at_slot(entry, (slot, account_info));
-                self.set_age_to_future(entry, true);
-            } else {
-                let slot_list_length = Self::lock_and_update_slot_list(
-                    entry,
-                    (slot, account_info),
-                    other_slot,
-                    reclaims,
-                    reclaim,
-                );
-                self.set_age_to_future(entry, slot_list_length > 1);
-            }
+            let slot_list_length = Self::lock_and_update_slot_list(
+                entry,
+                (slot, account_info),
+                other_slot,
+                reclaims,
+                reclaim,
+            );
+            self.set_age_to_future(entry, slot_list_length > 1);
         });
     }
 

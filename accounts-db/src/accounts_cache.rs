@@ -69,13 +69,15 @@ impl SlotCache {
         );
     }
 
-    pub fn insert(&self, pubkey: &Pubkey, account: AccountSharedData) -> Arc<CachedAccount> {
+    pub fn insert(&self, pubkey: &Pubkey, account: AccountSharedData) -> bool {
         let data_len = account.data().len() as u64;
+        let mut is_new = true;
         let item = Arc::new(CachedAccount {
             account,
             pubkey: *pubkey,
         });
         if let Some(old) = self.cache.insert(*pubkey, item.clone()) {
+            is_new = false;
             self.same_account_writes.fetch_add(1, Ordering::Relaxed);
             self.same_account_writes_size
                 .fetch_add(data_len, Ordering::Relaxed);
@@ -100,7 +102,7 @@ impl SlotCache {
             self.accounts_count.fetch_add(1, Ordering::Relaxed);
             self.total_accounts_count.fetch_add(1, Ordering::Relaxed);
         }
-        item
+        is_new
     }
 
     pub fn get_cloned(&self, pubkey: &Pubkey) -> Option<Arc<CachedAccount>> {
@@ -145,7 +147,7 @@ impl CachedAccount {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct AccountsCache {
     cache: DashMap<Slot, Arc<SlotCache>, BuildNoHashHasher<Slot>>,
     // Queue of potentially unflushed roots. Random eviction + cache too large
@@ -156,6 +158,24 @@ pub struct AccountsCache {
     total_size: Arc<AtomicU64>,
     /// The number of accounts stored in the whole AccountsCache
     total_accounts_counts: Arc<AtomicU64>,
+    /// The minimum slot currently in the cache
+    min_slot: AtomicU64,
+    /// The maximum slot currently in the cache
+    max_slot: AtomicU64,
+}
+
+impl Default for AccountsCache {
+    fn default() -> Self {
+        Self {
+            cache: DashMap::default(),
+            maybe_unflushed_roots: RwLock::default(),
+            max_flushed_root: AtomicU64::default(),
+            total_size: Arc::default(),
+            total_accounts_counts: Arc::default(),
+            min_slot: AtomicU64::new(u64::MAX),
+            max_slot: AtomicU64::default(),
+        }
+    }
 }
 
 impl AccountsCache {
@@ -193,22 +213,21 @@ impl AccountsCache {
         );
     }
 
-    pub fn store(
-        &self,
-        slot: Slot,
-        pubkey: &Pubkey,
-        account: AccountSharedData,
-    ) -> Arc<CachedAccount> {
-        let slot_cache = self.slot_cache(slot).unwrap_or_else(||
+    pub fn store(&self, slot: Slot, pubkey: &Pubkey, account: AccountSharedData) -> bool {
+        let slot_cache = self.slot_cache(slot).unwrap_or_else(|| {
             // DashMap entry.or_insert() returns a RefMut, essentially a write lock,
             // which is dropped after this block ends, minimizing time held by the lock.
             // However, we still want to persist the reference to the `SlotStores` behind
             // the lock, hence we clone it out, (`SlotStores` is an Arc so is cheap to clone).
-            self
-                .cache
+            // Update min_slot if this is the first slot or if slot is smaller
+            self.min_slot.fetch_min(slot, Ordering::Release);
+            // Update max_slot if slot is larger
+            self.max_slot.fetch_max(slot, Ordering::Release);
+            self.cache
                 .entry(slot)
                 .or_insert_with(|| self.new_inner())
-                .clone());
+                .clone()
+        });
 
         slot_cache.insert(pubkey, account)
     }
@@ -219,7 +238,18 @@ impl AccountsCache {
     }
 
     pub fn remove_slot(&self, slot: Slot) -> Option<Arc<SlotCache>> {
-        self.cache.remove(&slot).map(|(_, slot_cache)| slot_cache)
+        let result = self.cache.remove(&slot).map(|(_, slot_cache)| slot_cache);
+
+        // If we removed the min slot, recalculate it
+        if slot == self.min_slot.load(Ordering::Acquire) {
+            // Search upwards from the removed slot to find the next min
+            let max_slot = self.max_slot.load(Ordering::Acquire);
+            let new_min = (slot + 1..=max_slot)
+                .find(|s| self.cache.contains_key(s))
+                .unwrap_or(max_slot);
+            self.min_slot.store(new_min, Ordering::Release);
+        }
+        result
     }
 
     pub fn slot_cache(&self, slot: Slot) -> Option<Arc<SlotCache>> {
@@ -270,6 +300,14 @@ impl AccountsCache {
     pub fn set_max_flush_root(&self, root: Slot) {
         self.max_flushed_root.fetch_max(root, Ordering::Release);
     }
+
+    pub fn fetch_max_slot(&self) -> Slot {
+        self.max_slot.load(Ordering::Acquire)
+    }
+
+    pub fn fetch_min_slot(&self) -> Slot {
+        self.min_slot.load(Ordering::Acquire)
+    }
 }
 
 #[cfg(test)]
@@ -297,6 +335,7 @@ mod tests {
         let cache = AccountsCache::default();
         // Cache is empty, should return nothing
         assert!(cache.remove_slots_le(1).is_empty());
+        assert_eq!(cache.fetch_min_slot(), u64::MAX);
         let inserted_slot = 0;
         cache.store(
             inserted_slot,
@@ -307,6 +346,7 @@ mod tests {
         let removed = cache.remove_slots_le(0);
         assert_eq!(removed.len(), 1);
         assert_eq!(removed[0].0, inserted_slot);
+        assert_eq!(cache.fetch_min_slot(), cache.fetch_max_slot());
     }
 
     #[test]
