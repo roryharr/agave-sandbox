@@ -4399,44 +4399,29 @@ impl Bank {
 
     pub fn get_program_accounts(
         &self,
-        program_id: &Pubkey,
-        config: &ScanConfig,
+        _program_id: &Pubkey,
+        _config: &ScanConfig,
     ) -> ScanResult<Vec<KeyedAccountSharedData>> {
-        self.rc
-            .accounts
-            .load_by_program(&self.ancestors, self.bank_id, program_id, config)
+        unimplemented!("Indexed accounts are not supported in Banks");
     }
 
     pub fn get_filtered_program_accounts<F: Fn(&AccountSharedData) -> bool>(
         &self,
-        program_id: &Pubkey,
-        filter: F,
-        config: &ScanConfig,
+        _program_id: &Pubkey,
+        _filter: F,
+        _config: &ScanConfig,
     ) -> ScanResult<Vec<KeyedAccountSharedData>> {
-        self.rc.accounts.load_by_program_with_filter(
-            &self.ancestors,
-            self.bank_id,
-            program_id,
-            filter,
-            config,
-        )
+        unimplemented!("Indexed accounts are not supported in Banks");
     }
 
     pub fn get_filtered_indexed_accounts<F: Fn(&AccountSharedData) -> bool>(
         &self,
-        index_key: &IndexKey,
-        filter: F,
-        config: &ScanConfig,
-        byte_limit_for_scan: Option<usize>,
+        _index_key: &IndexKey,
+        _filter: F,
+        _config: &ScanConfig,
+        _byte_limit_for_scan: Option<usize>,
     ) -> ScanResult<Vec<KeyedAccountSharedData>> {
-        self.rc.accounts.load_by_index_key_with_filter(
-            &self.ancestors,
-            self.bank_id,
-            index_key,
-            filter,
-            config,
-            byte_limit_for_scan,
-        )
+        unimplemented!("Indexed accounts are not supported in Banks");
     }
 
     pub fn account_indexes_include_key(&self, key: &Pubkey) -> bool {
@@ -4500,19 +4485,12 @@ impl Bank {
 
     pub fn get_largest_accounts(
         &self,
-        num: usize,
-        filter_by_address: &HashSet<Pubkey>,
-        filter: AccountAddressFilter,
-        sort_results: bool,
+        _num: usize,
+        _filter_by_address: &HashSet<Pubkey>,
+        _filter: AccountAddressFilter,
+        _sort_results: bool,
     ) -> ScanResult<Vec<(Pubkey, u64)>> {
-        self.rc.accounts.load_largest_accounts(
-            &self.ancestors,
-            self.bank_id,
-            num,
-            filter_by_address,
-            filter,
-            sort_results,
-        )
+        unimplemented!("Indexed accounts are not supported in Banks");
     }
 
     /// Return the accumulated executed transaction count
@@ -6044,13 +6022,6 @@ impl Bank {
 
     pub fn get_sysvar_cache_for_tests(&self) -> SysvarCache {
         self.transaction_processor.get_sysvar_cache_for_tests()
-    }
-
-    pub fn calculate_accounts_lt_hash_for_tests(&self) -> AccountsLtHash {
-        self.rc
-            .accounts
-            .accounts_db
-            .calculate_accounts_lt_hash_at_startup_from_index(&self.ancestors, self.slot)
     }
 
     pub fn get_transaction_processor(&self) -> &TransactionBatchProcessor<BankForks> {
