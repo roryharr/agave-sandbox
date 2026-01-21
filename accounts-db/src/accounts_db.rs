@@ -5156,22 +5156,17 @@ impl AccountsDb {
 
         let update = |start, end| {
             (start..end).for_each(|i| {
-                if store_account[i as u64] {
-                    accounts.account(i, |account| {
-                        let info =
-                            AccountInfo::new(StorageLocation::Cached, account.is_zero_lamport());
-                        self.accounts_index.upsert(
-                            target_slot,
-                            target_slot,
-                            account.pubkey(),
-                            &account,
-                            &self.account_indexes,
-                            info,
-                            ReclaimsSlotList::default().as_mut(),
-                            UpsertReclaim::PreviousSlotEntryWasCached,
-                        );
-                    });
-                }
+                accounts.account(i, |account| {
+                    let info = infos[i];
+                    debug_assert!(info.is_cached());
+                    self.accounts_index.upsert_cached(
+                        target_slot,
+                        account.pubkey(),
+                        &account,
+                        &self.account_indexes,
+                        info,
+                    );
+                });
             });
         };
 
