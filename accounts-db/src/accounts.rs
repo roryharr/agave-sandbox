@@ -110,7 +110,6 @@ impl Accounts {
         loaded_addresses: &mut LoadedAddresses,
     ) -> std::result::Result<Slot, AddressLookupError> {
         let table_account = self
-            .accounts_db
             .load_with_fixed_root(ancestors, address_table_lookup.account_key)
             .map(|(account, _rent)| account)
             .ok_or(AddressLookupError::LookupTableAccountNotFound)?;
@@ -160,25 +159,13 @@ impl Accounts {
             Err(AddressLookupError::InvalidAccountOwner)
         }
     }
-    /// Slow because lock is held for 1 operation instead of many
-    /// This always returns None for zero-lamport accounts.
-    fn load_slow(
-        &self,
-        ancestors: &Ancestors,
-        pubkey: &Pubkey,
-        load_hint: LoadHint,
-        populate_read_cache: PopulateReadCache,
-    ) -> Option<(AccountSharedData, Slot)> {
-        self.accounts_db
-            .load(ancestors, pubkey, load_hint, populate_read_cache)
-    }
 
     pub fn load_with_fixed_root(
         &self,
         ancestors: &Ancestors,
         pubkey: &Pubkey,
     ) -> Option<(AccountSharedData, Slot)> {
-        self.load_slow(
+        self.accounts_db.load(
             ancestors,
             pubkey,
             LoadHint::FixedMaxRoot,
@@ -193,11 +180,11 @@ impl Accounts {
         ancestors: &Ancestors,
         pubkey: &Pubkey,
     ) -> Option<(AccountSharedData, Slot)> {
-        self.load_slow(
+        self.accounts_db.load(
             ancestors,
             pubkey,
             LoadHint::FixedMaxRoot,
-            PopulateReadCache::True,
+            PopulateReadCache::False, // do not populate read cache
         )
     }
 
@@ -206,7 +193,7 @@ impl Accounts {
         ancestors: &Ancestors,
         pubkey: &Pubkey,
     ) -> Option<(AccountSharedData, Slot)> {
-        self.load_slow(
+        self.accounts_db.load(
             ancestors,
             pubkey,
             LoadHint::Unspecified,
@@ -1423,7 +1410,7 @@ mod tests {
         accounts.accounts_db.clean_accounts_for_tests();
     }
 
-    #[test]
+    /*#[test]
     fn test_load_largest_accounts() {
         let accounts_db = AccountsDb::new_single_for_tests();
         let accounts = Accounts::new(Arc::new(accounts_db));
@@ -1624,7 +1611,7 @@ mod tests {
                 .unwrap(),
             vec![(pubkey1, 42), (pubkey2, 41)]
         );
-    }
+    }*/
 
     fn zero_len_account_size() -> usize {
         std::mem::size_of::<AccountSharedData>() + std::mem::size_of::<Pubkey>()

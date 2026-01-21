@@ -63,7 +63,6 @@ use {
         utils::{self, create_account_shared_data},
     },
     agave_fs::buffered_reader::RequiredLenBufFileRead,
-    bv::BitVec,
     dashmap::{DashMap, DashSet},
     log::*,
     rand::{Rng, rng},
@@ -255,20 +254,6 @@ pub enum StoreReclaims {
     Default,
     /// do not return reclaims from accounts index upsert
     Ignore,
-}
-
-/// specifies how to return zero lamport accounts from a load
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum LoadZeroLamports {
-    /// return None if loaded account has zero lamports
-    None,
-    /// return Some(account with zero lamports) if loaded account has zero lamports
-    /// This used to be the only behavior.
-    /// Note that this is non-deterministic if clean is running asynchronously.
-    /// If a zero lamport account exists in the index, then Some is returned.
-    /// Once it is cleaned from the index, None is returned.
-    #[cfg(feature = "dev-context-only-utils")]
-    SomeWithZeroLamportAccountForTests,
 }
 
 #[derive(Debug)]
@@ -1395,6 +1380,8 @@ impl AccountsDb {
                 let is_empty = self
                     .accounts_index
                     .purge_exact(&pubkey, slots_set, &mut reclaims);
+                self.read_only_accounts_cache
+                    .remove_assume_not_present(&pubkey);
                 if is_empty {
                     dead_keys.push(pubkey);
                 }
@@ -3585,41 +3572,19 @@ impl AccountsDb {
         load_hint: LoadHint,
         populate_read_cache: PopulateReadCache,
     ) -> Option<(AccountSharedData, Slot)> {
-        self.do_load(
-            ancestors,
-            pubkey,
-            None,
-            load_hint,
-            LoadZeroLamports::None,
-            populate_read_cache,
-        )
-    }
-
-    /// note this returns None for accounts with zero lamports
-    pub fn load_with_fixed_root(
-        &self,
-        ancestors: &Ancestors,
-        pubkey: &Pubkey,
-    ) -> Option<(AccountSharedData, Slot)> {
-        self.load(
-            ancestors,
-            pubkey,
-            LoadHint::FixedMaxRoot,
-            PopulateReadCache::True,
-        )
+        self.do_load(ancestors, pubkey, load_hint, populate_read_cache)
     }
 
     fn read_index_for_accessor_or_load_slow<'a>(
         &'a self,
         ancestors: &Ancestors,
         pubkey: &'a Pubkey,
-        max_root: Option<Slot>,
         clone_in_lock: bool,
     ) -> Option<(Slot, StorageLocation, Option<LoadedAccountAccessor<'a>>)> {
         self.accounts_index.get_with_and_then(
             pubkey,
             Some(ancestors),
-            max_root,
+            None,
             true,
             |(slot, account_info)| {
                 let storage_location = account_info.storage_location();
@@ -3630,13 +3595,10 @@ impl AccountsDb {
         )
     }
 
-    fn retry_to_get_account_accessor<'a>(
+    fn get_account_accessor_read<'a>(
         &'a self,
-        mut slot: Slot,
-        mut storage_location: StorageLocation,
         ancestors: &'a Ancestors,
         pubkey: &'a Pubkey,
-        max_root: Option<Slot>,
         load_hint: LoadHint,
     ) -> Option<(LoadedAccountAccessor<'a>, Slot)> {
         // Happy drawing time! :)
@@ -3751,7 +3713,19 @@ impl AccountsDb {
         // Failsafe for potential race conditions with other subsystems
         let mut num_acceptable_failed_iterations = 0;
         loop {
-            let account_accessor = self.get_account_accessor(slot, pubkey, &storage_location);
+            let (slot, account_accessor) = self.accounts_index.get_with_and_then(
+                pubkey,
+                Some(ancestors),
+                None,
+                true,
+                |(slot, account_info)| {
+                    let storage_location = account_info.storage_location();
+                    let account_accessor =
+                        self.get_account_accessor(slot, pubkey, &storage_location);
+                    (slot, account_accessor)
+                },
+            )?;
+
             match account_accessor {
                 LoadedAccountAccessor::Cached(Some(_)) | LoadedAccountAccessor::Stored(Some(_)) => {
                     // Great! There was no race, just return :) This is the most usual situation
@@ -3836,65 +3810,20 @@ impl AccountsDb {
                 // The latest version of the account existed in the index, but could not be
                 // fetched from storage. This means a race occurred between this function and clean
                 // accounts/purge_slots
-                let message = format!(
-                    "do_load() failed to get key: {pubkey} from storage, latest attempt was for \
-                     slot: {slot}, storage_location: {storage_location:?}, load_hint: \
-                     {load_hint:?}",
-                );
-                datapoint_warn!("accounts_db-do_load_warn", ("warn", message, String));
                 true
             } else {
                 false
             };
 
             // Because reading from the cache/storage failed, retry from the index read
-            let (new_slot, new_storage_location, maybe_account_accessor) = self
-                .read_index_for_accessor_or_load_slow(
-                    ancestors,
-                    pubkey,
-                    max_root,
-                    fallback_to_slow_path,
-                )?;
+            let (new_slot, _, maybe_account_accessor) = self.read_index_for_accessor_or_load_slow(
+                ancestors,
+                pubkey,
+                fallback_to_slow_path,
+            )?;
             // Notice the subtle `?` at previous line, we bail out pretty early if missing.
 
-            if new_slot == slot && new_storage_location.is_store_id_equal(&storage_location) {
-                self.accounts_index
-                    .get_and_then(pubkey, |entry| -> (_, ()) {
-                        let message = format!(
-                            "Bad index entry detected ({pubkey}, {slot}, {storage_location:?}, \
-                             {load_hint:?}, {new_storage_location:?}, {entry:?})"
-                        );
-                        // Considering that we've failed to get accessor above and further that
-                        // the index still returned the same (slot, store_id) tuple, offset must be same
-                        // too.
-                        assert!(
-                            new_storage_location.is_offset_equal(&storage_location),
-                            "{message}"
-                        );
-
-                        // If the entry was missing from the cache, that means it must have been flushed,
-                        // and the accounts index is always updated before cache flush, so store_id must
-                        // not indicate being cached at this point.
-                        assert!(!new_storage_location.is_cached(), "{message}");
-
-                        // If this is not a cache entry, then this was a minor fork slot
-                        // that had its storage entries cleaned up by purge_slots() but hasn't been
-                        // cleaned yet. That means this must be rpc access and not replay/banking at the
-                        // very least. Note that purge shouldn't occur even for RPC as caller must hold all
-                        // of ancestor slots..
-                        assert_eq!(load_hint, LoadHint::Unspecified, "{message}");
-
-                        // Everything being assert!()-ed, let's panic!() here as it's an error condition
-                        // after all....
-                        // That reasoning is based on the fact all of code-path reaching this fn
-                        // retry_to_get_account_accessor() must outlive the Arc<Bank> (and its all
-                        // ancestors) over this fn invocation, guaranteeing the prevention of being purged,
-                        // first of all.
-                        // For details, see the comment in AccountIndex::do_checked_scan_accounts(),
-                        // which is referring back here.
-                        panic!("{message}");
-                    });
-            } else if fallback_to_slow_path {
+            if fallback_to_slow_path {
                 // the above bad-index-entry check must had been checked first to retain the same
                 // behavior
                 return Some((
@@ -3902,9 +3831,26 @@ impl AccountsDb {
                     new_slot,
                 ));
             }
+        }
+    }
 
-            slot = new_slot;
-            storage_location = new_storage_location;
+    fn select_most_recent_account(
+        stored_account: (AccountSharedData, Slot),
+        cached_slot: Option<Slot>,
+        cached_account: Option<(AccountSharedData, Slot)>,
+    ) -> (Option<(AccountSharedData, Slot)>, bool) {
+        if let Some(cached_slot) = cached_slot {
+            if cached_slot >= stored_account.1 {
+                (cached_account, true)
+            } else if stored_account.0.is_zero_lamport() {
+                (None, false)
+            } else {
+                (Some(stored_account), false)
+            }
+        } else if stored_account.0.is_zero_lamport() {
+            (None, false)
+        } else {
+            (Some(stored_account), false)
         }
     }
 
@@ -3912,85 +3858,44 @@ impl AccountsDb {
         &self,
         ancestors: &Ancestors,
         pubkey: &Pubkey,
-        max_root: Option<Slot>,
         load_hint: LoadHint,
-        load_zero_lamports: LoadZeroLamports,
         populate_read_cache: PopulateReadCache,
     ) -> Option<(AccountSharedData, Slot)> {
-        self.do_load_with_populate_read_cache(
-            ancestors,
-            pubkey,
-            max_root,
-            load_hint,
-            load_zero_lamports,
-            populate_read_cache,
-        )
-    }
-
-    /// Load account with `pubkey` and maybe put into read cache.
-    ///
-    /// Return the account and the slot when the account was last stored.
-    /// Return None for ZeroLamport accounts.
-    pub fn load_account_with(
-        &self,
-        ancestors: &Ancestors,
-        pubkey: &Pubkey,
-        should_put_in_read_cache: PopulateReadCache,
-    ) -> Option<(AccountSharedData, Slot)> {
-        self.do_load_with_populate_read_cache(
-            ancestors,
-            pubkey,
-            None,
-            LoadHint::Unspecified,
-            LoadZeroLamports::None,
-            should_put_in_read_cache,
-        )
-    }
-
-    fn do_load_with_populate_read_cache(
-        &self,
-        ancestors: &Ancestors,
-        pubkey: &Pubkey,
-        max_root: Option<Slot>,
-        load_hint: LoadHint,
-        load_zero_lamports: LoadZeroLamports,
-        populate_read_cache: PopulateReadCache,
-    ) -> Option<(AccountSharedData, Slot)> {
-        #[cfg(not(test))]
-        assert!(max_root.is_none());
-
         let starting_max_root = self.accounts_index.max_root_inclusive();
 
-        let (slot, storage_location, _maybe_account_accessor) =
-            self.read_index_for_accessor_or_load_slow(ancestors, pubkey, max_root, false)?;
-        // Notice the subtle `?` at previous line, we bail out pretty early if missing.
+        // First check the write cache
+        let (cache_result, slot_found) = self.load_from_write_cache(ancestors, pubkey);
 
-        let in_write_cache = storage_location.is_cached();
-        if !in_write_cache {
-            let result = self.read_only_accounts_cache.load(*pubkey, slot);
-            if let Some(account) = result {
-                if load_zero_lamports == LoadZeroLamports::None && account.is_zero_lamport() {
-                    return None;
-                }
-                return Some((account, slot));
+        if let Some(slot_found) = slot_found {
+            // If the version found in the write cache is newer than anything flushed to storage, it must be the right one! return it.
+            if slot_found >= self.accounts_cache.fetch_max_flush_root() {
+                return cache_result;
             }
         }
 
-        let (mut account_accessor, slot) = self.retry_to_get_account_accessor(
-            slot,
-            storage_location,
-            ancestors,
-            pubkey,
-            max_root,
-            load_hint,
-        )?;
+        // Now check the read cache
+        let result = self.read_only_accounts_cache.load(*pubkey);
+
+        // If a version was found in the read cache, it must be the newest storage version
+        // Return the newest of the read cache version and the write cache version (if any)
+        if let Some(account) = result {
+            return Self::select_most_recent_account(account, slot_found, cache_result).0;
+        }
+
+        let Some((mut account_accessor, slot)) =
+            self.get_account_accessor_read(ancestors, pubkey, load_hint)
+        else {
+            // If we don't find anything in the database, whatever we found in the cache is good!
+            return cache_result;
+        };
+
         // note that the account being in the cache could be different now than it was previously
         // since the cache could be flushed in between the 2 calls.
-        let in_write_cache = matches!(account_accessor, LoadedAccountAccessor::Cached(_));
         let account = account_accessor.check_and_get_loaded_account_shared_data();
-        if load_zero_lamports == LoadZeroLamports::None && account.is_zero_lamport() {
-            return None;
-        }
+        let (account, in_write_cache) =
+            Self::select_most_recent_account((account, slot), slot_found, cache_result);
+
+        account.as_ref()?;
 
         if !in_write_cache && populate_read_cache == PopulateReadCache::True {
             /*
@@ -4006,20 +3911,52 @@ impl AccountsDb {
             must exist in the write cache, which is a contradiction.
             */
             self.read_only_accounts_cache
-                .store(*pubkey, slot, account.clone());
+                .store(*pubkey, slot, account.clone().unwrap().0);
         }
         if load_hint == LoadHint::FixedMaxRoot {
             // If the load hint is that the max root is fixed, the max root should be fixed.
             let ending_max_root = self.accounts_index.max_root_inclusive();
             if starting_max_root != ending_max_root {
                 warn!(
-                    "do_load_with_populate_read_cache() scanning pubkey {pubkey} called with \
-                     fixed max root, but max root changed from {starting_max_root} to \
-                     {ending_max_root} during function call"
+                    "do_load() scanning pubkey {pubkey} called with fixed max root, but max root \
+                     changed from {starting_max_root} to {ending_max_root} during function call"
                 );
             }
         }
-        Some((account, slot))
+        account
+    }
+
+    fn load_from_write_cache(
+        &self,
+        ancestors: &Ancestors,
+        pubkey: &Pubkey,
+    ) -> (Option<(AccountSharedData, u64)>, Option<Slot>) {
+        let mut cache_result = None;
+        let mut slot_found = None;
+        if let Some(mut slot) = self.accounts_index.is_in_write_cache(pubkey) {
+            // If it's in the write cache, lets start searching!
+            let min_slot = self.accounts_cache.fetch_min_slot();
+            while slot >= min_slot {
+                if let Some(account) = self.accounts_cache.load(slot, pubkey) {
+                    if self.accounts_index.matching_slot(ancestors, slot) {
+                        let new_account = AccountSharedData::clone(&account.account);
+                        drop(account);
+                        slot_found = Some(slot);
+                        if new_account.is_zero_lamport() {
+                            cache_result = None;
+                            break;
+                        }
+                        cache_result = Some((new_account, slot));
+                        break;
+                    }
+                }
+                if slot == 0 {
+                    break;
+                }
+                slot -= 1;
+            }
+        }
+        (cache_result, slot_found)
     }
 
     fn get_account_accessor<'a>(
@@ -4254,12 +4191,9 @@ impl AccountsDb {
                 .get_slot_storage_entry_shrinking_in_progress_ok(purged_slot)
                 .is_none()
         );
-        let mut num_purged_keys = 0;
-        let (reclaims, _) = self.purge_keys_exact(pubkeys.into_iter().map(|key| {
-            num_purged_keys += 1;
-            (key, purged_slot)
-        }));
-        assert_eq!(reclaims.len(), num_purged_keys);
+        let pubkeys: Vec<Pubkey> = pubkeys.into_iter().collect();
+        self.accounts_index
+            .purge_keys_cache_exact(pubkeys.iter().copied());
         if is_dead {
             self.remove_dead_slots_metadata(std::iter::once(&purged_slot));
         }
@@ -4680,6 +4614,7 @@ impl AccountsDb {
         // outdated updates in earlier roots
         let mut num_roots_flushed = 0;
         let mut flush_stats = FlushStats::default();
+        max_flush_root.inspect(|&root| self.accounts_cache.set_max_flush_root(root));
         for root in flushed_roots.into_iter().rev() {
             if let Some(stats) =
                 self.flush_slot_cache(root, should_flush_f.as_mut(), max_clean_root)
@@ -4697,7 +4632,6 @@ impl AccountsDb {
         // `max_flush_root` to the max of the flushed roots, because that's
         // max_flushed_root tracks the logical last root that was flushed to
         // storage by snapshotting.
-        max_flush_root.inspect(|&root| self.accounts_cache.set_max_flush_root(root));
 
         (num_new_roots, num_roots_flushed, flush_stats)
     }
@@ -4784,6 +4718,10 @@ impl AccountsDb {
                     reclaim_method,
                     UpdateIndexThreadSelection::PoolWithThreshold,
                 ));
+
+            // Clear each pubkey in accounts from the cache
+            self.accounts_index
+                .purge_keys_cache_exact(accounts.iter().map(|(pubkey, _account)| **pubkey));
             flush_stats.store_accounts_timing = store_accounts_timing_inner;
             flush_stats.store_accounts_total_us = Saturating(store_accounts_total_inner_us);
 
@@ -5088,60 +5026,6 @@ impl AccountsDb {
         match scan_result {
             ScanStorageResult::Cached(cached_result) => cached_result,
             ScanStorageResult::Stored(stored_result) => stored_result.into_iter().collect(),
-        }
-    }
-
-    /// Updates the accounts index with the given accounts. If store_account is false, skip storing
-    /// the account in the index as the account was not stored in the cache
-    /// Used for cached accounts only.
-    fn update_index_cached_accounts<'a>(
-        &self,
-        accounts: &impl StorableAccounts<'a>,
-        store_account: &BitVec,
-        update_index_thread_selection: UpdateIndexThreadSelection,
-    ) {
-        let target_slot = accounts.target_slot();
-        let len = accounts.len();
-        assert_eq!(accounts.len() as u64, store_account.len());
-
-        let update = |start, end| {
-            (start..end).for_each(|i| {
-                if store_account[i as u64] {
-                    accounts.account(i, |account| {
-                        let info =
-                            AccountInfo::new(StorageLocation::Cached, account.is_zero_lamport());
-                        self.accounts_index.upsert(
-                            target_slot,
-                            target_slot,
-                            account.pubkey(),
-                            &account,
-                            &self.account_indexes,
-                            info,
-                            ReclaimsSlotList::default().as_mut(),
-                            UpsertReclaim::PreviousSlotEntryWasCached,
-                        );
-                    });
-                }
-            });
-        };
-
-        let threshold = 1;
-        if matches!(
-            update_index_thread_selection,
-            UpdateIndexThreadSelection::PoolWithThreshold,
-        ) && len > threshold
-        {
-            let chunk_size = std::cmp::max(1, len / quarter_thread_count()); // # pubkeys/thread
-            let batches = 1 + len / chunk_size;
-            self.thread_pool_foreground.install(|| {
-                (0..batches).into_par_iter().for_each(|batch| {
-                    let start = batch * chunk_size;
-                    let end = std::cmp::min(start + chunk_size, len);
-                    update(start, end)
-                })
-            });
-        } else {
-            update(0, len);
         }
     }
 
@@ -5538,7 +5422,7 @@ impl AccountsDb {
     pub(crate) fn store_accounts_unfrozen<'a>(
         &self,
         accounts: impl StorableAccounts<'a>,
-        update_index_thread_selection: UpdateIndexThreadSelection,
+        _update_index_thread_selection: UpdateIndexThreadSelection,
         ancestors: Option<&Ancestors>,
     ) {
         // If all transactions in a batch are errored,
@@ -5558,22 +5442,13 @@ impl AccountsDb {
 
         // Store the accounts in the write cache
         let mut store_accounts_time = Measure::start("store_accounts");
-        let (store_account, cache_account_store_stats) =
+        let cache_account_store_stats =
             self.write_accounts_to_cache(accounts.target_slot(), &accounts, ancestors);
         store_accounts_time.stop();
         self.stats
             .store_accounts_to_cache_us
             .fetch_add(store_accounts_time.as_us(), Ordering::Relaxed);
 
-        // Update the index
-        let mut update_index_time = Measure::start("update_index");
-
-        self.update_index_cached_accounts(&accounts, &store_account, update_index_thread_selection);
-
-        update_index_time.stop();
-        self.stats
-            .store_update_index
-            .fetch_add(update_index_time.as_us(), Ordering::Relaxed);
         self.stats.num_store_accounts_to_cache.fetch_add(
             cache_account_store_stats.num_accounts_stored,
             Ordering::Relaxed,
@@ -5625,15 +5500,12 @@ impl AccountsDb {
         let slot = accounts.target_slot();
         let mut store_accounts_time = Measure::start("store_accounts");
 
-        // Flush the read cache if necessary. This will occur during shrink or clean
-        if self.read_only_accounts_cache.can_slot_be_in_cache(slot) {
-            (0..accounts.len()).for_each(|index| {
-                // based on the patterns of how a validator writes accounts, it is almost always the case that there is no read only cache entry
-                // for this pubkey and slot. So, we can give that hint to the `remove` for performance.
-                self.read_only_accounts_cache
-                    .remove_assume_not_present(accounts.pubkey(index));
-            });
-        }
+        (0..accounts.len()).for_each(|index| {
+            // based on the patterns of how a validator writes accounts, it is almost always the case that there is no read only cache entry
+            // for this pubkey and slot. So, we can give that hint to the `remove` for performance.
+            self.read_only_accounts_cache
+                .remove_assume_not_present(accounts.pubkey(index));
+        });
 
         // Write the accounts to storage
         let infos = self.write_accounts_to_storage(slot, storage, &accounts);
@@ -5721,11 +5593,10 @@ impl AccountsDb {
         slot: Slot,
         accounts_and_meta_to_store: &impl StorableAccounts<'b>,
         ancestors: Option<&Ancestors>,
-    ) -> (BitVec, CacheAccountStoreStats) {
+    ) -> CacheAccountStoreStats {
         let len = accounts_and_meta_to_store.len();
         let mut pubkey_set = HashSet::with_capacity_and_hasher(len, PubkeyHasherBuilder::default());
         let mut cache_account_store_stats = CacheAccountStoreStats::default();
-        let mut store_account = BitVec::new_fill(false, len as u64);
 
         (0..len).rev().for_each(|index| {
             accounts_and_meta_to_store.account_default_if_zero_lamport(index, |account| {
@@ -5738,10 +5609,17 @@ impl AccountsDb {
                     return;
                 }
                 if account.is_zero_lamport() {
-                    if ancestors.is_some() {
-                        if let Some(is_zero_lamport) = self.accounts_index.get_with_and_then(
+                    if let Some(ancestors) = ancestors {
+                        if let (account, Some(_slot)) =
+                            self.load_from_write_cache(ancestors, pubkey)
+                        {
+                            if account.is_none() {
+                                cache_account_store_stats.num_ancestors_zero_lamport_skipped += 1;
+                                return;
+                            }
+                        } else if let Some(is_zero_lamport) = self.accounts_index.get_with_and_then(
                             pubkey,
-                            ancestors,
+                            Some(ancestors),
                             None,
                             true,
                             |(_, account)| account.is_zero_lamport(),
@@ -5757,19 +5635,24 @@ impl AccountsDb {
                     } else if self
                         .accounts_index
                         .get_and_then(pubkey, |account| (true, account.is_none()))
+                        && self.accounts_index.is_in_write_cache(pubkey).is_none()
                     {
                         cache_account_store_stats.num_ephemeral_accounts_skipped += 1;
                         return;
                     }
                 }
 
-                self.accounts_cache
+                let new_account = self
+                    .accounts_cache
                     .store(slot, pubkey, account.take_account());
-                store_account.set(index as u64, true);
+
+                if new_account {
+                    self.accounts_index.insert_index_cache(pubkey, slot);
+                }
             })
         });
 
-        (store_account, cache_account_store_stats)
+        cache_account_store_stats
     }
 
     fn write_accounts_to_storage<'a>(
@@ -6982,15 +6865,17 @@ impl AccountsDb {
         self.do_load(
             ancestors,
             pubkey,
-            None,
             LoadHint::Unspecified,
-            // callers of this expect zero lamport accounts that exist in the index to be returned as Some(empty)
-            LoadZeroLamports::SomeWithZeroLamportAccountForTests,
             PopulateReadCache::True,
         )
     }
 
     pub fn assert_load_account(&self, slot: Slot, pubkey: Pubkey, expected_lamports: u64) {
+        if expected_lamports == 0 {
+            // If the expected lamports is 0, then the account should not be found in the index, and thus should not be loaded
+            self.assert_not_load_account(slot, pubkey);
+            return;
+        }
         let ancestors = vec![(slot, 0)].into_iter().collect();
         let (account, slot) = self.load_without_fixed_root(&ancestors, &pubkey).unwrap();
         assert_eq!((account.lamports(), slot), (expected_lamports, slot));
@@ -7032,10 +6917,7 @@ impl AccountsDb {
         for i in 0..accounts.len() {
             if accounts.is_zero_lamport(i) {
                 let key = *accounts.pubkey(i);
-                if self
-                    .accounts_index
-                    .get_and_then(&key, |account| (true, account.is_none()))
-                {
+                if !self.accounts_index.contains(&key) {
                     // Account is not in the index, need to pre-populate with placeholder
                     pre_populate_zero_lamport.push((key, placeholder.clone()));
                 }

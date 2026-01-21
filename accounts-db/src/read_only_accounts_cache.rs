@@ -90,7 +90,6 @@ pub(crate) struct ReadOnlyAccountsCache {
 
     // Performance statistics
     stats: Arc<AtomicReadOnlyCacheStats>,
-    highest_slot_stored: AtomicU64,
 
     /// Timer for generating timestamps for entries.
     timer: Instant,
@@ -131,7 +130,6 @@ impl ReadOnlyAccountsCache {
         );
 
         Self {
-            highest_slot_stored: AtomicU64::default(),
             _max_data_size_lo: max_data_size_lo,
             _max_data_size_hi: max_data_size_hi,
             cache,
@@ -144,19 +142,18 @@ impl ReadOnlyAccountsCache {
     }
 
     #[cfg_attr(feature = "dev-context-only-utils", qualifiers(pub))]
-    pub(crate) fn load(&self, pubkey: Pubkey, slot: Slot) -> Option<AccountSharedData> {
+    pub(crate) fn load(&self, pubkey: Pubkey) -> Option<(AccountSharedData, Slot)> {
         let (account, load_us) = measure_us!({
             let mut found = None;
             if let Some(entry) = self.cache.get(&pubkey) {
-                if entry.slot == slot {
-                    entry
-                        .last_update_time
-                        .store(self.timestamp(), Ordering::Relaxed);
-                    let account = entry.account.clone();
-                    drop(entry);
-                    self.stats.hits.fetch_add(1, Ordering::Relaxed);
-                    found = Some(account);
-                }
+                let slot = entry.slot;
+                entry
+                    .last_update_time
+                    .store(self.timestamp(), Ordering::Relaxed);
+                let account = entry.account.clone();
+                drop(entry);
+                self.stats.hits.fetch_add(1, Ordering::Relaxed);
+                found = Some((account, slot));
             }
 
             if found.is_none() {
@@ -186,7 +183,6 @@ impl ReadOnlyAccountsCache {
         timestamp: u64,
     ) {
         let measure_store = Measure::start("");
-        self.highest_slot_stored.fetch_max(slot, Ordering::Release);
         let account_size = Self::account_size(&account);
         self.data_size.fetch_add(account_size, Ordering::Relaxed);
         match self.cache.entry(pubkey) {
@@ -204,11 +200,6 @@ impl ReadOnlyAccountsCache {
         };
         let store_us = measure_store.end_as_us();
         self.stats.store_us.fetch_add(store_us, Ordering::Relaxed);
-    }
-
-    /// true if any pubkeys could have ever been stored into the cache at `slot`
-    pub(crate) fn can_slot_be_in_cache(&self, slot: Slot) -> bool {
-        self.highest_slot_stored.load(Ordering::Acquire) >= slot
     }
 
     /// remove entry if it exists.
@@ -508,10 +499,9 @@ mod tests {
                 let element = cache.cache.iter().choose(&mut rng).unwrap();
                 let (pubkey, entry) = element.pair();
                 let slot = entry.slot;
-                let account = cache.load(*pubkey, slot).unwrap();
-                let (other, other_slot, index) = hash_map.get_mut(pubkey).unwrap();
-                assert_eq!(account, *other);
-                assert_eq!(slot, *other_slot);
+                let account = cache.load(*pubkey).unwrap();
+                let (other, _other_slot, index) = hash_map.get_mut(pubkey).unwrap();
+                assert_eq!(account, (other.clone(), slot));
                 *index = ix;
             } else {
                 let mut data = vec![0u8; DATA_SIZE];
