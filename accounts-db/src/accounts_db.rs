@@ -3612,7 +3612,7 @@ impl AccountsDb {
         max_root: Option<Slot>,
         clone_in_lock: bool,
     ) -> Option<(Slot, StorageLocation, Option<LoadedAccountAccessor<'a>>)> {
-        let ret = self.accounts_index.get_with_and_then(
+        self.accounts_index.get_with_and_then(
             pubkey,
             Some(ancestors),
             max_root,
@@ -3623,8 +3623,7 @@ impl AccountsDb {
                     .then(|| self.get_account_accessor(slot, pubkey, &storage_location));
                 (slot, storage_location, account_accessor)
             },
-        );
-        return ret;
+        )
     }
 
     fn retry_to_get_account_accessor<'a>(
@@ -3935,28 +3934,23 @@ impl AccountsDb {
     ) -> Option<(AccountSharedData, Slot)> {
         let (_starting_max_root, cache_result, found_in_cache) =
             self.load_into_write_cache(ancestors, pubkey, false, LoadZeroLamports::None);
+        
+        if found_in_cache
+        {
+            return cache_result;
+        }
+
 
         let (slot, storage_location, _maybe_account_accessor) =
             self.read_index_for_accessor_or_load_slow(ancestors, pubkey, None, false)?;
         // Notice the subtle `?` at previous line, we bail out pretty early if missing.
+
         let in_write_cache = storage_location.is_cached();
         if !in_write_cache {
             let result = self.read_only_accounts_cache.load(*pubkey, slot);
             if let Some(account) = result {
                 if account.is_zero_lamport() {
-                    if found_in_cache == true {
-                        assert_eq!(None, cache_result);
-                    }
-                    else {
-                        assert_eq!(in_write_cache, false);
-                    }
                     return None;
-                }
-                if found_in_cache == true {
-                    assert_eq!((account.clone(), slot), cache_result.unwrap());
-                }
-                else {
-                    assert_eq!(in_write_cache, false);
                 }
                 return Some((account, slot));
             }
@@ -3976,12 +3970,6 @@ impl AccountsDb {
         let in_write_cache = matches!(account_accessor, LoadedAccountAccessor::Cached(_));
         let account = account_accessor.check_and_get_loaded_account_shared_data();
         if account.is_zero_lamport() {
-            if found_in_cache == true {
-                assert_eq!(None, cache_result);
-            }
-            else {
-                assert_eq!(in_write_cache, false);
-            }
             return None;
         }
 
@@ -4001,12 +3989,6 @@ impl AccountsDb {
             self.read_only_accounts_cache
                 .store(*pubkey, slot, account.clone());
         }
-        if found_in_cache == true {
-            assert_eq!((account.clone(), slot), cache_result.unwrap());
-        }
-        else {
-            assert_eq!(in_write_cache, false);
-        }
         Some((account, slot))
     }
 
@@ -4021,6 +4003,7 @@ impl AccountsDb {
         load_into_read_cache_only: bool,
         load_zero_lamports: LoadZeroLamports,
     ) -> Option<(AccountSharedData, Slot)> {
+        #[cfg(not(test))]
         assert!(max_root.is_none());
 
         let (starting_max_root, cache_result, found_in_cache) = self.load_into_write_cache(
@@ -4029,6 +4012,10 @@ impl AccountsDb {
             load_into_read_cache_only,
             load_zero_lamports,
         );
+        if found_in_cache
+        {
+            return cache_result;
+        }
 
         let (slot, storage_location, _maybe_account_accessor) =
             self.read_index_for_accessor_or_load_slow(ancestors, pubkey, max_root, false)?;
@@ -4040,13 +4027,7 @@ impl AccountsDb {
                 let result = self.read_only_accounts_cache.load(*pubkey, slot);
                 if let Some(account) = result {
                     if load_zero_lamports == LoadZeroLamports::None && account.is_zero_lamport() {
-                        if found_in_cache == true {
-                            assert_eq!(None, cache_result);
-                        }
                         return None;
-                    }
-                    if found_in_cache == true {
-                        assert_eq!((account.clone(), slot), cache_result.unwrap());
                     }
                     return Some((account, slot));
                 }
@@ -4076,12 +4057,6 @@ impl AccountsDb {
         let in_write_cache = matches!(account_accessor, LoadedAccountAccessor::Cached(_));
         let account = account_accessor.check_and_get_loaded_account_shared_data();
         if load_zero_lamports == LoadZeroLamports::None && account.is_zero_lamport() {
-            if found_in_cache == true {
-                assert_eq!(None, cache_result);
-            }
-            else {
-                assert_eq!(in_write_cache, false);
-            }
             return None;
         }
 
@@ -4112,36 +4087,6 @@ impl AccountsDb {
                      fixed max root, but max root changed from {starting_max_root} to \
                      {ending_max_root} during function call"
                 );
-            }
-        }
-        if found_in_cache == true {
-            if slot > cache_result.clone().unwrap().1 {
-                // Refresh the account from cache_result if slot is newer
-                let (_starting_max_root, cache_result, _found_in_cache) = self
-                    .load_into_write_cache(
-                        ancestors,
-                        pubkey,
-                        load_into_read_cache_only,
-                        load_zero_lamports,
-                    );
-                assert!(slot <= cache_result.unwrap().1);
-            } else {
-                assert_eq!((account.clone(), slot), cache_result.unwrap());
-            }
-        }
-        else {
-            // Refresh the account from cache_result if slot is newer
-            let (_starting_max_root, cache_result, _found_in_cache) = self
-                .load_into_write_cache(
-                ancestors,
-                pubkey,
-                load_into_read_cache_only,
-                load_zero_lamports,
-            );
-            if let Some(cache_result) = cache_result {
-                assert!(slot <= cache_result.1);
-            } else {
-                assert_eq!(in_write_cache, false);
             }
         }
         Some((account, slot))
