@@ -4130,14 +4130,19 @@ impl AccountsDb {
             }
         }
         else {
+            println!("I found nothing in cache earlier");
             // Refresh the account from cache_result if slot is newer
-            let (_starting_max_root, cache_result, _found_in_cache) = self
+            let (_starting_max_root, cache_result, found_in_cache) = self
                 .load_into_write_cache(
                 ancestors,
                 pubkey,
                 load_into_read_cache_only,
                 load_zero_lamports,
             );
+            println!("Found in cache is {found_in_cache}");
+            println!("cache_result: {:?}", cache_result);
+            println!("slot: {}", slot);
+            println!("ancestors: {:?}", ancestors);
             if let Some(cache_result) = cache_result {
                 assert!(slot <= cache_result.1);
             } else {
@@ -4162,7 +4167,9 @@ impl AccountsDb {
             let max_flush_root = self.accounts_cache.fetch_max_flush_root();
             while slot >= max_flush_root {
                 if let Some(account) = self.accounts_cache.load(slot, &pubkey) {
+                    println!("Found some in slot {}", slot);
                     if self.accounts_index.matching_slot(ancestors, slot) {
+                        println!("Matched slot {}", slot);
                         let new_account = AccountSharedData::clone(&account.account);
                         drop(account);
                         found_in_cache = true;
@@ -4187,6 +4194,10 @@ impl AccountsDb {
                 }
                 slot -= 1;
             }
+        }
+        else
+        {
+            println!("Not found in write cache for pubkey {}", pubkey);
         }
         (starting_max_root, cache_result, found_in_cache)
     }

@@ -833,6 +833,7 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> AccountsIndex<T, U> {
         callback: impl FnOnce(SlotListItem<T>) -> R,
     ) -> Option<R> {
         let slot_list = entry.slot_list_read_lock();
+        println!("found slot_list: {:?}", slot_list);
         self.latest_slot(ancestors, &slot_list, max_root)
             .map(|found_index| callback(slot_list[found_index]))
     }
@@ -1459,7 +1460,9 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> AccountsIndex<T, U> {
     }
 
     pub fn purge_keys_cache_exact(&self, pubkeys: impl IntoIterator<Item = Pubkey>) {
+        println!("Purging keys from cache");
         for pubkey in pubkeys {
+            println!("purging key from cache: {}", pubkey);
             // Acquire a reference to the entry, copy the data out, then drop the guard
             // before doing any mutation (remove/insert) to avoid deadlocking the DashMap.
             if let dashmap::mapref::entry::Entry::Occupied(mut occupied_entry) =
@@ -1468,21 +1471,25 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> AccountsIndex<T, U> {
                 let (_slot, count) = occupied_entry.get_mut();
                 *count -= 1;
                 if *count == 0 {
+                    println!("removing key from cache entirely: {}", pubkey);
                     occupied_entry.remove_entry();
                 }
             } else {
+                println!("key not found in cache: {}", pubkey);
                 panic!();
             }
         }
     }
 
     pub fn purge_key_cache_exact(&self, pubkey: &Pubkey) {
+        println!("purging key from cache: {}", pubkey);
         if let dashmap::mapref::entry::Entry::Occupied(mut occupied_entry) =
             self.cached_account_maps.entry(*pubkey)
         {
             let (_slot, count) = occupied_entry.get_mut();
             *count -= 1;
             if *count == 0 {
+                println!("removing key from cache entirely: {}", pubkey);
                 occupied_entry.remove_entry();
             }
         } else {

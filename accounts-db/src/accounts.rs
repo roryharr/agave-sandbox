@@ -6,7 +6,7 @@ use {
             AccountsAddRootTiming, AccountsDb, LoadHint, LoadedAccount, ScanAccountStorageData,
             ScanStorageResult, UpdateIndexThreadSelection,
         },
-        accounts_index::{ScanConfig, ScanOrder, ScanResult},
+        accounts_index::{IndexKey, ScanConfig, ScanError, ScanOrder, ScanResult},
         ancestors::Ancestors,
         is_loadable::IsLoadable as _,
         storable_accounts::StorableAccounts,
@@ -29,7 +29,10 @@ use {
     std::{
         cmp::Reverse,
         collections::{BinaryHeap, HashMap, HashSet},
-        sync::{Arc, Mutex},
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc, Mutex,
+        },
     },
 };
 
@@ -301,6 +304,140 @@ impl Accounts {
             .into_iter()
             .map(|Reverse((balance, pubkey))| (pubkey, balance))
             .collect())
+    }
+
+    fn load_while_filtering<F: Fn(&AccountSharedData) -> bool>(
+        collector: &mut Vec<KeyedAccountSharedData>,
+        some_account_tuple: Option<(&Pubkey, AccountSharedData, Slot)>,
+        filter: F,
+    ) {
+        if let Some(mapped_account_tuple) = some_account_tuple
+            .filter(|(_, account, _)| account.is_loadable() && filter(account))
+            .map(|(pubkey, account, _slot)| (*pubkey, account))
+        {
+            collector.push(mapped_account_tuple)
+        }
+    }
+
+    pub fn load_by_program(
+        &self,
+        ancestors: &Ancestors,
+        bank_id: BankId,
+        program_id: &Pubkey,
+        config: &ScanConfig,
+    ) -> ScanResult<Vec<KeyedAccountSharedData>> {
+        let mut collector = Vec::new();
+        self.accounts_db
+            .scan_accounts(
+                ancestors,
+                bank_id,
+                |some_account_tuple| {
+                    Self::load_while_filtering(&mut collector, some_account_tuple, |account| {
+                        account.owner() == program_id
+                    })
+                },
+                config,
+            )
+            .map(|_| collector)
+    }
+
+    pub fn load_by_program_with_filter<F: Fn(&AccountSharedData) -> bool>(
+        &self,
+        ancestors: &Ancestors,
+        bank_id: BankId,
+        program_id: &Pubkey,
+        filter: F,
+        config: &ScanConfig,
+    ) -> ScanResult<Vec<KeyedAccountSharedData>> {
+        let mut collector = Vec::new();
+        self.accounts_db
+            .scan_accounts(
+                ancestors,
+                bank_id,
+                |some_account_tuple| {
+                    Self::load_while_filtering(&mut collector, some_account_tuple, |account| {
+                        account.owner() == program_id && filter(account)
+                    })
+                },
+                config,
+            )
+            .map(|_| collector)
+    }
+
+    fn calc_scan_result_size(account: &AccountSharedData) -> usize {
+        account.data().len()
+            + std::mem::size_of::<AccountSharedData>()
+            + std::mem::size_of::<Pubkey>()
+    }
+
+    /// Accumulate size of (pubkey + account) into sum.
+    /// Return true iff sum > 'byte_limit_for_scan'
+    fn accumulate_and_check_scan_result_size(
+        sum: &AtomicUsize,
+        account: &AccountSharedData,
+        byte_limit_for_scan: &Option<usize>,
+    ) -> bool {
+        if let Some(byte_limit_for_scan) = byte_limit_for_scan.as_ref() {
+            let added = Self::calc_scan_result_size(account);
+            sum.fetch_add(added, Ordering::Relaxed)
+                .saturating_add(added)
+                > *byte_limit_for_scan
+        } else {
+            false
+        }
+    }
+
+    fn maybe_abort_scan(
+        result: ScanResult<Vec<KeyedAccountSharedData>>,
+        config: &ScanConfig,
+    ) -> ScanResult<Vec<KeyedAccountSharedData>> {
+        if config.is_aborted() {
+            ScanResult::Err(ScanError::Aborted(
+                "The accumulated scan results exceeded the limit".to_string(),
+            ))
+        } else {
+            result
+        }
+    }
+
+    pub fn load_by_index_key_with_filter<F: Fn(&AccountSharedData) -> bool>(
+        &self,
+        ancestors: &Ancestors,
+        bank_id: BankId,
+        index_key: &IndexKey,
+        filter: F,
+        config: &ScanConfig,
+        byte_limit_for_scan: Option<usize>,
+    ) -> ScanResult<Vec<KeyedAccountSharedData>> {
+        let sum = AtomicUsize::default();
+        let config = config.recreate_with_abort();
+        let mut collector = Vec::new();
+        let result = self
+            .accounts_db
+            .index_scan_accounts(
+                ancestors,
+                bank_id,
+                *index_key,
+                |some_account_tuple| {
+                    Self::load_while_filtering(&mut collector, some_account_tuple, |account| {
+                        let use_account = filter(account);
+                        if use_account
+                            && Self::accumulate_and_check_scan_result_size(
+                                &sum,
+                                account,
+                                &byte_limit_for_scan,
+                            )
+                        {
+                            // total size of results exceeds size limit, so abort scan
+                            config.abort();
+                        }
+                        use_account
+                    });
+                },
+                &config,
+            )
+            .map(|_| collector);
+        Self::maybe_abort_scan(result, &config)
     }
 
     pub fn account_indexes_include_key(&self, key: &Pubkey) -> bool {
@@ -1212,5 +1349,276 @@ mod tests {
         }
         info!("done..cleaning..");
         accounts.accounts_db.clean_accounts_for_tests();
+    }
+
+    #[test]
+    fn test_load_largest_accounts() {
+        let accounts_db = AccountsDb::new_single_for_tests();
+        let accounts = Accounts::new(Arc::new(accounts_db));
+
+        /* This test assumes pubkey0 < pubkey1 < pubkey2.
+         * But the keys created with new_unique() does not guarantee this
+         * order because of the endianness.  new_unique() calls add 1 at each
+         * key generation as the little endian integer.  A pubkey stores its
+         * value in a 32-byte array bytes, and its eq-partial trait considers
+         * the lower-address bytes more significant, which is the big-endian
+         * order.
+         * So, sort first to ensure the order assumption holds.
+         */
+        let mut keys = vec![];
+        for _idx in 0..3 {
+            keys.push(Pubkey::new_unique());
+        }
+        keys.sort();
+        let pubkey2 = keys.pop().unwrap();
+        let pubkey1 = keys.pop().unwrap();
+        let pubkey0 = keys.pop().unwrap();
+        let account0 = AccountSharedData::new(42, 0, &Pubkey::default());
+        accounts.store_for_tests(0, &pubkey0, &account0);
+        let account1 = AccountSharedData::new(42, 0, &Pubkey::default());
+        accounts.store_for_tests(0, &pubkey1, &account1);
+        let account2 = AccountSharedData::new(41, 0, &Pubkey::default());
+        accounts.store_for_tests(0, &pubkey2, &account2);
+
+        let ancestors = vec![(0, 0)].into_iter().collect();
+        let all_pubkeys: HashSet<_> = vec![pubkey0, pubkey1, pubkey2].into_iter().collect();
+
+        // num == 0 should always return empty set
+        let bank_id = 0;
+        assert_eq!(
+            accounts
+                .load_largest_accounts(
+                    &ancestors,
+                    bank_id,
+                    0,
+                    &HashSet::new(),
+                    AccountAddressFilter::Exclude,
+                    false
+                )
+                .unwrap(),
+            vec![]
+        );
+        assert_eq!(
+            accounts
+                .load_largest_accounts(
+                    &ancestors,
+                    bank_id,
+                    0,
+                    &all_pubkeys,
+                    AccountAddressFilter::Include,
+                    false
+                )
+                .unwrap(),
+            vec![]
+        );
+
+        // list should be sorted by balance, then pubkey, descending
+        assert!(pubkey1 > pubkey0);
+        assert_eq!(
+            accounts
+                .load_largest_accounts(
+                    &ancestors,
+                    bank_id,
+                    1,
+                    &HashSet::new(),
+                    AccountAddressFilter::Exclude,
+                    false
+                )
+                .unwrap(),
+            vec![(pubkey1, 42)]
+        );
+        assert_eq!(
+            accounts
+                .load_largest_accounts(
+                    &ancestors,
+                    bank_id,
+                    2,
+                    &HashSet::new(),
+                    AccountAddressFilter::Exclude,
+                    false
+                )
+                .unwrap(),
+            vec![(pubkey1, 42), (pubkey0, 42)]
+        );
+        assert_eq!(
+            accounts
+                .load_largest_accounts(
+                    &ancestors,
+                    bank_id,
+                    3,
+                    &HashSet::new(),
+                    AccountAddressFilter::Exclude,
+                    false
+                )
+                .unwrap(),
+            vec![(pubkey1, 42), (pubkey0, 42), (pubkey2, 41)]
+        );
+
+        // larger num should not affect results
+        assert_eq!(
+            accounts
+                .load_largest_accounts(
+                    &ancestors,
+                    bank_id,
+                    6,
+                    &HashSet::new(),
+                    AccountAddressFilter::Exclude,
+                    false
+                )
+                .unwrap(),
+            vec![(pubkey1, 42), (pubkey0, 42), (pubkey2, 41)]
+        );
+
+        // AccountAddressFilter::Exclude should exclude entry
+        let exclude1: HashSet<_> = vec![pubkey1].into_iter().collect();
+        assert_eq!(
+            accounts
+                .load_largest_accounts(
+                    &ancestors,
+                    bank_id,
+                    1,
+                    &exclude1,
+                    AccountAddressFilter::Exclude,
+                    false
+                )
+                .unwrap(),
+            vec![(pubkey0, 42)]
+        );
+        assert_eq!(
+            accounts
+                .load_largest_accounts(
+                    &ancestors,
+                    bank_id,
+                    2,
+                    &exclude1,
+                    AccountAddressFilter::Exclude,
+                    false
+                )
+                .unwrap(),
+            vec![(pubkey0, 42), (pubkey2, 41)]
+        );
+        assert_eq!(
+            accounts
+                .load_largest_accounts(
+                    &ancestors,
+                    bank_id,
+                    3,
+                    &exclude1,
+                    AccountAddressFilter::Exclude,
+                    false
+                )
+                .unwrap(),
+            vec![(pubkey0, 42), (pubkey2, 41)]
+        );
+
+        // AccountAddressFilter::Include should limit entries
+        let include1_2: HashSet<_> = vec![pubkey1, pubkey2].into_iter().collect();
+        assert_eq!(
+            accounts
+                .load_largest_accounts(
+                    &ancestors,
+                    bank_id,
+                    1,
+                    &include1_2,
+                    AccountAddressFilter::Include,
+                    false
+                )
+                .unwrap(),
+            vec![(pubkey1, 42)]
+        );
+        assert_eq!(
+            accounts
+                .load_largest_accounts(
+                    &ancestors,
+                    bank_id,
+                    2,
+                    &include1_2,
+                    AccountAddressFilter::Include,
+                    false
+                )
+                .unwrap(),
+            vec![(pubkey1, 42), (pubkey2, 41)]
+        );
+        assert_eq!(
+            accounts
+                .load_largest_accounts(
+                    &ancestors,
+                    bank_id,
+                    3,
+                    &include1_2,
+                    AccountAddressFilter::Include,
+                    false
+                )
+                .unwrap(),
+            vec![(pubkey1, 42), (pubkey2, 41)]
+        );
+    }
+
+    fn zero_len_account_size() -> usize {
+        std::mem::size_of::<AccountSharedData>() + std::mem::size_of::<Pubkey>()
+    }
+
+    #[test]
+    fn test_calc_scan_result_size() {
+        for len in 0..3 {
+            assert_eq!(
+                Accounts::calc_scan_result_size(&AccountSharedData::new(
+                    0,
+                    len,
+                    &Pubkey::default()
+                )),
+                zero_len_account_size() + len
+            );
+        }
+    }
+
+    #[test]
+    fn test_maybe_abort_scan() {
+        assert!(Accounts::maybe_abort_scan(ScanResult::Ok(vec![]), &ScanConfig::default()).is_ok());
+        assert!(Accounts::maybe_abort_scan(
+            ScanResult::Ok(vec![]),
+            &ScanConfig::new(ScanOrder::Sorted)
+        )
+        .is_ok());
+        let config = ScanConfig::new(ScanOrder::Sorted).recreate_with_abort();
+        assert!(Accounts::maybe_abort_scan(ScanResult::Ok(vec![]), &config).is_ok());
+        config.abort();
+        assert!(Accounts::maybe_abort_scan(ScanResult::Ok(vec![]), &config).is_err());
+    }
+
+    #[test]
+    fn test_accumulate_and_check_scan_result_size() {
+        for (account, byte_limit_for_scan, result) in [
+            (AccountSharedData::default(), zero_len_account_size(), false),
+            (
+                AccountSharedData::new(0, 1, &Pubkey::default()),
+                zero_len_account_size(),
+                true,
+            ),
+            (
+                AccountSharedData::new(0, 2, &Pubkey::default()),
+                zero_len_account_size() + 3,
+                false,
+            ),
+        ] {
+            let sum = AtomicUsize::default();
+            assert_eq!(
+                result,
+                Accounts::accumulate_and_check_scan_result_size(
+                    &sum,
+                    &account,
+                    &Some(byte_limit_for_scan)
+                )
+            );
+            // calling a second time should accumulate above the threshold
+            assert!(Accounts::accumulate_and_check_scan_result_size(
+                &sum,
+                &account,
+                &Some(byte_limit_for_scan)
+            ));
+            assert!(!Accounts::accumulate_and_check_scan_result_size(
+                &sum, &account, &None
+            ));
+        }
     }
 }
