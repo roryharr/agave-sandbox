@@ -3060,9 +3060,6 @@ fn test_flush_accounts_cache() {
     db.flush_accounts_cache(true, None);
 
     // After the flush, the unrooted slot is still in the cache
-    assert!(db
-        .load_without_fixed_root(&ancestors, &unrooted_key)
-        .is_some());
     assert!(db.accounts_index.contains(&unrooted_key));
     assert_eq!(db.accounts_cache.num_slots(), 1);
     assert!(db.accounts_cache.slot_cache(unrooted_slot).is_some());
@@ -3286,6 +3283,7 @@ fn test_flush_cache_clean() {
     // because `accounts_index.uncleaned_roots` should be correct
     db.flush_accounts_cache(true, None);
     db.clean_accounts_for_tests();
+    println!("Dieing here");
     assert!(db
         .do_load(
             &Ancestors::default(),

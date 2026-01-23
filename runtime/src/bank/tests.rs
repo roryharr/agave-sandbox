@@ -7793,6 +7793,7 @@ fn test_remove_unrooted_before_scan() {
          program_id,
          starting_lamports| {
             loop {
+                println!("Starting iteration");
                 let (bank_at_fork_tip, slots_on_fork, ancestors) = setup_banks_on_fork_to_remove(
                     bank0.clone(),
                     pubkeys_to_modify.clone(),

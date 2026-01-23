@@ -4130,19 +4130,14 @@ impl AccountsDb {
             }
         }
         else {
-            println!("I found nothing in cache earlier");
             // Refresh the account from cache_result if slot is newer
-            let (_starting_max_root, cache_result, found_in_cache) = self
+            let (_starting_max_root, cache_result, _found_in_cache) = self
                 .load_into_write_cache(
                 ancestors,
                 pubkey,
                 load_into_read_cache_only,
                 load_zero_lamports,
             );
-            println!("Found in cache is {found_in_cache}");
-            println!("cache_result: {:?}", cache_result);
-            println!("slot: {}", slot);
-            println!("ancestors: {:?}", ancestors);
             if let Some(cache_result) = cache_result {
                 assert!(slot <= cache_result.1);
             } else {
@@ -4167,9 +4162,7 @@ impl AccountsDb {
             let max_flush_root = self.accounts_cache.fetch_max_flush_root();
             while slot >= max_flush_root {
                 if let Some(account) = self.accounts_cache.load(slot, &pubkey) {
-                    println!("Found some in slot {}", slot);
                     if self.accounts_index.matching_slot(ancestors, slot) {
-                        println!("Matched slot {}", slot);
                         let new_account = AccountSharedData::clone(&account.account);
                         drop(account);
                         found_in_cache = true;
@@ -4194,10 +4187,6 @@ impl AccountsDb {
                 }
                 slot -= 1;
             }
-        }
-        else
-        {
-            println!("Not found in write cache for pubkey {}", pubkey);
         }
         (starting_max_root, cache_result, found_in_cache)
     }
@@ -5266,7 +5255,7 @@ impl AccountsDb {
     fn update_index_cached_accounts<'a>(
         &self,
         accounts: &impl StorableAccounts<'a>,
-        store_account: &[bool],
+        store_account: &[(bool, bool)],
         update_index_thread_selection: UpdateIndexThreadSelection,
     ) {
         let target_slot = accounts.target_slot();
@@ -5275,19 +5264,18 @@ impl AccountsDb {
 
         let update = |start, end| {
             (start..end).for_each(|i| {
-                if store_account[i] {
+                let (store_account, is_new) = store_account[i];
+                if store_account {
                     accounts.account(i, |account| {
                         let info =
                             AccountInfo::new(StorageLocation::Cached, account.is_zero_lamport());
-                        self.accounts_index.upsert(
-                            target_slot,
+                        self.accounts_index.upsert_cached(
                             target_slot,
                             account.pubkey(),
                             &account,
                             &self.account_indexes,
                             info,
-                            ReclaimsSlotList::default().as_mut(),
-                            UpsertReclaim::PreviousSlotEntryWasCached,
+                            is_new
                         );
                     });
                 }
@@ -5913,7 +5901,7 @@ impl AccountsDb {
         slot: Slot,
         accounts_and_meta_to_store: &impl StorableAccounts<'b>,
         txs: Option<&[&SanitizedTransaction]>,
-    ) -> (Vec<bool>, usize) {
+    ) -> (Vec<(bool, bool)>, usize) {
         let mut accounts_skipped = 0;
         let mut current_write_version = if self.accounts_update_notifier.is_some() {
             self.write_version
@@ -5934,7 +5922,7 @@ impl AccountsDb {
                             .get_and_then(pubkey, |account| (true, account.is_none()))
                     {
                         accounts_skipped += 1;
-                        return false;
+                        return (false, false);
                     }
 
                     // if geyser is enabled, send the account update notification
@@ -5955,8 +5943,7 @@ impl AccountsDb {
                     } else {
                         account_shared_data
                     };
-                    self.accounts_cache.store(slot, pubkey, account_to_store);
-                    true
+                    (true, self.accounts_cache.store(slot, pubkey, account_to_store))
                 })
             })
             .collect();

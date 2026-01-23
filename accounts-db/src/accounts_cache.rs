@@ -71,13 +71,13 @@ impl SlotCache {
 
     pub fn insert(&self, pubkey: &Pubkey, account: AccountSharedData) -> bool {
         let data_len = account.data().len() as u64;
-        let mut found_entry = false;
+        let mut is_new = true;
         let item = Arc::new(CachedAccount {
             account,
             pubkey: *pubkey,
         });
         if let Some(old) = self.cache.insert(*pubkey, item.clone()) {
-            found_entry = true;
+            is_new = false;
             self.same_account_writes.fetch_add(1, Ordering::Relaxed);
             self.same_account_writes_size
                 .fetch_add(data_len, Ordering::Relaxed);
@@ -102,7 +102,7 @@ impl SlotCache {
             self.accounts_count.fetch_add(1, Ordering::Relaxed);
             self.total_accounts_count.fetch_add(1, Ordering::Relaxed);
         }
-        found_entry
+        is_new
     }
 
     pub fn get_cloned(&self, pubkey: &Pubkey) -> Option<Arc<CachedAccount>> {

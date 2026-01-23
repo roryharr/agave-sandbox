@@ -833,7 +833,6 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> AccountsIndex<T, U> {
         callback: impl FnOnce(SlotListItem<T>) -> R,
     ) -> Option<R> {
         let slot_list = entry.slot_list_read_lock();
-        println!("found slot_list: {:?}", slot_list);
         self.latest_slot(ancestors, &slot_list, max_root)
             .map(|found_index| callback(slot_list[found_index]))
     }
@@ -1449,20 +1448,22 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> AccountsIndex<T, U> {
         account: &impl ReadableAccount,
         account_indexes: &AccountSecondaryIndexes,
         account_info: T,
+        is_new: bool,
     ) {
         let new_item =
             PreAllocatedAccountMapEntry::new(new_slot, account_info, &self.storage.storage, true);
         let map = self.get_bin(pubkey);
         map.upsert_cached(pubkey, new_item);
 
-        self.insert_cached_index_if_missing(pubkey, new_slot);
+        if is_new
+        {
+            self.insert_cached_index_if_missing(pubkey, new_slot);
+        }
         self.update_secondary_indexes(pubkey, account, account_indexes);
     }
 
     pub fn purge_keys_cache_exact(&self, pubkeys: impl IntoIterator<Item = Pubkey>) {
-        println!("Purging keys from cache");
         for pubkey in pubkeys {
-            println!("purging key from cache: {}", pubkey);
             // Acquire a reference to the entry, copy the data out, then drop the guard
             // before doing any mutation (remove/insert) to avoid deadlocking the DashMap.
             if let dashmap::mapref::entry::Entry::Occupied(mut occupied_entry) =
@@ -1471,25 +1472,21 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> AccountsIndex<T, U> {
                 let (_slot, count) = occupied_entry.get_mut();
                 *count -= 1;
                 if *count == 0 {
-                    println!("removing key from cache entirely: {}", pubkey);
                     occupied_entry.remove_entry();
                 }
             } else {
-                println!("key not found in cache: {}", pubkey);
                 panic!();
             }
         }
     }
 
     pub fn purge_key_cache_exact(&self, pubkey: &Pubkey) {
-        println!("purging key from cache: {}", pubkey);
         if let dashmap::mapref::entry::Entry::Occupied(mut occupied_entry) =
             self.cached_account_maps.entry(*pubkey)
         {
             let (_slot, count) = occupied_entry.get_mut();
             *count -= 1;
             if *count == 0 {
-                println!("removing key from cache entirely: {}", pubkey);
                 occupied_entry.remove_entry();
             }
         } else {
@@ -1509,11 +1506,6 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> AccountsIndex<T, U> {
         self.cached_account_maps
             .entry(*pubkey)
             .and_modify(|(stored_slot, count)| {
-                // already exists
-                if slot == *stored_slot {
-                    // same slot, no-op
-                    return;
-                }
                 // different slot, update to new slot and increment count
                 if slot > *stored_slot {
                     *stored_slot = slot;
@@ -2363,6 +2355,7 @@ pub mod tests {
                         &AccountSharedData::default(),
                         &AccountSecondaryIndexes::default(),
                         account_infos[0],
+                        true,
                     );
                 } else {
                     index.upsert(
@@ -2415,6 +2408,7 @@ pub mod tests {
                         &AccountSharedData::default(),
                         &AccountSecondaryIndexes::default(),
                         account_infos[1],
+                        true,
                     );
                 } else {
                     index.upsert(
@@ -3015,6 +3009,7 @@ pub mod tests {
             &AccountSharedData::default(),
             &AccountSecondaryIndexes::default(),
             CacheableIndexValueTest(true),
+            true,
         );
         // No reclaims should be returned on the first item
         assert!(reclaims.is_empty());
@@ -3349,6 +3344,7 @@ pub mod tests {
             &AccountSharedData::default(),
             &AccountSecondaryIndexes::default(),
             CacheableIndexValueTest(true),
+            true,
         );
 
         // Now insert a cached account at slot 2
@@ -3358,6 +3354,7 @@ pub mod tests {
             &AccountSharedData::default(),
             &AccountSecondaryIndexes::default(),
             CacheableIndexValueTest(true),
+            true,
         );
 
         // Replace the cached account at slot 2 with a uncached account
