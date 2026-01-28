@@ -526,6 +526,7 @@ pub mod tests {
             index_info: AccountInfo::new(
                 StorageLocation::AppendVec(storage_id, offset),
                 false, // does not matter
+                1,
             ),
             data_len: 7, // does not matter
             pubkey: Pubkey::new_unique(),
@@ -580,6 +581,7 @@ pub mod tests {
                                 index_info: AccountInfo::new(
                                     StorageLocation::AppendVec(storage_id, offset),
                                     account.is_zero_lamport(),
+                                    account.lamports,
                                 ),
                                 data_len: account.data.len() as u64,
                                 pubkey: *account.pubkey,
@@ -617,9 +619,18 @@ pub mod tests {
                             .iter_mut()
                             .zip(offsets.offsets.iter())
                             .for_each(|(account, offset)| {
+                                //HACKY SPOT. Double check
+                                let lamports = if account.is_zero_lamport()
+                                {
+
+                                    0
+                                } else {
+                                    1
+                                };
                                 account.index_info = AccountInfo::new(
                                     StorageLocation::AppendVec(0, *offset),
                                     account.is_zero_lamport(),
+                                    lamports
                                 )
                             });
                     }
@@ -711,6 +722,7 @@ pub mod tests {
                         index_info: AccountInfo::new(
                             StorageLocation::AppendVec(storage_id, offset),
                             account.is_zero_lamport(),
+                            account.lamports,
                         ),
                         data_len: account.data.len() as u64,
                         pubkey: *account.pubkey,
@@ -748,9 +760,15 @@ pub mod tests {
                                     {
                                         result.iter_mut().zip(offsets.offsets.iter()).for_each(
                                             |(account, offset)| {
+                                                let lamports = if account.is_zero_lamport() {
+                                                    0
+                                                } else {
+                                                    1
+                                                };
                                                 account.index_info = AccountInfo::new(
                                                     StorageLocation::AppendVec(0, *offset),
                                                     account.is_zero_lamport(),
+                                                    lamports,
                                                 )
                                             },
                                         );
@@ -802,6 +820,7 @@ pub mod tests {
             index_info: AccountInfo::new(
                 StorageLocation::AppendVec(storage_id, offset),
                 account.is_zero_lamport(),
+                0,
             ),
             data_len: account.data().len() as u64,
             pubkey: Pubkey::new_unique(),

@@ -329,6 +329,7 @@ impl AccountFromStorage {
             index_info: AccountInfo::new(
                 StorageLocation::AppendVec(storage_id, offset),
                 account.is_zero_lamport(),
+                account.lamports
             ),
             pubkey: *account.pubkey(),
             data_len: account.data_len as u64,
@@ -2505,6 +2506,7 @@ impl AccountsDb {
                     index_info: AccountInfo::new(
                         StorageLocation::AppendVec(file_id, offset),
                         account.is_zero_lamport(),
+                        account.lamports,
                     ),
                     pubkey: *account.pubkey(),
                     data_len: account.data_len as u64,
@@ -5158,7 +5160,7 @@ impl AccountsDb {
                 if store_account[i] {
                     accounts.account(i, |account| {
                         let info =
-                            AccountInfo::new(StorageLocation::Cached, account.is_zero_lamport());
+                            AccountInfo::new(StorageLocation::Cached, account.is_zero_lamport(), account.lamports());
                         self.accounts_index.upsert(
                             target_slot,
                             target_slot,
@@ -5811,7 +5813,15 @@ impl AccountsDb {
                     if account.is_zero_lamport()
                         && self
                             .accounts_index
-                            .get_and_then(pubkey, |account| (true, account.is_none()))
+                            .get_and_then(pubkey, |account|
+                            {
+                                if let Some(account) = account {
+                                    let slot_list = account.slot_list_read_lock();
+                                    (true, slot_list.iter().all(|(_, info)| info.is_zero_lamport()))
+                                } else {
+                                    (true, true)
+                                }
+                            })
                     {
                         accounts_skipped += 1;
                         return false;
@@ -5879,9 +5889,11 @@ impl AccountsDb {
 
             let store_id = storage.id();
             for (i, offset) in stored_accounts_info.offsets.iter().enumerate() {
+                let lamports = accounts_and_meta_to_store.account(i, |account| account.lamports());
                 infos.push(AccountInfo::new(
                     StorageLocation::AppendVec(store_id, *offset),
                     accounts_and_meta_to_store.is_zero_lamport(i),
+                    lamports,
                 ));
             }
             storage.add_accounts(
@@ -6236,6 +6248,7 @@ impl AccountsDb {
                     AccountInfo::new(
                         StorageLocation::AppendVec(store_id, offset), // will never be cached
                         is_account_zero_lamport,
+                        account.lamports
                     ),
                 ));
 
@@ -6531,6 +6544,7 @@ impl AccountsDb {
                                     let ai = AccountInfo::new(
                                         StorageLocation::AppendVec(store_id, offset), // will never be cached
                                         account.is_zero_lamport(),
+                                        account.lamports,
                                     );
                                     assert_eq!(&ai, account_info2);
                                 }

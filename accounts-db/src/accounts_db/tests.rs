@@ -241,7 +241,7 @@ fn generate_sample_account_from_storage(i: u8) -> AccountFromStorage {
     // offset has to be 8 byte aligned
     let offset = (i as usize) * std::mem::size_of::<u64>();
     AccountFromStorage {
-        index_info: AccountInfo::new(StorageLocation::AppendVec(i as u32, offset), i == 0),
+        index_info: AccountInfo::new(StorageLocation::AppendVec(i as u32, offset), i == 0,i as u64),
         data_len: i as u64,
         pubkey: Pubkey::new_from_array([i; 32]),
     }
@@ -306,7 +306,7 @@ fn test_sort_and_remove_dups() {
         .collect::<Vec<_>>();
     test1.iter_mut().take(3).for_each(|entry| {
         entry.data_len = 2342342; // this one should be ignored, so modify the data_len so it will fail the compare below if it is used
-        entry.index_info = AccountInfo::new(StorageLocation::Cached, false);
+        entry.index_info = AccountInfo::new(StorageLocation::Cached, false, 1);
     });
 
     let expected = [0, 1u8]
@@ -367,6 +367,7 @@ pub(crate) fn append_single_account_with_default_hash(
         let account_info = AccountInfo::new(
             StorageLocation::AppendVec(storage.id(), stored_accounts_info.offsets[0]),
             account.lamports() == 0,
+            account.lamports(),
         );
         index.upsert(
             slot,
@@ -1227,9 +1228,9 @@ fn test_remove_zero_lamport_single_ref_accounts_after_shrink() {
         }
 
         accounts.accounts_index.get_and_then(&pubkey_zero, |entry| {
-            let expected_ref_count = if pass < 2 { 1 } else { 2 };
+            let expected_ref_count = 1;
             assert_eq!(entry.unwrap().ref_count(), expected_ref_count, "{pass}");
-            let expected_slot_list = if pass < 1 { 1 } else { 2 };
+            let expected_slot_list = 1;
             assert_eq!(entry.unwrap().slot_list_lock_read_len(), expected_slot_list);
             (false, ())
         });
@@ -1253,6 +1254,10 @@ fn test_remove_zero_lamport_single_ref_accounts_after_shrink() {
                     assert!(entry.is_none(), "{pass}");
                 }
                 1 => {
+                    // should not exist in index at all
+                    assert!(entry.is_none(), "{pass}");
+                }
+                2 => {
                     // alive only in slot + 1
                     assert_eq!(entry.unwrap().slot_list_lock_read_len(), 1);
                     assert_eq!(
@@ -1263,28 +1268,9 @@ fn test_remove_zero_lamport_single_ref_accounts_after_shrink() {
                             .map(|(s, _)| s)
                             .cloned()
                             .unwrap(),
-                        slot + 1
+                        slot
                     );
-                    let expected_ref_count = 0;
-                    assert_eq!(
-                        entry.map(|e| e.ref_count()),
-                        Some(expected_ref_count),
-                        "{pass}"
-                    );
-                }
-                2 => {
-                    // alive in both slot, slot + 1
-                    assert_eq!(entry.unwrap().slot_list_lock_read_len(), 2);
-
-                    let slots = entry
-                        .unwrap()
-                        .slot_list_read_lock()
-                        .iter()
-                        .map(|(s, _)| s)
-                        .cloned()
-                        .collect::<Vec<_>>();
-                    assert_eq!(slots, vec![slot, slot + 1]);
-                    let expected_ref_count = 2;
+                    let expected_ref_count = 1;
                     assert_eq!(
                         entry.map(|e| e.ref_count()),
                         Some(expected_ref_count),
@@ -2699,10 +2685,10 @@ fn test_delete_dependencies() {
     let key0 = Pubkey::new_from_array([0u8; 32]);
     let key1 = Pubkey::new_from_array([1u8; 32]);
     let key2 = Pubkey::new_from_array([2u8; 32]);
-    let info0 = AccountInfo::new(StorageLocation::AppendVec(0, 0), true);
-    let info1 = AccountInfo::new(StorageLocation::AppendVec(1, 0), true);
-    let info2 = AccountInfo::new(StorageLocation::AppendVec(2, 0), true);
-    let info3 = AccountInfo::new(StorageLocation::AppendVec(3, 0), true);
+    let info0 = AccountInfo::new(StorageLocation::AppendVec(0, 0), true, 0);
+    let info1 = AccountInfo::new(StorageLocation::AppendVec(1, 0), true, 0);
+    let info2 = AccountInfo::new(StorageLocation::AppendVec(2, 0), true, 0);
+    let info3 = AccountInfo::new(StorageLocation::AppendVec(3, 0), true, 0);
     let mut reclaims = ReclaimsSlotList::new();
     accounts_index.upsert(
         0,
@@ -5142,7 +5128,7 @@ fn test_filter_zero_lamport_clean_for_incremental_snapshots() {
     }
 
     let do_test = |test_params: TestParameters| {
-        let account_info = AccountInfo::new(StorageLocation::AppendVec(42, 128), true);
+        let account_info = AccountInfo::new(StorageLocation::AppendVec(42, 128), true, 0);
         let pubkey = solana_pubkey::new_rand();
         let mut key_set = HashSet::default();
         key_set.insert(pubkey);
@@ -6114,6 +6100,7 @@ fn populate_index(db: &AccountsDb, slots: Range<Slot>) {
                     let info = AccountInfo::new(
                         StorageLocation::AppendVec(storage.id(), offset),
                         account.is_zero_lamport(),
+                        account.lamports,
                     );
                     db.accounts_index.upsert(
                         slot,
