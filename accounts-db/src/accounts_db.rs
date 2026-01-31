@@ -5815,6 +5815,19 @@ impl AccountsDb {
                     let account_shared_data = account.take_account();
                     let pubkey = account.pubkey();
                     if account.is_zero_lamport() {
+                        let has_non_zero_in_index =
+                                self.accounts_index
+                                    .get_and_then(pubkey, |entry| match entry {
+                                        Some(entry) => {
+                                            let slot_list = entry.slot_list_read_lock();
+                                            let any_non_zero = slot_list
+                                                .iter()
+                                                .any(|(_, info)| !info.is_zero_lamport());
+                                            (false, any_non_zero)
+                                        }
+                                        None => (false, false),
+                                    });
+
                         if ancestors.is_some() {
                             if self
                                 .accounts_index
@@ -5827,25 +5840,12 @@ impl AccountsDb {
                                 return false;
                             }
                         } else {
-                            // Skip storing zero-lamport accounts if the index doesn't have
-                            // any non-zero version for this pubkey.
-                            let has_non_zero_in_index =
-                                self.accounts_index
-                                    .get_and_then(pubkey, |entry| match entry {
-                                        Some(entry) => {
-                                            let slot_list = entry.slot_list_read_lock();
-                                            let any_non_zero = slot_list
-                                                .iter()
-                                                .any(|(_, info)| !info.is_zero_lamport());
-                                            (false, any_non_zero)
-                                        }
-                                        None => (false, false),
-                                    });
                             if !has_non_zero_in_index {
                                 accounts_skipped += 1;
                                 return false;
                             }
                         }
+                        assert!(has_non_zero_in_index);
                     }
 
                     // if geyser is enabled, send the account update notification
