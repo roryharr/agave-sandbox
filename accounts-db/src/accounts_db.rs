@@ -5622,6 +5622,7 @@ impl AccountsDb {
         accounts: impl StorableAccounts<'a>,
         transactions: Option<&'a [&'a SanitizedTransaction]>,
         update_index_thread_selection: UpdateIndexThreadSelection,
+        ancestors: Option<&Ancestors>,
     ) {
         // If all transactions in a batch are errored,
         // it's possible to get a store with no accounts.
@@ -5640,8 +5641,12 @@ impl AccountsDb {
 
         // Store the accounts in the write cache
         let mut store_accounts_time = Measure::start("store_accounts");
-        let (store_account, num_ephemeral_accounts_skipped) =
-            self.write_accounts_to_cache(accounts.target_slot(), &accounts, transactions);
+        let (store_account, num_ephemeral_accounts_skipped) = self.write_accounts_to_cache(
+            accounts.target_slot(),
+            &accounts,
+            transactions,
+            ancestors,
+        );
         store_accounts_time.stop();
         self.stats
             .store_accounts_to_cache_us
@@ -5793,6 +5798,7 @@ impl AccountsDb {
         slot: Slot,
         accounts_and_meta_to_store: &impl StorableAccounts<'b>,
         txs: Option<&[&SanitizedTransaction]>,
+        ancestors: Option<&Ancestors>,
     ) -> (Vec<bool>, usize) {
         let mut accounts_skipped = 0;
         let mut current_write_version = if self.accounts_update_notifier.is_some() {
@@ -5808,21 +5814,38 @@ impl AccountsDb {
                 accounts_and_meta_to_store.account(index, |account| {
                     let account_shared_data = account.take_account();
                     let pubkey = account.pubkey();
-                    if account.is_zero_lamport()
-                        && self.accounts_index.get_and_then(pubkey, |account| {
-                            if let Some(account) = account {
-                                let slot_list = account.slot_list_read_lock();
-                                (
-                                    true,
-                                    slot_list.iter().all(|(_, info)| info.is_zero_lamport()),
-                                )
-                            } else {
-                                (true, true)
+                    if account.is_zero_lamport() {
+                        if ancestors.is_some() {
+                            if self
+                                .accounts_index
+                                .get_with_and_then(pubkey, ancestors, None, true, |(_, account)| {
+                                    (!account.is_zero_lamport()).then_some(())
+                                })
+                                .is_none()
+                            {
+                                accounts_skipped += 1;
+                                return false;
                             }
-                        })
-                    {
-                        accounts_skipped += 1;
-                        return false;
+                        } else {
+                            // Skip storing zero-lamport accounts if the index doesn't have
+                            // any non-zero version for this pubkey.
+                            let has_non_zero_in_index =
+                                self.accounts_index
+                                    .get_and_then(pubkey, |entry| match entry {
+                                        Some(entry) => {
+                                            let slot_list = entry.slot_list_read_lock();
+                                            let any_non_zero = slot_list
+                                                .iter()
+                                                .any(|(_, info)| !info.is_zero_lamport());
+                                            (false, any_non_zero)
+                                        }
+                                        None => (false, false),
+                                    });
+                            if !has_non_zero_in_index {
+                                accounts_skipped += 1;
+                                return false;
+                            }
+                        }
                     }
 
                     // if geyser is enabled, send the account update notification
@@ -7200,6 +7223,7 @@ impl AccountsDb {
             (slot, pre_populate_zero_lamport.as_slice()),
             None,
             UpdateIndexThreadSelection::PoolWithThreshold,
+            None,
         );
 
         // Then store the actual accounts provided by the caller.
@@ -7207,6 +7231,7 @@ impl AccountsDb {
             accounts,
             None,
             UpdateIndexThreadSelection::PoolWithThreshold,
+            None,
         );
     }
 

@@ -554,11 +554,13 @@ impl Accounts {
         &self,
         accounts: impl StorableAccounts<'a>,
         transactions: Option<&'a [&'a SanitizedTransaction]>,
+        ancestors: Option<&Ancestors>,
     ) {
         self.accounts_db.store_accounts_unfrozen(
             accounts,
             transactions,
             UpdateIndexThreadSelection::Inline,
+            ancestors,
         );
     }
 
@@ -570,11 +572,13 @@ impl Accounts {
         &self,
         accounts: impl StorableAccounts<'a>,
         transactions: Option<&'a [&'a SanitizedTransaction]>,
+        ancestors: Option<&Ancestors>,
     ) {
         self.accounts_db.store_accounts_unfrozen(
             accounts,
             transactions,
             UpdateIndexThreadSelection::PoolWithThreshold,
+            ancestors,
         );
     }
 

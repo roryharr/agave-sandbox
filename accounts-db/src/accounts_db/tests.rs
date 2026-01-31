@@ -6612,6 +6612,7 @@ fn test_new_zero_lamport_accounts_skipped() {
         (slot, [(&pubkey1, &zero_account)].as_slice()),
         None,
         UpdateIndexThreadSelection::PoolWithThreshold,
+        None,
     );
     assert!(!accounts_db.accounts_index.contains(&pubkey1));
     assert!(accounts_db.accounts_cache.slot_cache(slot).is_none());
@@ -6631,6 +6632,7 @@ fn test_new_zero_lamport_accounts_skipped() {
         ),
         None,
         UpdateIndexThreadSelection::PoolWithThreshold,
+        None,
     );
     assert!(!accounts_db.accounts_index.contains(&pubkey1));
     assert!(!accounts_db
@@ -6657,6 +6659,7 @@ fn test_new_zero_lamport_accounts_skipped() {
         (slot, [(&pubkey2, &zero_account)].as_slice()),
         None,
         UpdateIndexThreadSelection::PoolWithThreshold,
+        None,
     );
     assert!(accounts_db.accounts_index.contains(&pubkey2));
     assert!(accounts_db
@@ -6685,6 +6688,7 @@ fn test_new_zero_lamport_accounts_skipped() {
         (slot, [(&pubkey1, &account)].as_slice()),
         None,
         UpdateIndexThreadSelection::PoolWithThreshold,
+        None,
     );
     assert!(accounts_db.accounts_index.contains(&pubkey1));
 
@@ -6694,6 +6698,7 @@ fn test_new_zero_lamport_accounts_skipped() {
         (slot, [(&pubkey3, &zero_account)].as_slice()),
         None,
         UpdateIndexThreadSelection::PoolWithThreshold,
+        None,
     );
     accounts_db.add_root_and_flush_write_cache(slot);
 
@@ -6722,6 +6727,7 @@ fn test_zero_lamport_skip_all_zero_lamport_slots() {
         (0, [(&pubkey, &non_zero_account)].as_slice()),
         None,
         UpdateIndexThreadSelection::PoolWithThreshold,
+        None,
     );
     accounts_db.add_root_and_flush_write_cache(0);
 
@@ -6730,6 +6736,7 @@ fn test_zero_lamport_skip_all_zero_lamport_slots() {
         (1, [(&pubkey, &zero_account)].as_slice()),
         None,
         UpdateIndexThreadSelection::PoolWithThreshold,
+        None,
     );
     accounts_db.add_root_and_flush_write_cache(1);
 
@@ -6754,6 +6761,7 @@ fn test_zero_lamport_skip_all_zero_lamport_slots() {
         (2, [(&pubkey, &zero_account)].as_slice()),
         None,
         UpdateIndexThreadSelection::PoolWithThreshold,
+        None,
     );
 
     // The new zero lamport entry should be skipped since all existing slots are zero
@@ -6779,6 +6787,7 @@ fn test_zero_lamport_resurrection_after_all_zero() {
         (0, [(&pubkey, &non_zero_account)].as_slice()),
         None,
         UpdateIndexThreadSelection::PoolWithThreshold,
+        None,
     );
     accounts_db.add_root_and_flush_write_cache(0);
 
@@ -6787,6 +6796,7 @@ fn test_zero_lamport_resurrection_after_all_zero() {
         (1, [(&pubkey, &zero_account)].as_slice()),
         None,
         UpdateIndexThreadSelection::PoolWithThreshold,
+        None,
     );
     accounts_db.add_root_and_flush_write_cache(1);
 
@@ -6798,6 +6808,7 @@ fn test_zero_lamport_resurrection_after_all_zero() {
         (2, [(&pubkey, &non_zero_account)].as_slice()),
         None,
         UpdateIndexThreadSelection::PoolWithThreshold,
+        None,
     );
 
     // Verify slot 2 was added
