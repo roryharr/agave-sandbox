@@ -5641,7 +5641,7 @@ impl AccountsDb {
 
         // Store the accounts in the write cache
         let mut store_accounts_time = Measure::start("store_accounts");
-        let (store_account, num_ephemeral_accounts_skipped) = self.write_accounts_to_cache(
+        let (store_account, num_ephemeral_accounts_skipped, num_duplicate_accounts_skipped) = self.write_accounts_to_cache(
             accounts.target_slot(),
             &accounts,
             transactions,
@@ -5662,12 +5662,15 @@ impl AccountsDb {
             .store_update_index
             .fetch_add(update_index_time.as_us(), Ordering::Relaxed);
         self.stats.num_store_accounts_to_cache.fetch_add(
-            (accounts.len() - num_ephemeral_accounts_skipped) as u64,
+            (accounts.len() - num_ephemeral_accounts_skipped - num_duplicate_accounts_skipped) as u64,
             Ordering::Relaxed,
         );
         self.stats
             .num_ephemeral_accounts_skipped
             .fetch_add(num_ephemeral_accounts_skipped as u64, Ordering::Relaxed);
+        self.stats
+        .num_duplicate_accounts_skipped
+        .fetch_add(num_duplicate_accounts_skipped as u64, Ordering::Relaxed);
         self.report_store_timings();
     }
 
@@ -5799,53 +5802,63 @@ impl AccountsDb {
         accounts_and_meta_to_store: &impl StorableAccounts<'b>,
         txs: Option<&[&SanitizedTransaction]>,
         ancestors: Option<&Ancestors>,
-    ) -> (Vec<bool>, usize) {
+    ) -> (Vec<bool>, usize, usize) {
         let mut accounts_skipped = 0;
+        let mut duplicate_accounts_skipped = 0;
+        let len = accounts_and_meta_to_store.len();
+        let mut pubkey_set = HashSet::with_capacity(len);
         let mut current_write_version = if self.accounts_update_notifier.is_some() {
             self.write_version
-                .fetch_add(accounts_and_meta_to_store.len() as u64, Ordering::AcqRel)
+                .fetch_add(len as u64, Ordering::AcqRel)
         } else {
             0
         };
+        let mut store_accounts = vec![false; len];
 
-        let store_account = (0..accounts_and_meta_to_store.len())
-            .map(|index| {
+        (0..len)
+            .rev()
+            .for_each(|index| {
                 let txn = txs.map(|txs| *txs.get(index).expect("txs must be present if provided"));
                 accounts_and_meta_to_store.account(index, |account| {
+                    let already_seen = !pubkey_set.insert(*account.pubkey());
+                    if already_seen {
+                        // If the same account is written multiple times in the same batch,
+                        // only store the latest version
+                        duplicate_accounts_skipped += 1;
+                        return;
+                    }
                     let account_shared_data = account.take_account();
                     let pubkey = account.pubkey();
                     if account.is_zero_lamport() {
-                        let has_non_zero_in_index =
-                                self.accounts_index
-                                    .get_and_then(pubkey, |entry| match entry {
-                                        Some(entry) => {
-                                            let slot_list = entry.slot_list_read_lock();
-                                            let any_non_zero = slot_list
-                                                .iter()
-                                                .any(|(_, info)| !info.is_zero_lamport());
-                                            (false, any_non_zero)
-                                        }
-                                        None => (false, false),
-                                    });
-
                         if ancestors.is_some() {
                             if self
                                 .accounts_index
                                 .get_with_and_then(pubkey, ancestors, None, true, |(_, account)| {
-                                    (!account.is_zero_lamport()).then_some(())
+                                    account.is_zero_lamport()
                                 })
-                                .is_none()
+                                .unwrap_or(true)
                             {
                                 accounts_skipped += 1;
-                                return false;
+                                return;
                             }
                         } else {
-                            if !has_non_zero_in_index {
+                            let all_zero =
+                                self.accounts_index
+                                    .get_and_then(pubkey, |entry| match entry {
+                                        Some(entry) => {
+                                            let slot_list = entry.slot_list_read_lock();
+                                            let all_zero = slot_list
+                                                .iter()
+                                                .all(|(_, info)| info.is_zero_lamport());
+                                            (false, all_zero)
+                                        }
+                                        None => (false, true),
+                                    });
+                            if all_zero {
                                 accounts_skipped += 1;
-                                return false;
+                                return;
                             }
                         }
-                        assert!(has_non_zero_in_index);
                     }
 
                     // if geyser is enabled, send the account update notification
@@ -5867,12 +5880,11 @@ impl AccountsDb {
                         account_shared_data
                     };
                     self.accounts_cache.store(slot, pubkey, account_to_store);
-                    true
+                    store_accounts[index] = true;
                 })
-            })
-            .collect();
+            });
 
-        (store_account, accounts_skipped)
+        (store_accounts, accounts_skipped, duplicate_accounts_skipped)
     }
 
     fn write_accounts_to_storage<'a>(
@@ -6130,6 +6142,13 @@ impl AccountsDb {
                     "num_ephemeral_accounts_skipped",
                     self.stats
                         .num_ephemeral_accounts_skipped
+                        .swap(0, Ordering::Relaxed),
+                    i64
+                ),
+                (
+                    "num_duplicate_accounts_skipped",
+                    self.stats
+                        .num_duplicate_accounts_skipped
                         .swap(0, Ordering::Relaxed),
                     i64
                 ),
