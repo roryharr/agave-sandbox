@@ -219,3 +219,83 @@ Even after Stage 1, keep low-cost counters to detect regressions:
   Mitigation: centralize cache-slot removal hooks and add debug assertions on underflow/missing entries; keep mismatch metrics.
 
 ---
+
+## Phase 1: Implementation plan (Stage 1 verifier)
+
+### Objectives
+- Introduce a cache-resident index (`AccountsCacheIndex`) that tracks cached presence for each pubkey.
+- Maintain it on all cache write/removal paths.
+- Add a **load-path verifier** that compares:
+  - Primary index selected cached slot `S`
+  - Cache-index hinted newest cached slot `S'`
+- Preserve correctness via deterministic fallback: **always trust `S`** in Phase 1.
+
+### Deliverables
+1. `AccountsCacheIndex` data structure with:
+   - `DashMap<Pubkey, CachedSlotsEntry { newest_slot: Slot, slot_refcount: u32, newest_slot_stale: bool }>`
+2. Wiring:
+   - store-to-cache: payload → cache_index → primary index
+   - flush/purge: remove payload → decrement cache_index refcounts (delete on 0)
+3. Load verifier:
+   - only when `StorageLocation::Cached` is selected by primary index
+   - metrics + (optional) sampled double-read
+4. Telemetry:
+   - mismatch and missing counters + datapoints
+5. Tests:
+   - unit tests for refcount correctness
+   - integration tests that store the same pubkey in multiple unrooted slots and confirm no correctness change
+
+### Detailed steps
+
+#### 1) Add cache index type
+- Location: `accounts-db/src/accounts_index/cache_index.rs` (new module)
+- API:
+  - `on_store(slot, pubkey)`
+  - `on_remove(slot, pubkey)` (debug assert on underflow)
+  - `get_newest(pubkey) -> Option<Slot>` (may return stale; Phase 1 safe)
+  - `stats()` counters (atomic)
+
+#### 2) Add it to `AccountsDb`
+- Add field: `cache_index: AccountsCacheIndex`
+- Construct in `AccountsDb::new_with_config()`
+
+#### 3) Store-to-cache wiring (`store_accounts_unfrozen`)
+- After `write_accounts_to_cache()` returns infos, update cache index for each pubkey stored:
+  - `cache_index.on_store(slot, pubkey)`
+- Keep ordering: payload first, cache index second, primary index third.
+
+#### 4) Flush wiring (`do_flush_slot_cache`)
+- Collect pubkeys as you already do for purge/uncleaned management.
+- After payload removal (or during the same critical section), call:
+  - `cache_index.on_remove(slot, pubkey)` for every pubkey removed from that slot.
+- This should run for both:
+  - full slot flush
+  - clean-driven partial flushes (if any pubkeys remain cached, they must *not* be decremented)
+
+#### 5) Purge wiring (`purge_slot_cache_pubkeys`)
+- When purging a cached slot, we already iterate pubkeys.
+- Extend to also decrement cache_index for every `(slot,pubkey)` purged.
+
+#### 6) Load-path verifier (Phase 1)
+- In the cached-load path inside `AccountsDb::retry_to_get_account_accessor()` (or the narrowest helper that runs when primary index selected cached):
+  - Let `S` be the slot selected by primary index.
+  - Read `S' = cache_index.get_newest(pubkey)`.
+  - Metrics:
+    - missing if `S' == None`
+    - mismatch if `S' != Some(S)`
+    - match otherwise
+  - Optional sampled double-read:
+    - if `S' != Some(S)` and `S'.is_some()`: attempt `accounts_cache.load(S', pubkey)` and record hit/miss
+  - Correctness: still read from `(S,pubkey)` only.
+
+### Metrics (Phase 1)
+- `cache_index_primary_cached_selected_total`
+- `cache_index_missing_for_pubkey_total`
+- `cache_index_newest_slot_mismatch_total`
+- `cache_index_hint_cache_miss_total` (when `load(S',pubkey)` is None)
+- `cache_index_refcount_underflow_total`
+
+### Definition of done
+- All existing tests pass.
+- New tests validate refcount delete-on-zero and multi-fork mismatch scenarios.
+- Metrics appear in logs; mismatch rate can be evaluated without correctness changes.
