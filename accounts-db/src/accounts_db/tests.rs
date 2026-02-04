@@ -19,7 +19,7 @@ use {
         iter::{self, FromIterator},
         ops::Range,
         str::FromStr,
-        sync::{atomic::AtomicBool, RwLock},
+        sync::atomic::AtomicBool,
         thread::{self, Builder, JoinHandle},
     },
     test_case::{test_case, test_matrix},
@@ -4671,81 +4671,7 @@ fn test_cache_flush_remove_unrooted_race_multiple_slots() {
     t_spurious_signal.join().unwrap();
 }
 
-#[test]
-fn test_collect_uncleaned_slots_up_to_slot() {
-    agave_logger::setup();
-    let db = AccountsDb::new_single_for_tests();
 
-    let slot1 = 11;
-    let slot2 = 222;
-    let slot3 = 3333;
-
-    let pubkey1 = Pubkey::new_unique();
-    let pubkey2 = Pubkey::new_unique();
-    let pubkey3 = Pubkey::new_unique();
-
-    db.uncleaned_pubkeys.insert(slot1, vec![pubkey1]);
-    db.uncleaned_pubkeys.insert(slot2, vec![pubkey2]);
-    db.uncleaned_pubkeys.insert(slot3, vec![pubkey3]);
-
-    let mut uncleaned_slots1 = db.collect_uncleaned_slots_up_to_slot(slot1);
-    let mut uncleaned_slots2 = db.collect_uncleaned_slots_up_to_slot(slot2);
-    let mut uncleaned_slots3 = db.collect_uncleaned_slots_up_to_slot(slot3);
-
-    uncleaned_slots1.sort_unstable();
-    uncleaned_slots2.sort_unstable();
-    uncleaned_slots3.sort_unstable();
-
-    assert_eq!(uncleaned_slots1, [slot1]);
-    assert_eq!(uncleaned_slots2, [slot1, slot2]);
-    assert_eq!(uncleaned_slots3, [slot1, slot2, slot3]);
-}
-
-#[test]
-fn test_remove_uncleaned_slots_and_collect_pubkeys_up_to_slot() {
-    agave_logger::setup();
-    let db = AccountsDb::new_single_for_tests();
-
-    let slot1 = 11;
-    let slot2 = 222;
-    let slot3 = 3333;
-
-    let pubkey1 = Pubkey::new_unique();
-    let pubkey2 = Pubkey::new_unique();
-    let pubkey3 = Pubkey::new_unique();
-
-    let account1 = AccountSharedData::new(0, 0, &pubkey1);
-    let account2 = AccountSharedData::new(0, 0, &pubkey2);
-    let account3 = AccountSharedData::new(0, 0, &pubkey3);
-
-    db.store_for_tests((slot1, [(&pubkey1, &account1)].as_slice()));
-    db.store_for_tests((slot2, [(&pubkey2, &account2)].as_slice()));
-    db.store_for_tests((slot3, [(&pubkey3, &account3)].as_slice()));
-
-    // slot 1 is _not_ a root on purpose
-    db.add_root(slot2);
-    db.add_root(slot3);
-
-    db.uncleaned_pubkeys.insert(slot1, vec![pubkey1]);
-    db.uncleaned_pubkeys.insert(slot2, vec![pubkey2]);
-    db.uncleaned_pubkeys.insert(slot3, vec![pubkey3]);
-
-    let num_bins = db.accounts_index.bins();
-    let candidates: Box<_> =
-        std::iter::repeat_with(|| RwLock::new(HashMap::<Pubkey, CleaningInfo>::new()))
-            .take(num_bins)
-            .collect();
-    db.remove_uncleaned_slots_up_to_slot_and_move_pubkeys(slot3, &candidates);
-
-    let candidates_contain = |pubkey: &Pubkey| {
-        candidates
-            .iter()
-            .any(|bin| bin.read().unwrap().contains(pubkey))
-    };
-    assert!(candidates_contain(&pubkey1));
-    assert!(candidates_contain(&pubkey2));
-    assert!(candidates_contain(&pubkey3));
-}
 
 #[test_case(#[allow(deprecated)] StorageAccess::Mmap)]
 #[test_case(StorageAccess::File)]

@@ -18,6 +18,7 @@
 //! tracks the number of commits to the entire data store. So the latest
 //! commit for each slot entry would be indexed.
 
+mod accounts_db_clean;
 mod accounts_db_config;
 mod geyser_plugin_utils;
 pub mod stats;
@@ -37,9 +38,12 @@ use {
         },
         account_storage_entry::AccountStorageEntry,
         accounts_cache::{AccountsCache, CachedAccount, SlotCache},
-        accounts_db::stats::{
-            AccountsStats, CleanAccountsStats, FlushStats, ObsoleteAccountsStats, PurgeStats,
-            ShrinkAncientStats, ShrinkStats, ShrinkStatsSub, StoreAccountsTiming,
+        accounts_db::{
+            accounts_db_clean::{construct_candidate_clean_keys, CleanKeyTimings, CleaningInfo},
+            stats::{
+                AccountsStats, CleanAccountsStats, FlushStats, ObsoleteAccountsStats, PurgeStats,
+                ShrinkAncientStats, ShrinkStats, ShrinkStatsSub, StoreAccountsTiming,
+            },
         },
         accounts_file::{AccountsFile, AccountsFileProvider, StorageAccess},
         accounts_hash::{AccountLtHash, AccountsLtHash, ZERO_LAMPORT_ACCOUNT_LT_HASH},
@@ -84,7 +88,7 @@ use {
         ops::RangeBounds,
         path::{Path, PathBuf},
         sync::{
-            atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering},
+            atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
             Arc, Condvar, Mutex, RwLock,
         },
         thread::{self, sleep},
@@ -783,18 +787,6 @@ impl ReadableAccount for LoadedAccount<'_> {
     }
 }
 
-#[derive(Default)]
-struct CleanKeyTimings {
-    collect_delta_keys_us: u64,
-    delta_insert_us: u64,
-    dirty_store_processing_us: u64,
-    delta_key_count: u64,
-    dirty_pubkeys_count: u64,
-    oldest_dirty_slot: Slot,
-    /// number of ancient append vecs that were scanned because they were dirty when clean started
-    dirty_ancient_stores: usize,
-}
-
 pub fn get_temp_accounts_paths(count: u32) -> io::Result<(Vec<TempDir>, Vec<PathBuf>)> {
     let temp_dirs: io::Result<Vec<TempDir>> = (0..count).map(|_| TempDir::new()).collect();
     let temp_dirs = temp_dirs?;
@@ -810,16 +802,6 @@ pub fn get_temp_accounts_paths(count: u32) -> io::Result<(Vec<TempDir>, Vec<Path
     Ok((temp_dirs, paths))
 }
 
-#[derive(Default, Debug)]
-struct CleaningInfo {
-    slot_list: SlotList<AccountInfo>,
-    ref_count: RefCount,
-    /// Indicates if this account might have a zero lamport index entry.
-    /// If false, the account *shall* not have zero lamport index entries.
-    /// If true, the account *might* have zero lamport index entries.
-    might_contain_zero_lamport_entry: bool,
-}
-
 /// Indicates when to mark accounts obsolete
 /// * Disabled - do not mark accounts obsolete
 /// * Enabled - mark accounts obsolete during write cache flush
@@ -829,13 +811,6 @@ pub enum MarkObsoleteAccounts {
     #[default]
     Enabled,
 }
-
-/// This is the return type of AccountsDb::construct_candidate_clean_keys.
-/// It's a collection of pubkeys with associated information to
-/// facilitate the decision making about which accounts can be removed
-/// from the accounts index. In addition, the minimal dirty slot is
-/// included in the returned value.
-type CleaningCandidates = (Box<[RwLock<HashMap<Pubkey, CleaningInfo>>]>, Option<Slot>);
 
 /// Removing unrooted slots in Accounts Background Service needs to be synchronized with flushing
 /// slots from the Accounts Cache.  This keeps track of those slots and the Mutex + Condvar for
@@ -1420,208 +1395,6 @@ impl AccountsDb {
         result.min(max_root_inclusive)
     }
 
-    /// Collect all the uncleaned slots, up to a max slot
-    ///
-    /// Search through the uncleaned Pubkeys and return all the slots, up to a maximum slot.
-    fn collect_uncleaned_slots_up_to_slot(&self, max_slot_inclusive: Slot) -> Vec<Slot> {
-        self.uncleaned_pubkeys
-            .iter()
-            .filter_map(|entry| {
-                let slot = *entry.key();
-                (slot <= max_slot_inclusive).then_some(slot)
-            })
-            .collect()
-    }
-
-    /// For each slot in the list of uncleaned slots, up to a maximum
-    /// slot, remove it from the `uncleaned_pubkeys` and move all the
-    /// pubkeys to `candidates` for cleaning.
-    fn remove_uncleaned_slots_up_to_slot_and_move_pubkeys(
-        &self,
-        max_slot_inclusive: Slot,
-        candidates: &[RwLock<HashMap<Pubkey, CleaningInfo>>],
-    ) {
-        let uncleaned_slots = self.collect_uncleaned_slots_up_to_slot(max_slot_inclusive);
-        for uncleaned_slot in uncleaned_slots.into_iter() {
-            if let Some((_removed_slot, mut removed_pubkeys)) =
-                self.uncleaned_pubkeys.remove(&uncleaned_slot)
-            {
-                // Sort all keys by bin index so that we can insert
-                // them in `candidates` more efficiently.
-                removed_pubkeys.sort_by(|a, b| {
-                    self.accounts_index
-                        .bin_calculator
-                        .bin_from_pubkey(a)
-                        .cmp(&self.accounts_index.bin_calculator.bin_from_pubkey(b))
-                });
-                if let Some(first_removed_pubkey) = removed_pubkeys.first() {
-                    let mut prev_bin = self
-                        .accounts_index
-                        .bin_calculator
-                        .bin_from_pubkey(first_removed_pubkey);
-                    let mut candidates_bin = candidates[prev_bin].write().unwrap();
-                    for removed_pubkey in removed_pubkeys {
-                        let curr_bin = self
-                            .accounts_index
-                            .bin_calculator
-                            .bin_from_pubkey(&removed_pubkey);
-                        if curr_bin != prev_bin {
-                            candidates_bin = candidates[curr_bin].write().unwrap();
-                            prev_bin = curr_bin;
-                        }
-                        // Conservatively mark the candidate might have a zero lamport entry for
-                        // correctness so that scan WILL try to look in disk if it is
-                        // not in-mem. These keys are from 1) recently processed
-                        // slots, 2) zero lamports found in shrink. Therefore, they are very likely
-                        // to be in-memory, and seldomly do we need to look them up in disk.
-                        candidates_bin.insert(
-                            removed_pubkey,
-                            CleaningInfo {
-                                might_contain_zero_lamport_entry: true,
-                                ..Default::default()
-                            },
-                        );
-                    }
-                }
-            }
-        }
-    }
-
-    fn count_pubkeys(candidates: &[RwLock<HashMap<Pubkey, CleaningInfo>>]) -> u64 {
-        candidates
-            .iter()
-            .map(|x| x.read().unwrap().len())
-            .sum::<usize>() as u64
-    }
-
-    /// Construct a list of candidates for cleaning from:
-    /// - dirty_stores      -- set of stores which had accounts removed or recently rooted
-    /// - uncleaned_pubkeys -- the delta set of updated pubkeys in rooted slots from the last clean
-    ///
-    /// The function also returns the minimum slot we encountered.
-    fn construct_candidate_clean_keys(
-        &self,
-        max_clean_root_inclusive: Option<Slot>,
-        is_startup: bool,
-        timings: &mut CleanKeyTimings,
-        epoch_schedule: &EpochSchedule,
-    ) -> CleaningCandidates {
-        let oldest_non_ancient_slot = self.get_oldest_non_ancient_slot(epoch_schedule);
-        let mut dirty_store_processing_time = Measure::start("dirty_store_processing");
-        let max_root_inclusive = self.accounts_index.max_root_inclusive();
-        let max_slot_inclusive = max_clean_root_inclusive.unwrap_or(max_root_inclusive);
-        let mut dirty_stores = Vec::with_capacity(self.dirty_stores.len());
-        // find the oldest dirty slot
-        // we'll add logging if that append vec cannot be marked dead
-        let mut min_dirty_slot = None::<u64>;
-        self.dirty_stores.retain(|slot, store| {
-            if *slot > max_slot_inclusive {
-                true
-            } else {
-                min_dirty_slot = min_dirty_slot.map(|min| min.min(*slot)).or(Some(*slot));
-                dirty_stores.push((*slot, store.clone()));
-                false
-            }
-        });
-        let dirty_stores_len = dirty_stores.len();
-        let num_bins = self.accounts_index.bins();
-        let candidates: Box<_> =
-            std::iter::repeat_with(|| RwLock::new(HashMap::<Pubkey, CleaningInfo>::new()))
-                .take(num_bins)
-                .collect();
-
-        let insert_candidate = |pubkey, is_zero_lamport| {
-            let index = self.accounts_index.bin_calculator.bin_from_pubkey(&pubkey);
-            let mut candidates_bin = candidates[index].write().unwrap();
-            candidates_bin
-                .entry(pubkey)
-                .or_default()
-                .might_contain_zero_lamport_entry |= is_zero_lamport;
-        };
-
-        let dirty_ancient_stores = AtomicUsize::default();
-        let mut dirty_store_routine = || {
-            let chunk_size = 1.max(dirty_stores_len.saturating_div(rayon::current_num_threads()));
-            let oldest_dirty_slots: Vec<u64> = dirty_stores
-                .par_chunks(chunk_size)
-                .map(|dirty_store_chunk| {
-                    let mut oldest_dirty_slot = max_slot_inclusive.saturating_add(1);
-                    dirty_store_chunk.iter().for_each(|(slot, store)| {
-                        if *slot < oldest_non_ancient_slot {
-                            dirty_ancient_stores.fetch_add(1, Ordering::Relaxed);
-                        }
-                        oldest_dirty_slot = oldest_dirty_slot.min(*slot);
-
-                        store
-                            .accounts
-                            .scan_accounts_without_data(|_offset, account| {
-                                let pubkey = *account.pubkey();
-                                let is_zero_lamport = account.is_zero_lamport();
-                                insert_candidate(pubkey, is_zero_lamport);
-                            })
-                            .expect("must scan accounts storage");
-                    });
-                    oldest_dirty_slot
-                })
-                .collect();
-            timings.oldest_dirty_slot = *oldest_dirty_slots
-                .iter()
-                .min()
-                .unwrap_or(&max_slot_inclusive.saturating_add(1));
-        };
-
-        if is_startup {
-            // Free to consume all the cores during startup
-            dirty_store_routine();
-        } else {
-            self.thread_pool_background.install(|| {
-                dirty_store_routine();
-            });
-        }
-        timings.dirty_pubkeys_count = Self::count_pubkeys(&candidates);
-        trace!(
-            "dirty_stores.len: {} pubkeys.len: {}",
-            dirty_stores_len,
-            timings.dirty_pubkeys_count,
-        );
-        dirty_store_processing_time.stop();
-        timings.dirty_store_processing_us += dirty_store_processing_time.as_us();
-        timings.dirty_ancient_stores = dirty_ancient_stores.load(Ordering::Relaxed);
-
-        let mut collect_delta_keys = Measure::start("key_create");
-        self.remove_uncleaned_slots_up_to_slot_and_move_pubkeys(max_slot_inclusive, &candidates);
-        collect_delta_keys.stop();
-        timings.collect_delta_keys_us += collect_delta_keys.as_us();
-
-        timings.delta_key_count = Self::count_pubkeys(&candidates);
-
-        // Check if we should purge any of the
-        // zero_lamport_accounts_to_purge_later, based on the
-        // latest_full_snapshot_slot.
-        let latest_full_snapshot_slot = self.latest_full_snapshot_slot();
-        assert!(
-            latest_full_snapshot_slot.is_some()
-                || self
-                    .zero_lamport_accounts_to_purge_after_full_snapshot
-                    .is_empty(),
-            "if snapshots are disabled, then zero_lamport_accounts_to_purge_later should always \
-             be empty"
-        );
-        if let Some(latest_full_snapshot_slot) = latest_full_snapshot_slot {
-            self.zero_lamport_accounts_to_purge_after_full_snapshot
-                .retain(|(slot, pubkey)| {
-                    let is_candidate_for_clean =
-                        max_slot_inclusive >= *slot && latest_full_snapshot_slot >= *slot;
-                    if is_candidate_for_clean {
-                        insert_candidate(*pubkey, true);
-                    }
-                    !is_candidate_for_clean
-                });
-        }
-
-        (candidates, min_dirty_slot)
-    }
-
     /// called with cli argument to verify refcounts are correct on all accounts
     /// this is very slow
     /// this function will call Rayon par_iter, so you will want to have thread pool installed if
@@ -1758,7 +1531,8 @@ impl AccountsDb {
             .activate(ActiveStatItem::CleanConstructCandidates);
         let mut measure_construct_candidates = Measure::start("construct_candidates");
         let mut key_timings = CleanKeyTimings::default();
-        let (mut candidates, min_dirty_slot) = self.construct_candidate_clean_keys(
+        let (mut candidates, min_dirty_slot) = construct_candidate_clean_keys(
+            self,
             max_clean_root_inclusive,
             is_startup,
             &mut key_timings,
@@ -1767,7 +1541,7 @@ impl AccountsDb {
         measure_construct_candidates.stop();
         drop(active_guard);
 
-        let num_candidates = Self::count_pubkeys(&candidates);
+        let num_candidates = accounts_db_clean::count_pubkeys(&candidates);
         let found_not_zero_accum = AtomicU64::new(0);
         let not_found_on_fork_accum = AtomicU64::new(0);
         let missing_accum = AtomicU64::new(0);
