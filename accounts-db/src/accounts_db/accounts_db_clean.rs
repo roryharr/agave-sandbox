@@ -1,23 +1,30 @@
-//! AccountsDb clean pipeline extraction - part 1: candidate construction & dirty tracking.
+//! AccountsDb clean pipeline extraction
+//!
+//! Part 1: candidate construction & dirty tracking.
+//! Part 2: reclaim gathering + delete-dependency analysis.
 
 use {
     crate::{
         account_info::AccountInfo,
-        accounts_db::AccountsDb,
+        accounts_db::{
+            AccountsDb,
+            PubkeysRemovedFromAccountsIndex, // type alias from accounts_db.rs
+        },
         accounts_index::{RefCount, SlotList},
         is_zero_lamport::IsZeroLamport,
     },
-    log::trace,
+    log::{debug, info, trace},
     rayon::prelude::*,
     solana_clock::Slot,
     solana_epoch_schedule::EpochSchedule,
     solana_measure::measure::Measure,
+    solana_nohash_hasher::IntSet,
     solana_pubkey::Pubkey,
     std::{
-        collections::HashMap,
+        collections::{HashMap, HashSet},
         sync::{
-            atomic::{AtomicUsize, Ordering},
-            RwLock,
+            atomic::{AtomicU64, AtomicUsize, Ordering},
+            Mutex, RwLock,
         },
     },
 };
@@ -251,11 +258,155 @@ pub(crate) fn construct_candidate_clean_keys(
     (candidates, min_dirty_slot)
 }
 
+/// While scanning cleaning candidates obtain slots that can be
+/// reclaimed for each pubkey. In addition, if the pubkey is
+/// removed from the index, insert in pubkeys_removed_from_accounts_index.
+pub(crate) fn collect_reclaims(
+    db: &AccountsDb,
+    pubkey: &Pubkey,
+    max_clean_root_inclusive: Option<Slot>,
+    ancient_account_cleans: &AtomicU64,
+    epoch_schedule: &EpochSchedule,
+    pubkeys_removed_from_accounts_index: &Mutex<PubkeysRemovedFromAccountsIndex>,
+) -> crate::accounts_index::ReclaimsSlotList<AccountInfo> {
+    let one_epoch_old = db.get_oldest_non_ancient_slot(epoch_schedule);
+    let mut clean_rooted = Measure::start("clean_old_root-ms");
+    let mut reclaims = crate::accounts_index::ReclaimsSlotList::new();
+    let removed_from_index =
+        db.accounts_index
+            .clean_rooted_entries(pubkey, &mut reclaims, max_clean_root_inclusive);
+    if removed_from_index {
+        pubkeys_removed_from_accounts_index
+            .lock()
+            .unwrap()
+            .insert(*pubkey);
+    }
+    if !reclaims.is_empty() {
+        // figure out how many ancient accounts have been reclaimed
+        let old_reclaims = reclaims
+            .iter()
+            .filter_map(|(slot, _)| (slot < &one_epoch_old).then_some(1))
+            .sum();
+        ancient_account_cleans.fetch_add(old_reclaims, Ordering::Relaxed);
+    }
+    clean_rooted.stop();
+    db.clean_accounts_stats
+        .clean_old_root_us
+        .fetch_add(clean_rooted.as_us(), Ordering::Relaxed);
+    reclaims
+}
+
+/// increment store_counts to non-zero for all stores that can not be deleted.
+/// a store cannot be deleted if:
+/// 1. one of the pubkeys in the store has account info to a store whose store count is not going to zero
+/// 2. a pubkey we were planning to remove is not removing all stores that contain the account
+pub(crate) fn calc_delete_dependencies(
+    db: &AccountsDb,
+    candidates: &[HashMap<Pubkey, CleaningInfo>],
+    store_counts: &mut HashMap<Slot, (usize, HashSet<Pubkey>)>,
+    min_slot: Option<Slot>,
+) {
+    // Another pass to check if there are some filtered accounts which
+    // do not match the criteria of deleting all appendvecs which contain them
+    // then increment their storage count.
+    let mut already_counted = IntSet::default();
+    for (bin_index, bin) in candidates.iter().enumerate() {
+        for (pubkey, cleaning_info) in bin.iter() {
+            let slot_list = &cleaning_info.slot_list;
+            let ref_count = &cleaning_info.ref_count;
+            let mut failed_slot = None;
+            let all_stores_being_deleted = slot_list.len() as RefCount == *ref_count;
+            if all_stores_being_deleted {
+                let mut delete = true;
+                for (slot, _account_info) in slot_list {
+                    if let Some(count) = store_counts.get(slot).map(|s| s.0) {
+                        debug!("calc_delete_dependencies() slot: {slot}, count len: {count}");
+                        if count == 0 {
+                            // this store CAN be removed
+                            continue;
+                        }
+                    }
+                    // One of the pubkeys in the store has account info to a store whose store count is not going to zero.
+                    // If the store cannot be found, that also means store isn't being deleted.
+                    failed_slot = Some(*slot);
+                    delete = false;
+                    break;
+                }
+                if delete {
+                    // this pubkey can be deleted from all stores it is in
+                    continue;
+                }
+            } else {
+                debug!(
+                    "calc_delete_dependencies: pubkey {} ref_count {} slot_list.len {}",
+                    pubkey,
+                    ref_count,
+                    slot_list.len()
+                );
+            }
+
+            // increment store_counts to non-zero for all stores that can not be deleted.
+            let mut pending_stores = IntSet::default();
+            for (slot, _account_info) in slot_list {
+                if !already_counted.contains(slot) {
+                    pending_stores.insert(*slot);
+                }
+            }
+            while !pending_stores.is_empty() {
+                let slot = pending_stores.iter().next().cloned().unwrap();
+                if Some(slot) == min_slot {
+                    if let Some(failed_slot) = failed_slot.take() {
+                        info!(
+                            "calc_delete_dependencies, oldest slot is not able to be deleted \
+                             because of {pubkey} in slot {failed_slot}"
+                        );
+                    } else {
+                        info!(
+                            "calc_delete_dependencies, oldest slot is not able to be deleted \
+                             because of {pubkey}, slot list len: {}, ref count: {ref_count}",
+                            slot_list.len()
+                        );
+                    }
+                }
+
+                pending_stores.remove(&slot);
+                if !already_counted.insert(slot) {
+                    continue;
+                }
+                // the point of all this code: remove the store count for all stores we cannot remove
+                if let Some(store_count) = store_counts.remove(&slot) {
+                    // all pubkeys in this store also cannot be removed from all stores they are in
+                    let affected_pubkeys = &store_count.1;
+                    for key in affected_pubkeys {
+                        let candidates_bin_index =
+                            db.accounts_index.bin_calculator.bin_from_pubkey(key);
+                        let mut update_pending_stores = |bin: &HashMap<Pubkey, CleaningInfo>| {
+                            for (slot, _account_info) in &bin.get(key).unwrap().slot_list {
+                                if !already_counted.contains(slot) {
+                                    pending_stores.insert(*slot);
+                                }
+                            }
+                        };
+                        if candidates_bin_index == bin_index {
+                            update_pending_stores(bin);
+                        } else {
+                            update_pending_stores(&candidates[candidates_bin_index]);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 use crate::{
+    account_info::StorageLocation,
     accounts_db::AccountSharedData,
+    accounts_index::{AccountSecondaryIndexes, AccountsIndex, ReclaimsSlotList, UpsertReclaim},
     contains::Contains,
 };
+
 #[test]
 fn test_collect_uncleaned_slots_up_to_slot() {
     agave_logger::setup();
@@ -330,4 +481,144 @@ fn test_remove_uncleaned_slots_and_collect_pubkeys_up_to_slot() {
     assert!(candidates_contain(&pubkey1));
     assert!(candidates_contain(&pubkey2));
     assert!(candidates_contain(&pubkey3));
+}
+
+#[test]
+fn test_delete_dependencies() {
+    agave_logger::setup();
+    let accounts_index = AccountsIndex::<AccountInfo, AccountInfo>::default_for_tests();
+    let key0 = Pubkey::new_from_array([0u8; 32]);
+    let key1 = Pubkey::new_from_array([1u8; 32]);
+    let key2 = Pubkey::new_from_array([2u8; 32]);
+    let info0 = AccountInfo::new(StorageLocation::AppendVec(0, 0), true);
+    let info1 = AccountInfo::new(StorageLocation::AppendVec(1, 0), true);
+    let info2 = AccountInfo::new(StorageLocation::AppendVec(2, 0), true);
+    let info3 = AccountInfo::new(StorageLocation::AppendVec(3, 0), true);
+    let mut reclaims = ReclaimsSlotList::new();
+    accounts_index.upsert(
+        0,
+        0,
+        &key0,
+        &AccountSharedData::default(),
+        &AccountSecondaryIndexes::default(),
+        info0,
+        &mut reclaims,
+        UpsertReclaim::IgnoreReclaims,
+    );
+    accounts_index.upsert(
+        1,
+        1,
+        &key0,
+        &AccountSharedData::default(),
+        &AccountSecondaryIndexes::default(),
+        info1,
+        &mut reclaims,
+        UpsertReclaim::IgnoreReclaims,
+    );
+    accounts_index.upsert(
+        1,
+        1,
+        &key1,
+        &AccountSharedData::default(),
+        &AccountSecondaryIndexes::default(),
+        info1,
+        &mut reclaims,
+        UpsertReclaim::IgnoreReclaims,
+    );
+    accounts_index.upsert(
+        2,
+        2,
+        &key1,
+        &AccountSharedData::default(),
+        &AccountSecondaryIndexes::default(),
+        info2,
+        &mut reclaims,
+        UpsertReclaim::IgnoreReclaims,
+    );
+    accounts_index.upsert(
+        2,
+        2,
+        &key2,
+        &AccountSharedData::default(),
+        &AccountSecondaryIndexes::default(),
+        info2,
+        &mut reclaims,
+        UpsertReclaim::IgnoreReclaims,
+    );
+    accounts_index.upsert(
+        3,
+        3,
+        &key2,
+        &AccountSharedData::default(),
+        &AccountSecondaryIndexes::default(),
+        info3,
+        &mut reclaims,
+        UpsertReclaim::IgnoreReclaims,
+    );
+    accounts_index.add_root(0);
+    accounts_index.add_root(1);
+    accounts_index.add_root(2);
+    accounts_index.add_root(3);
+    let num_bins = accounts_index.bins();
+    let mut candidates: Box<_> = std::iter::repeat_with(HashMap::<Pubkey, CleaningInfo>::new)
+        .take(num_bins)
+        .collect();
+    for key in [&key0, &key1, &key2] {
+        let (rooted_entries, ref_count) = accounts_index.get_and_then(key, |entry| {
+            let slot_list_lock = entry.unwrap().slot_list_read_lock();
+            let rooted = accounts_index.get_rooted_entries(slot_list_lock.as_ref(), None);
+            (false, (rooted, entry.unwrap().ref_count()))
+        });
+        let index = accounts_index.bin_calculator.bin_from_pubkey(key);
+        let candidates_bin = &mut candidates[index];
+        candidates_bin.insert(
+            *key,
+            CleaningInfo {
+                slot_list: rooted_entries,
+                ref_count,
+                ..Default::default()
+            },
+        );
+    }
+    for candidates_bin in candidates.iter() {
+        for (
+            key,
+            CleaningInfo {
+                slot_list: list,
+                ref_count,
+                ..
+            },
+        ) in candidates_bin.iter()
+        {
+            info!(" purge {key} ref_count {ref_count} =>");
+            for x in list {
+                info!("  {x:?}");
+            }
+        }
+    }
+
+    let mut store_counts = HashMap::new();
+    store_counts.insert(0, (0, HashSet::from_iter(vec![key0])));
+    store_counts.insert(1, (0, HashSet::from_iter(vec![key0, key1])));
+    store_counts.insert(2, (0, HashSet::from_iter(vec![key1, key2])));
+    store_counts.insert(3, (1, HashSet::from_iter(vec![key2])));
+
+    let db = AccountsDb::new_single_for_tests();
+    calc_delete_dependencies(&db, &candidates, &mut store_counts, None);
+    let mut stores: Vec<_> = store_counts.keys().cloned().collect();
+    stores.sort_unstable();
+    for store in &stores {
+        info!(
+            "store: {:?} : {:?}",
+            store,
+            store_counts.get(store).unwrap()
+        );
+    }
+    for x in 0..3 {
+        // if the store count doesn't exist for this id, then it is implied to be > 0
+        assert!(store_counts
+            .get(&x)
+            .map(|entry| entry.0 >= 1)
+            .unwrap_or(true));
+    }
 }
