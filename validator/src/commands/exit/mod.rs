@@ -90,6 +90,30 @@ pub fn command<'a>() -> App<'a, 'a> {
 
 pub fn execute(matches: &ArgMatches, ledger_path: &Path) -> Result<()> {
     let exit_args = ExitArgs::from_clap_arg_match(matches)?;
+    // If not skipping new snapshot check, verify that the validator is generating snapshots
+    let skip_new_snapshot_check = if !exit_args.skip_new_snapshot_check {
+        let admin_client = admin_rpc_service::connect(ledger_path);
+        match admin_rpc_service::runtime().block_on(async move {
+            admin_client.await?.generating_snapshots().await
+        }) {
+            Ok(false) => {
+                println!("Validator is not generating snapshots. Skipping new snapshot check...");
+                true
+            }
+            Err(err) => {
+                println!("Failed to check if validator is generating snapshots: {err}");
+                println!("Leaving snapshot check as default...");
+                false
+            }
+            Ok(true) =>
+            {
+                false
+            }
+        }
+    } else {
+        exit_args.skip_new_snapshot_check
+    };
+
 
     if !exit_args.force {
         wait_for_restart_window::wait_for_restart_window(
@@ -97,7 +121,7 @@ pub fn execute(matches: &ArgMatches, ledger_path: &Path) -> Result<()> {
             None,
             exit_args.min_idle_time,
             exit_args.max_delinquent_stake,
-            exit_args.skip_new_snapshot_check,
+            skip_new_snapshot_check,
             exit_args.skip_health_check,
         )?;
     }
