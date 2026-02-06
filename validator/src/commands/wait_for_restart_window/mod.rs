@@ -96,12 +96,33 @@ pub(crate) fn command<'a>() -> App<'a, 'a> {
 pub fn execute(matches: &ArgMatches, ledger_path: &Path) -> Result<()> {
     let wait_for_restart_window_args = WaitForRestartWindowArgs::from_clap_arg_match(matches)?;
 
+    // If not skipping new snapshot check, verify that the validator is generating snapshots
+    let skip_new_snapshot_check = if !wait_for_restart_window_args.skip_new_snapshot_check {
+        let admin_client = admin_rpc_service::connect(ledger_path);
+        match admin_rpc_service::runtime().block_on(async move {
+            admin_client.await?.generating_snapshots().await
+        }) {
+            Ok(false) => {
+                println!("Validator is not generating snapshots. Skipping new snapshot check...");
+                true
+            }
+            Err(err) => {
+                println!("Failed to check if validator is generating snapshots: {err}");
+                println!("Leaving snapshot check as default...");
+                false
+            }
+            Ok(true) => false,
+        }
+    } else {
+        wait_for_restart_window_args.skip_new_snapshot_check
+    };
+
     wait_for_restart_window(
         ledger_path,
         wait_for_restart_window_args.identity,
         wait_for_restart_window_args.min_idle_time,
         wait_for_restart_window_args.max_delinquent_stake,
-        wait_for_restart_window_args.skip_new_snapshot_check,
+        skip_new_snapshot_check,
         wait_for_restart_window_args.skip_health_check,
     )?;
 
