@@ -1944,7 +1944,7 @@ fn test_cleanup_key_not_removed() {
 
     let slots: HashSet<Slot> = vec![1].into_iter().collect();
     let purge_keys = [(key1, slots)];
-    let _ = db.purge_keys_exact(purge_keys);
+    db.purge_keys_exact(purge_keys);
 
     let account2 = AccountSharedData::new(3, 0, &key);
     db.store_for_tests((2, [(&key1, &account2)].as_slice()));

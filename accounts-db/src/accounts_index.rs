@@ -3177,7 +3177,7 @@ mod tests {
 
         index.purge_exact(&account_key, slots.into_iter().collect::<HashSet<Slot>>());
 
-        let _ = index.handle_dead_keys(&[account_key], secondary_indexes);
+        index.handle_dead_keys(&[account_key], secondary_indexes);
         assert!(secondary_index.index.is_empty());
         assert!(secondary_index.reverse_index.is_empty());
     }
@@ -3634,7 +3634,7 @@ mod tests {
         index.slot_list_mut(&account_key, |mut slot_list| slot_list.clear());
 
         // Everything should be deleted
-        let _ = index.handle_dead_keys(&[account_key], &secondary_indexes);
+        index.handle_dead_keys(&[account_key], &secondary_indexes);
         assert!(secondary_index.index.is_empty());
         assert!(secondary_index.reverse_index.is_empty());
     }
@@ -3773,7 +3773,7 @@ mod tests {
         // Removing the remaining entry for this pubkey in the index should mark the
         // pubkey as dead and finally remove all the secondary indexes
         index.purge_exact(&account_key, later_slot);
-        let _ = index.handle_dead_keys(&[account_key], secondary_indexes);
+        index.handle_dead_keys(&[account_key], secondary_indexes);
         assert!(secondary_index.index.is_empty());
         assert!(secondary_index.reverse_index.is_empty());
     }
