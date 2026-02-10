@@ -1539,34 +1539,30 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> AccountsIndex<T, U> {
     /// return true if pubkey was removed from the accounts index
     ///  or does not exist in the accounts index
     /// This means it should NOT be unref'd later.
-    #[must_use]
     pub fn clean_rooted_entries(
         &self,
         pubkey: &Pubkey,
         reclaims: &mut ReclaimsSlotList<T>,
         max_clean_root_inclusive: Option<Slot>,
-    ) -> bool {
+    ) {
         let mut is_slot_list_empty = false;
-        let missing_in_accounts_index = self
+        self
             .slot_list_mut(pubkey, |mut slot_list| {
                 is_slot_list_empty = self.purge_older_root_entries(
                     &mut slot_list,
                     reclaims,
                     max_clean_root_inclusive,
                 );
-            })
-            .is_none();
+            });
 
-        let mut removed = false;
         // If the slot list is empty, remove the pubkey from `account_maps`. Make sure to grab the
         // lock and double check the slot list is still empty, because another writer could have
         // locked and inserted the pubkey in-between when `is_slot_list_empty=true` and the call to
         // remove() below.
         if is_slot_list_empty {
             let w_maps = self.get_bin(pubkey);
-            removed = w_maps.remove_if_slot_list_empty(*pubkey);
-        }
-        removed || missing_in_accounts_index
+            w_maps.remove_if_slot_list_empty(*pubkey);
+        };
     }
 
     /// Clean the slot list by removing all slot_list items older than the max_slot
@@ -4006,20 +4002,20 @@ mod tests {
         let mut gc = ReclaimsSlotList::new();
         // return true if we don't know anything about 'key_unknown'
         // the item did not exist in the accounts index at all, so index is up to date
-        assert!(index.clean_rooted_entries(&key_unknown, &mut gc, None));
+        index.clean_rooted_entries(&key_unknown, &mut gc, None);
 
         index.upsert_simple_test(&key, slot1, value);
 
         let slot2 = 2;
         // none for max root because we don't want to delete the entry yet
-        assert!(!index.clean_rooted_entries(&key, &mut gc, None));
+        index.clean_rooted_entries(&key, &mut gc, None);
         // this is because of inclusive vs exclusive in the call to can_purge_older_entries
-        assert!(!index.clean_rooted_entries(&key, &mut gc, Some(slot1)));
+        index.clean_rooted_entries(&key, &mut gc, Some(slot1));
         // this will delete the entry because it is <= max_root_inclusive and NOT a root
         // note this has to be slot2 because of inclusive vs exclusive in the call to can_purge_older_entries
         {
             let mut gc = ReclaimsSlotList::new();
-            assert!(index.clean_rooted_entries(&key, &mut gc, Some(slot2)));
+            index.clean_rooted_entries(&key, &mut gc, Some(slot2));
             assert_eq!(gc, ReclaimsSlotList::from([(slot1, value)]));
         }
 
@@ -4027,7 +4023,7 @@ mod tests {
         index.upsert_simple_test(&key, slot1, value);
 
         index.add_root(slot1);
-        assert!(!index.clean_rooted_entries(&key, &mut gc, Some(slot2)));
+        index.clean_rooted_entries(&key, &mut gc, Some(slot2));
         index.upsert_simple_test(&key, slot2, value);
 
         index.get_and_then(&key, |entry| {
@@ -4037,7 +4033,7 @@ mod tests {
             assert_eq!(&[(slot1, value), (slot2, value)], slot_list.as_ref());
             (false, ())
         });
-        assert!(!index.clean_rooted_entries(&key, &mut gc, Some(slot2)));
+        index.clean_rooted_entries(&key, &mut gc, Some(slot2));
         assert_eq!(
             2,
             index.get_and_then(&key, |entry| (
@@ -4083,12 +4079,12 @@ mod tests {
         }
 
         assert!(gc.is_empty());
-        assert!(!index.clean_rooted_entries(&key, &mut gc, Some(slot2)));
+        index.clean_rooted_entries(&key, &mut gc, Some(slot2));
         assert_eq!(gc, ReclaimsSlotList::from([(slot1, value)]));
         gc.clear();
         index.clean_dead_slot(slot2);
         let slot3 = 3;
-        assert!(index.clean_rooted_entries(&key, &mut gc, Some(slot3)));
+        index.clean_rooted_entries(&key, &mut gc, Some(slot3));
         assert_eq!(gc, ReclaimsSlotList::from([(slot2, value)]));
     }
 
