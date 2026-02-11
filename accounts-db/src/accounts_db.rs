@@ -1177,8 +1177,18 @@ impl AccountsDb {
     ) -> ReclaimsSlotList<AccountInfo> {
         let mut clean_rooted = Measure::start("clean_old_root-ms");
         let mut reclaims = ReclaimsSlotList::new();
-        self.accounts_index
-            .clean_rooted_entries(pubkey, &mut reclaims, max_clean_root_inclusive);
+        let last_item = self.accounts_index.clean_rooted_entries(
+            pubkey,
+            &mut reclaims,
+            max_clean_root_inclusive,
+        );
+
+        if let Some(last_item) = last_item {
+            // If the account is now zero lamport single ref, it must be added to the stores
+            // zero lamport single ref tracker
+            self.zero_lamport_single_ref_found(last_item.0, last_item.1.offset());
+        }
+
         clean_rooted.stop();
         self.clean_accounts_stats
             .clean_old_root_us
@@ -1197,7 +1207,7 @@ impl AccountsDb {
             reclaims.iter(),
             None,
             &self.clean_accounts_stats.purge_stats,
-            MarkAccountsObsolete::No,
+            MarkAccountsObsolete::Yes(self.accounts_index.max_root_inclusive()),
         ));
         self.clean_accounts_stats
             .clean_old_root_reclaim_us
@@ -6855,11 +6865,9 @@ impl AccountsDb {
 
 /// Specify whether obsolete accounts should be marked or not during reclaims
 /// They should only be marked if they are also getting unreffed in the index
-/// Temporarily allow dead code until the feature is implemented
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 enum MarkAccountsObsolete {
-    Yes(Slot),
-    No,
+    Yes(Slot)
 }
 
 pub enum UpdateIndexThreadSelection {
