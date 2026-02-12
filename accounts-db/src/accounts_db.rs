@@ -5159,15 +5159,12 @@ impl AccountsDb {
                     accounts.account(i, |account| {
                         let info =
                             AccountInfo::new(StorageLocation::Cached, account.is_zero_lamport());
-                        self.accounts_index.upsert(
-                            target_slot,
+                        self.accounts_index.upsert_cached(
                             target_slot,
                             account.pubkey(),
                             &account,
                             &self.account_indexes,
                             info,
-                            ReclaimsSlotList::default().as_mut(),
-                            UpsertReclaim::PreviousSlotEntryWasCached,
                         );
                     });
                 }
