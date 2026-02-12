@@ -7067,10 +7067,7 @@ impl AccountsDb {
         for i in 0..accounts.len() {
             if accounts.is_zero_lamport(i) {
                 let key = *accounts.pubkey(i);
-                if self
-                    .accounts_index
-                    .get_and_then(&key, |account| (true, account.is_none()))
-                {
+                if !self.accounts_index.contains(&key) {
                     // Account is not in the index, need to pre-populate with placeholder
                     pre_populate_zero_lamport.push((key, placeholder.clone()));
                 }
