@@ -3944,6 +3944,16 @@ impl AccountsDb {
         // Notice the subtle `?` at previous line, we bail out pretty early if missing.
 
         let in_write_cache = storage_location.is_cached();
+        assert!(!in_write_cache);
+        if in_write_cache
+        {
+            let (cache_result, found_in_cache) =
+                 self.load_into_write_cache(ancestors, pubkey, false, LoadZeroLamports::None);
+            assert!(found_in_cache);
+            if let Some(cache_result) = cache_result {
+                assert_eq!(cache_result.1, slot);
+            };
+        }
         if !in_write_cache {
             let result = self.read_only_accounts_cache.load(*pubkey, slot);
             if let Some(account) = result {
@@ -3966,6 +3976,15 @@ impl AccountsDb {
         // note that the account being in the cache could be different now than it was previously
         // since the cache could be flushed in between the 2 calls.
         let in_write_cache = matches!(account_accessor, LoadedAccountAccessor::Cached(_));
+        if in_write_cache
+        {
+            let (cache_result, found_in_cache) =
+                 self.load_into_write_cache(ancestors, pubkey, false, LoadZeroLamports::None);
+            assert!(found_in_cache);
+            if let Some(cache_result) = cache_result {
+                assert_eq!(cache_result.1, slot);
+            };
+        }
         let account = account_accessor.check_and_get_loaded_account_shared_data();
         if account.is_zero_lamport() {
             return None;
@@ -4020,6 +4039,16 @@ impl AccountsDb {
         // Notice the subtle `?` at previous line, we bail out pretty early if missing.
 
         let in_write_cache = storage_location.is_cached();
+        assert!(!in_write_cache);
+        if in_write_cache
+        {
+            let (cache_result, found_in_cache) =
+                 self.load_into_write_cache(ancestors, pubkey, load_into_read_cache_only, load_zero_lamports);
+            assert!(found_in_cache);
+            if let Some(cache_result) = cache_result {
+                assert_eq!(cache_result.1, slot);
+            };
+        }
         if !load_into_read_cache_only {
             if !in_write_cache {
                 let result = self.read_only_accounts_cache.load(*pubkey, slot);
@@ -4053,6 +4082,15 @@ impl AccountsDb {
         // note that the account being in the cache could be different now than it was previously
         // since the cache could be flushed in between the 2 calls.
         let in_write_cache = matches!(account_accessor, LoadedAccountAccessor::Cached(_));
+        if in_write_cache
+        {
+            let (cache_result, found_in_cache) =
+                 self.load_into_write_cache(ancestors, pubkey, load_into_read_cache_only, load_zero_lamports);
+            assert!(found_in_cache);
+            if let Some(cache_result) = cache_result {
+                assert_eq!(cache_result.1, slot);
+            };
+        }
         let account = account_accessor.check_and_get_loaded_account_shared_data();
         if load_zero_lamports == LoadZeroLamports::None && account.is_zero_lamport() {
             return None;
@@ -4364,10 +4402,10 @@ impl AccountsDb {
             .get_slot_storage_entry_shrinking_in_progress_ok(purged_slot)
             .is_none());
         let mut num_purged_keys = 0;
-        let pubkeys_vec: Vec<_> = pubkeys.into_iter().collect();
+        let pubkeys: Vec<Pubkey> = pubkeys.into_iter().collect();
         self.accounts_index
-            .purge_keys_cache_exact(pubkeys_vec.iter().copied());
-        let (reclaims, _) = self.purge_keys_exact(pubkeys_vec.into_iter().map(|key| {
+            .purge_keys_cache_exact(pubkeys.iter().copied());
+        let (reclaims, _) = self.purge_keys_exact(pubkeys.into_iter().map(|key| {
             num_purged_keys += 1;
             (key, purged_slot)
         }));
@@ -4896,6 +4934,7 @@ impl AccountsDb {
                     reclaim_method,
                     UpdateIndexThreadSelection::PoolWithThreshold,
                 ));
+
             // Clear each pubkey in accounts from the cache
             self.accounts_index
                 .purge_keys_cache_exact(accounts.iter().map(|(pubkey, _account)| **pubkey));
@@ -5212,7 +5251,6 @@ impl AccountsDb {
         &self,
         accounts: &impl StorableAccounts<'a>,
         store_account: &BitVec,
-        new_account: &BitVec,
         update_index_thread_selection: UpdateIndexThreadSelection,
     ) {
         let target_slot = accounts.target_slot();
@@ -5231,7 +5269,6 @@ impl AccountsDb {
                             &account,
                             &self.account_indexes,
                             info,
-                            new_account[i as u64],
                         );
                     });
                 }
@@ -5670,7 +5707,7 @@ impl AccountsDb {
 
         // Store the accounts in the write cache
         let mut store_accounts_time = Measure::start("store_accounts");
-        let (store_account, new_account, cache_account_store_stats) =
+        let (store_account, cache_account_store_stats) =
             self.write_accounts_to_cache(accounts.target_slot(), &accounts);
         store_accounts_time.stop();
         self.stats
@@ -5680,12 +5717,7 @@ impl AccountsDb {
         // Update the index
         let mut update_index_time = Measure::start("update_index");
 
-        self.update_index_cached_accounts(
-            &accounts,
-            &store_account,
-            &new_account,
-            update_index_thread_selection,
-        );
+        self.update_index_cached_accounts(&accounts, &store_account, update_index_thread_selection);
 
         update_index_time.stop();
         self.stats
@@ -5833,12 +5865,11 @@ impl AccountsDb {
         &self,
         slot: Slot,
         accounts_and_meta_to_store: &impl StorableAccounts<'b>,
-    ) -> (BitVec, BitVec, CacheAccountStoreStats) {
+    ) -> (BitVec, CacheAccountStoreStats) {
         let len = accounts_and_meta_to_store.len();
         let mut pubkey_set = HashSet::with_capacity_and_hasher(len, PubkeyHasherBuilder::default());
         let mut cache_account_store_stats = CacheAccountStoreStats::default();
         let mut store_account = BitVec::new_fill(false, len as u64);
-        let mut new_account = BitVec::new_fill(false, len as u64);
 
         (0..len).rev().for_each(|index| {
             accounts_and_meta_to_store.account_default_if_zero_lamport(index, |account| {
@@ -5859,17 +5890,19 @@ impl AccountsDb {
                     return;
                 }
 
-                new_account.set(
-                    index as u64,
-                    self.accounts_cache
-                        .store(slot, pubkey, account.take_account()),
-                );
+                let new_account = self.accounts_cache
+                        .store(slot, pubkey, account.take_account());
+
+                if new_account {
+                    self.accounts_index.insert_index_cache(pubkey, slot);
+                }
+
 
                 store_account.set(index as u64, true);
             })
         });
 
-        (store_account, new_account, cache_account_store_stats)
+        (store_account, cache_account_store_stats)
     }
 
     fn write_accounts_to_storage<'a>(
