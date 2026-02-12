@@ -1457,14 +1457,10 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> AccountsIndex<T, U> {
         account: &impl ReadableAccount,
         account_indexes: &AccountSecondaryIndexes,
         account_info: T,
-        is_new: bool,
     ) {
         let new_item =
             PreAllocatedAccountMapEntry::new(new_slot, account_info, &self.storage.storage, true);
         let map = self.get_bin(pubkey);
-        if is_new {
-            self.insert_cached_index_if_missing(pubkey, new_slot);
-        }
         map.upsert_cached(pubkey, new_item);
         self.update_secondary_indexes(pubkey, account, account_indexes);
     }
@@ -1493,7 +1489,7 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> AccountsIndex<T, U> {
             .map(|account| account.0)
     }
 
-    fn insert_cached_index_if_missing(&self, pubkey: &Pubkey, slot: Slot) {
+    pub fn insert_index_cache(&self, pubkey: &Pubkey, slot: Slot) {
         self.cached_account_maps
             .entry(*pubkey)
             .and_modify(|(stored_slot, count)| {
@@ -2375,7 +2371,6 @@ mod tests {
                         &AccountSharedData::default(),
                         &AccountSecondaryIndexes::default(),
                         account_infos[0],
-                        true,
                     );
                 } else {
                     index.upsert(
@@ -2428,7 +2423,6 @@ mod tests {
                         &AccountSharedData::default(),
                         &AccountSecondaryIndexes::default(),
                         account_infos[1],
-                        true,
                     );
                 } else {
                     index.upsert(
@@ -3029,7 +3023,6 @@ mod tests {
             &AccountSharedData::default(),
             &AccountSecondaryIndexes::default(),
             CacheableIndexValueTest(true),
-            true,
         );
         // No reclaims should be returned on the first item
         assert!(reclaims.is_empty());
@@ -3364,7 +3357,6 @@ mod tests {
             &AccountSharedData::default(),
             &AccountSecondaryIndexes::default(),
             CacheableIndexValueTest(true),
-            true,
         );
 
         // Now insert a cached account at slot 2
@@ -3374,7 +3366,6 @@ mod tests {
             &AccountSharedData::default(),
             &AccountSecondaryIndexes::default(),
             CacheableIndexValueTest(true),
-            true,
         );
 
         // Replace the cached account at slot 2 with a uncached account
