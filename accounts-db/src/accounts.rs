@@ -110,7 +110,6 @@ impl Accounts {
         loaded_addresses: &mut LoadedAddresses,
     ) -> std::result::Result<Slot, AddressLookupError> {
         let table_account = self
-            .accounts_db
             .load_with_fixed_root(ancestors, address_table_lookup.account_key)
             .map(|(account, _rent)| account)
             .ok_or(AddressLookupError::LookupTableAccountNotFound)?;
@@ -160,23 +159,14 @@ impl Accounts {
             Err(AddressLookupError::InvalidAccountOwner)
         }
     }
-    /// Slow because lock is held for 1 operation instead of many
-    /// This always returns None for zero-lamport accounts.
-    fn load_slow(
-        &self,
-        ancestors: &Ancestors,
-        pubkey: &Pubkey,
-        load_hint: LoadHint,
-    ) -> Option<(AccountSharedData, Slot)> {
-        self.accounts_db.load(ancestors, pubkey, load_hint)
-    }
 
     pub fn load_with_fixed_root(
         &self,
         ancestors: &Ancestors,
         pubkey: &Pubkey,
     ) -> Option<(AccountSharedData, Slot)> {
-        self.load_slow(ancestors, pubkey, LoadHint::FixedMaxRoot)
+        self.accounts_db
+            .load(ancestors, pubkey, LoadHint::FixedMaxRoot, true)
     }
 
     /// same as `load_with_fixed_root` except:
@@ -186,10 +176,11 @@ impl Accounts {
         ancestors: &Ancestors,
         pubkey: &Pubkey,
     ) -> Option<(AccountSharedData, Slot)> {
-        self.load_slow(
+        self.accounts_db.load(
             ancestors,
             pubkey,
-            LoadHint::FixedMaxRootDoNotPopulateReadCache,
+            LoadHint::FixedMaxRoot,
+            false, // do not populate read cache
         )
     }
 
@@ -198,7 +189,8 @@ impl Accounts {
         ancestors: &Ancestors,
         pubkey: &Pubkey,
     ) -> Option<(AccountSharedData, Slot)> {
-        self.load_slow(ancestors, pubkey, LoadHint::Unspecified)
+        self.accounts_db
+            .load(ancestors, pubkey, LoadHint::Unspecified, true)
     }
 
     /// scans underlying accounts_db for this delta (slot) with a map function
