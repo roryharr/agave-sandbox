@@ -3872,7 +3872,7 @@ impl AccountsDb {
         let (cache_result, slot_found) = self.load_into_write_cache(ancestors, pubkey);
 
         if let Some(slot_found) = slot_found {
-            if slot_found > self.accounts_cache.fetch_max_flush_root() {
+            if slot_found >= self.accounts_cache.fetch_max_flush_root() {
                 return cache_result;
             }
         }
@@ -3887,7 +3887,7 @@ impl AccountsDb {
             let result = self.read_only_accounts_cache.load(*pubkey, slot);
             if let Some(account) = result {
                 let account = if let Some(slot_found) = slot_found {
-                    if slot_found > slot {
+                    if slot_found >= slot {
                         cache_result
                     } else {
                         if account.is_zero_lamport() {
@@ -3914,25 +3914,26 @@ impl AccountsDb {
             pubkey,
             load_hint,
         )?;
-
         // note that the account being in the cache could be different now than it was previously
         // since the cache could be flushed in between the 2 calls.
         let account = account_accessor.check_and_get_loaded_account_shared_data();
-        let account = if let Some(slot_found) = slot_found {
-            if slot_found > slot {
-                cache_result
+        let (account, in_write_cache) = if let Some(slot_found) = slot_found {
+            if slot_found >= slot {
+                (cache_result, true)
             } else {
                 if account.is_zero_lamport() {
-                    None
+                    (None, true)
                 } else {
-                    Some((account.clone(), slot))
+                    let in_write_cache = matches!(account_accessor, LoadedAccountAccessor::Cached(_));
+                    (Some((account.clone(), slot)), in_write_cache)
                 }
             }
         } else {
             if account.is_zero_lamport() {
-                None
+                (None, true)
             } else {
-                Some((account.clone(), slot))
+                let in_write_cache = matches!(account_accessor, LoadedAccountAccessor::Cached(_));
+                (Some((account.clone(), slot)), in_write_cache)
             }
         };
 
@@ -3940,7 +3941,7 @@ impl AccountsDb {
             return None;
         }
 
-        let in_write_cache = matches!(account_accessor, LoadedAccountAccessor::Cached(_));
+
 
         if !in_write_cache && populate_read_cache == true {
             /*
@@ -4663,6 +4664,7 @@ impl AccountsDb {
         // outdated updates in earlier roots
         let mut num_roots_flushed = 0;
         let mut flush_stats = FlushStats::default();
+        max_flush_root.inspect(|&root| self.accounts_cache.set_max_flush_root(root));
         for root in flushed_roots.into_iter().rev() {
             if let Some(stats) =
                 self.flush_slot_cache(root, should_flush_f.as_mut(), max_clean_root)
@@ -4680,7 +4682,6 @@ impl AccountsDb {
         // `max_flush_root` to the max of the flushed roots, because that's
         // max_flushed_root tracks the logical last root that was flushed to
         // storage by snapshotting.
-        max_flush_root.inspect(|&root| self.accounts_cache.set_max_flush_root(root));
 
         (num_new_roots, num_roots_flushed, flush_stats)
     }
