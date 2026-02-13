@@ -4352,20 +4352,10 @@ impl Bank {
         &self,
         pubkey: &Pubkey,
     ) -> Option<AccountSharedData> {
-        self.load_account_with(pubkey, false)
+        self.rc
+            .accounts
+            .load_with_fixed_root_do_not_populate_read_cache(&self.ancestors, pubkey)
             .map(|(acc, _slot)| acc)
-    }
-
-    fn load_account_with(
-        &self,
-        pubkey: &Pubkey,
-        should_put_in_read_cache: bool,
-    ) -> Option<(AccountSharedData, Slot)> {
-        self.rc.accounts.accounts_db.load_account_with(
-            &self.ancestors,
-            pubkey,
-            should_put_in_read_cache,
-        )
     }
 
     // Hi! leaky abstraction here....
@@ -4918,13 +4908,6 @@ impl Bank {
     /// This fn is used at startup to verify the bank was rebuilt correctly.
     pub fn get_snapshot_hash(&self) -> SnapshotHash {
         SnapshotHash::new(self.accounts_lt_hash.lock().unwrap().0.checksum())
-    }
-
-    pub fn load_account_into_read_cache(&self, key: &Pubkey) {
-        self.rc
-            .accounts
-            .accounts_db
-            .load_account_into_read_cache(&self.ancestors, key);
     }
 
     /// A snapshot bank should be purged of 0 lamport accounts which are not part of the hash
@@ -5916,7 +5899,6 @@ impl TransactionProcessingCallback for Bank {
     fn get_account_shared_data(&self, pubkey: &Pubkey) -> Option<(AccountSharedData, Slot)> {
         self.rc
             .accounts
-            .accounts_db
             .load_with_fixed_root(&self.ancestors, pubkey)
     }
 

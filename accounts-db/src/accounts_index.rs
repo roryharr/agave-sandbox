@@ -852,13 +852,8 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> AccountsIndex<T, U> {
 
     /// Is `pubkey`, with `ancestors` and `max_root`, in the index?
     #[cfg(test)]
-    pub(crate) fn contains_with(
-        &self,
-        pubkey: &Pubkey,
-        ancestors: Option<&Ancestors>,
-        max_root: Option<Slot>,
-    ) -> bool {
-        self.get_with_and_then(pubkey, ancestors, max_root, false, |_| ())
+    pub(crate) fn contains_with(&self, pubkey: &Pubkey, ancestors: Option<&Ancestors>) -> bool {
+        self.get_with_and_then(pubkey, ancestors, None, false, |_| ())
             .is_some()
     }
 
@@ -1839,8 +1834,8 @@ mod tests {
         let index = AccountsIndex::<bool, bool>::default_for_tests();
         let ancestors = Ancestors::default();
         let key = &key;
-        assert!(!index.contains_with(key, Some(&ancestors), None));
-        assert!(!index.contains_with(key, None, None));
+        assert!(!index.contains_with(key, Some(&ancestors)));
+        assert!(!index.contains_with(key, None));
 
         let mut num = 0;
         index
@@ -1919,8 +1914,8 @@ mod tests {
         assert!(gc.is_empty());
 
         let ancestors = Ancestors::default();
-        assert!(!index.contains_with(&key, Some(&ancestors), None));
-        assert!(!index.contains_with(&key, None, None));
+        assert!(!index.contains_with(&key, Some(&ancestors)));
+        assert!(!index.contains_with(&key, None));
 
         let mut num = 0;
         index
@@ -1983,8 +1978,8 @@ mod tests {
         index.set_startup(Startup::Normal);
 
         let mut ancestors = Ancestors::default();
-        assert!(!index.contains_with(pubkey, Some(&ancestors), None));
-        assert!(!index.contains_with(pubkey, None, None));
+        assert!(!index.contains_with(pubkey, Some(&ancestors)));
+        assert!(!index.contains_with(pubkey, None));
 
         let mut num = 0;
         index
@@ -1997,7 +1992,7 @@ mod tests {
             .expect("scan should succeed");
         assert_eq!(num, 0);
         ancestors.insert(slot, 0);
-        assert!(index.contains_with(pubkey, Some(&ancestors), None));
+        assert!(index.contains_with(pubkey, Some(&ancestors)));
         assert_eq!(index.ref_count_from_storage(pubkey), 1);
         index
             .scan_accounts(
@@ -2020,8 +2015,8 @@ mod tests {
         index.set_startup(Startup::Normal);
 
         let mut ancestors = Ancestors::default();
-        assert!(!index.contains_with(pubkey, Some(&ancestors), None));
-        assert!(!index.contains_with(pubkey, None, None));
+        assert!(!index.contains_with(pubkey, Some(&ancestors)));
+        assert!(!index.contains_with(pubkey, None));
 
         let mut num = 0;
         index
@@ -2034,7 +2029,7 @@ mod tests {
             .expect("scan should succeed");
         assert_eq!(num, 0);
         ancestors.insert(slot, 0);
-        assert!(index.contains_with(pubkey, Some(&ancestors), None));
+        assert!(index.contains_with(pubkey, Some(&ancestors)));
         assert_eq!(index.ref_count_from_storage(pubkey), 1);
         index
             .scan_accounts(
@@ -2443,8 +2438,8 @@ mod tests {
         assert_eq!(1, account_maps_stats_len(&index));
 
         let mut ancestors = Ancestors::default();
-        assert!(!index.contains_with(&key, Some(&ancestors), None));
-        assert!(!index.contains_with(&key, None, None));
+        assert!(!index.contains_with(&key, Some(&ancestors)));
+        assert!(!index.contains_with(&key, None));
         index.get_and_then(&key, |entry| {
             let (stored_slot, value) = entry.unwrap().slot_list_read_lock()[0];
             assert_eq!(stored_slot, slot);
@@ -2463,7 +2458,7 @@ mod tests {
             .expect("scan should succeed");
         assert_eq!(num, 0);
         ancestors.insert(slot, 0);
-        assert!(index.contains_with(&key, Some(&ancestors), None));
+        assert!(index.contains_with(&key, Some(&ancestors)));
         index
             .scan_accounts(
                 &ancestors,
@@ -2493,7 +2488,7 @@ mod tests {
         assert!(gc.is_empty());
 
         let ancestors = vec![(1, 1)].into_iter().collect();
-        assert!(!index.contains_with(&key, Some(&ancestors), None));
+        assert!(!index.contains_with(&key, Some(&ancestors)));
 
         let mut num = 0;
         index
