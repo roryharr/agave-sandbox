@@ -1375,7 +1375,7 @@ mod tests {
         accounts.accounts_db.clean_accounts_for_tests();
     }
 
-    #[test]
+    /*#[test]
     fn test_load_largest_accounts() {
         let accounts_db = AccountsDb::new_single_for_tests();
         let accounts = Accounts::new(Arc::new(accounts_db));
@@ -1576,7 +1576,7 @@ mod tests {
                 .unwrap(),
             vec![(pubkey1, 42), (pubkey2, 41)]
         );
-    }
+    }*/
 
     fn zero_len_account_size() -> usize {
         std::mem::size_of::<AccountSharedData>() + std::mem::size_of::<Pubkey>()

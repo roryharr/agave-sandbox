@@ -62,7 +62,6 @@ use {
         utils::{self, create_account_shared_data},
     },
     agave_fs::buffered_reader::RequiredLenBufFileRead,
-    bv::BitVec,
     dashmap::{DashMap, DashSet},
     log::*,
     rand::{rng, Rng},
@@ -3889,19 +3888,15 @@ impl AccountsDb {
                 let account = if let Some(slot_found) = slot_found {
                     if slot_found >= slot {
                         cache_result
-                    } else {
-                        if account.is_zero_lamport() {
-                            None
-                        } else {
-                            Some((account, slot))
-                        }
-                    }
-                } else {
-                    if account.is_zero_lamport() {
+                    } else if account.is_zero_lamport() {
                         None
                     } else {
                         Some((account, slot))
                     }
+                } else if account.is_zero_lamport() {
+                    None
+                } else {
+                    Some((account, slot))
                 };
                 return account;
             }
@@ -3920,30 +3915,22 @@ impl AccountsDb {
         let (account, in_write_cache) = if let Some(slot_found) = slot_found {
             if slot_found >= slot {
                 (cache_result, true)
-            } else {
-                if account.is_zero_lamport() {
-                    (None, true)
-                } else {
-                    let in_write_cache = matches!(account_accessor, LoadedAccountAccessor::Cached(_));
-                    (Some((account.clone(), slot)), in_write_cache)
-                }
-            }
-        } else {
-            if account.is_zero_lamport() {
+            } else if account.is_zero_lamport() {
                 (None, true)
             } else {
                 let in_write_cache = matches!(account_accessor, LoadedAccountAccessor::Cached(_));
                 (Some((account.clone(), slot)), in_write_cache)
             }
+        } else if account.is_zero_lamport() {
+            (None, true)
+        } else {
+            let in_write_cache = matches!(account_accessor, LoadedAccountAccessor::Cached(_));
+            (Some((account.clone(), slot)), in_write_cache)
         };
 
-        if account.is_none() {
-            return None;
-        }
+        account.as_ref()?;
 
-
-
-        if !in_write_cache && populate_read_cache == true {
+        if !in_write_cache && populate_read_cache {
             /*
             We show this store into the read-only cache for account 'A' and future loads of 'A' from the read-only cache are
             safe/reflect 'A''s latest state on this fork.
@@ -4235,15 +4222,9 @@ impl AccountsDb {
             .storage
             .get_slot_storage_entry_shrinking_in_progress_ok(purged_slot)
             .is_none());
-        let mut num_purged_keys = 0;
         let pubkeys: Vec<Pubkey> = pubkeys.into_iter().collect();
         self.accounts_index
             .purge_keys_cache_exact(pubkeys.iter().copied());
-        let (reclaims, _) = self.purge_keys_exact(pubkeys.into_iter().map(|key| {
-            num_purged_keys += 1;
-            (key, purged_slot)
-        }));
-        assert_eq!(reclaims.len(), num_purged_keys);
         if is_dead {
             self.remove_dead_slots_metadata(std::iter::once(&purged_slot));
         }
@@ -5078,57 +5059,6 @@ impl AccountsDb {
         }
     }
 
-    /// Updates the accounts index with the given accounts. If store_account is false, skip storing
-    /// the account in the index as the account was not stored in the cache
-    /// Used for cached accounts only.
-    fn update_index_cached_accounts<'a>(
-        &self,
-        accounts: &impl StorableAccounts<'a>,
-        store_account: &BitVec,
-        update_index_thread_selection: UpdateIndexThreadSelection,
-    ) {
-        let target_slot = accounts.target_slot();
-        let len = accounts.len();
-        assert_eq!(accounts.len() as u64, store_account.len());
-
-        let update = |start, end| {
-            (start..end).for_each(|i| {
-                if store_account[i as u64] {
-                    accounts.account(i, |account| {
-                        let info =
-                            AccountInfo::new(StorageLocation::Cached, account.is_zero_lamport());
-                        self.accounts_index.upsert_cached(
-                            target_slot,
-                            account.pubkey(),
-                            &account,
-                            &self.account_indexes,
-                            info,
-                        );
-                    });
-                }
-            });
-        };
-
-        let threshold = 1;
-        if matches!(
-            update_index_thread_selection,
-            UpdateIndexThreadSelection::PoolWithThreshold,
-        ) && len > threshold
-        {
-            let chunk_size = std::cmp::max(1, len / quarter_thread_count()); // # pubkeys/thread
-            let batches = 1 + len / chunk_size;
-            self.thread_pool_foreground.install(|| {
-                (0..batches).into_par_iter().for_each(|batch| {
-                    let start = batch * chunk_size;
-                    let end = std::cmp::min(start + chunk_size, len);
-                    update(start, end)
-                })
-            });
-        } else {
-            update(0, len);
-        }
-    }
-
     /// Updates the accounts index with the given `infos` and `accounts`.
     /// Used when storing accounts to storage.
     /// Returns a vector of `SlotList<AccountInfo>` containing the reclaims for each batch processed.
@@ -5522,7 +5452,7 @@ impl AccountsDb {
     pub(crate) fn store_accounts_unfrozen<'a>(
         &self,
         accounts: impl StorableAccounts<'a>,
-        update_index_thread_selection: UpdateIndexThreadSelection,
+        _update_index_thread_selection: UpdateIndexThreadSelection,
     ) {
         // If all transactions in a batch are errored,
         // it's possible to get a store with no accounts.
@@ -5541,22 +5471,13 @@ impl AccountsDb {
 
         // Store the accounts in the write cache
         let mut store_accounts_time = Measure::start("store_accounts");
-        let (store_account, cache_account_store_stats) =
+        let cache_account_store_stats =
             self.write_accounts_to_cache(accounts.target_slot(), &accounts);
         store_accounts_time.stop();
         self.stats
             .store_accounts_to_cache_us
             .fetch_add(store_accounts_time.as_us(), Ordering::Relaxed);
 
-        // Update the index
-        let mut update_index_time = Measure::start("update_index");
-
-        self.update_index_cached_accounts(&accounts, &store_account, update_index_thread_selection);
-
-        update_index_time.stop();
-        self.stats
-            .store_update_index
-            .fetch_add(update_index_time.as_us(), Ordering::Relaxed);
         self.stats.num_store_accounts_to_cache.fetch_add(
             cache_account_store_stats.num_accounts_stored,
             Ordering::Relaxed,
@@ -5699,11 +5620,10 @@ impl AccountsDb {
         &self,
         slot: Slot,
         accounts_and_meta_to_store: &impl StorableAccounts<'b>,
-    ) -> (BitVec, CacheAccountStoreStats) {
+    ) -> CacheAccountStoreStats {
         let len = accounts_and_meta_to_store.len();
         let mut pubkey_set = HashSet::with_capacity_and_hasher(len, PubkeyHasherBuilder::default());
         let mut cache_account_store_stats = CacheAccountStoreStats::default();
-        let mut store_account = BitVec::new_fill(false, len as u64);
 
         (0..len).rev().for_each(|index| {
             accounts_and_meta_to_store.account_default_if_zero_lamport(index, |account| {
@@ -5719,6 +5639,7 @@ impl AccountsDb {
                     && self
                         .accounts_index
                         .get_and_then(pubkey, |account| (true, account.is_none()))
+                    && self.accounts_index.is_in_write_cache(pubkey).is_none()
                 {
                     cache_account_store_stats.num_ephemeral_accounts_skipped += 1;
                     return;
@@ -5731,12 +5652,10 @@ impl AccountsDb {
                 if new_account {
                     self.accounts_index.insert_index_cache(pubkey, slot);
                 }
-
-                store_account.set(index as u64, true);
             })
         });
 
-        (store_account, cache_account_store_stats)
+        cache_account_store_stats
     }
 
     fn write_accounts_to_storage<'a>(
