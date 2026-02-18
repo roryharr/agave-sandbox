@@ -3859,6 +3859,27 @@ impl AccountsDb {
         }
     }
 
+    fn select_most_recent_account(
+        stored_account: (AccountSharedData, Slot),
+        cached_slot: Option<Slot>,
+        cached_account: Option<(AccountSharedData, Slot)>,
+    ) -> (Option<(AccountSharedData, Slot)>, bool)
+    {
+        if let Some(cached_slot) = cached_slot {
+            if cached_slot >= stored_account.1 {
+                (cached_account, true)
+            } else if stored_account.0.is_zero_lamport() {
+                (None, false)
+            } else {
+                (Some(stored_account), false)
+            }
+        } else if stored_account.0.is_zero_lamport() {
+            (None, false)
+        } else {
+            (Some(stored_account), false)
+        }
+    }
+
     fn do_load(
         &self,
         ancestors: &Ancestors,
@@ -3876,31 +3897,22 @@ impl AccountsDb {
             }
         }
 
-        let (slot, storage_location, _maybe_account_accessor) =
-            self.read_index_for_accessor_or_load_slow(ancestors, pubkey, false)?;
-        // Notice the subtle `?` at previous line, we bail out pretty early if missing.
-
-        let in_write_cache = storage_location.is_cached();
-
-        if !in_write_cache {
+        if cache_result.is_none()
+        {
             let result = self.read_only_accounts_cache.load(*pubkey, slot);
             if let Some(account) = result {
-                let account = if let Some(slot_found) = slot_found {
-                    if slot_found >= slot {
-                        cache_result
-                    } else if account.is_zero_lamport() {
-                        None
-                    } else {
-                        Some((account, slot))
-                    }
-                } else if account.is_zero_lamport() {
-                    None
-                } else {
-                    Some((account, slot))
-                };
-                return account;
+                return Self::select_most_recent_account((account, slot), slot_found, cache_result).0;
             }
         }
+
+        let (slot, storage_location, _maybe_account_accessor) =
+            match self.read_index_for_accessor_or_load_slow(ancestors, pubkey, false) {
+            Some(result) => result,
+            // If we don't find anything in the database, whatever we found in the cache is good!
+            None => return cache_result,
+        };
+
+
 
         let (mut account_accessor, slot) = self.retry_to_get_account_accessor(
             slot,
@@ -3912,21 +3924,7 @@ impl AccountsDb {
         // note that the account being in the cache could be different now than it was previously
         // since the cache could be flushed in between the 2 calls.
         let account = account_accessor.check_and_get_loaded_account_shared_data();
-        let (account, in_write_cache) = if let Some(slot_found) = slot_found {
-            if slot_found >= slot {
-                (cache_result, true)
-            } else if account.is_zero_lamport() {
-                (None, true)
-            } else {
-                let in_write_cache = matches!(account_accessor, LoadedAccountAccessor::Cached(_));
-                (Some((account.clone(), slot)), in_write_cache)
-            }
-        } else if account.is_zero_lamport() {
-            (None, true)
-        } else {
-            let in_write_cache = matches!(account_accessor, LoadedAccountAccessor::Cached(_));
-            (Some((account.clone(), slot)), in_write_cache)
-        };
+        let (account, in_write_cache) = Self::select_most_recent_account((account, slot), slot_found, cache_result);
 
         account.as_ref()?;
 
