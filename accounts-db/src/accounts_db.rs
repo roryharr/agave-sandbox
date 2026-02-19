@@ -3588,10 +3588,8 @@ impl AccountsDb {
         )
     }
 
-    fn retry_to_get_account_accessor<'a>(
+    fn get_account_accessor_read<'a>(
         &'a self,
-        mut slot: Slot,
-        mut storage_location: StorageLocation,
         ancestors: &'a Ancestors,
         pubkey: &'a Pubkey,
         load_hint: LoadHint,
@@ -3708,7 +3706,18 @@ impl AccountsDb {
         // Failsafe for potential race conditions with other subsystems
         let mut num_acceptable_failed_iterations = 0;
         loop {
-            let account_accessor = self.get_account_accessor(slot, pubkey, &storage_location);
+            let (mut slot, account_accessor) = self.accounts_index.get_with_and_then(
+                pubkey,
+                Some(ancestors),
+                None,
+                true,
+                |(slot, account_info)| {
+                    let storage_location = account_info.storage_location();
+                    let account_accessor = self.get_account_accessor(slot, pubkey, &storage_location);
+                    (slot, account_accessor)
+                }
+            )?;
+
             match account_accessor {
                 LoadedAccountAccessor::Cached(Some(_)) | LoadedAccountAccessor::Stored(Some(_)) => {
                     // Great! There was no race, just return :) This is the most usual situation
@@ -3793,12 +3802,6 @@ impl AccountsDb {
                 // The latest version of the account existed in the index, but could not be
                 // fetched from storage. This means a race occurred between this function and clean
                 // accounts/purge_slots
-                let message = format!(
-                    "do_load() failed to get key: {pubkey} from storage, latest attempt was for \
-                     slot: {slot}, storage_location: {storage_location:?}, load_hint: \
-                     {load_hint:?}",
-                );
-                datapoint_warn!("accounts_db-do_load_warn", ("warn", message, String));
                 true
             } else {
                 false
@@ -3809,44 +3812,7 @@ impl AccountsDb {
                 .read_index_for_accessor_or_load_slow(ancestors, pubkey, fallback_to_slow_path)?;
             // Notice the subtle `?` at previous line, we bail out pretty early if missing.
 
-            if new_slot == slot && new_storage_location.is_store_id_equal(&storage_location) {
-                self.accounts_index
-                    .get_and_then(pubkey, |entry| -> (_, ()) {
-                        let message = format!(
-                            "Bad index entry detected ({pubkey}, {slot}, {storage_location:?}, \
-                             {load_hint:?}, {new_storage_location:?}, {entry:?})"
-                        );
-                        // Considering that we've failed to get accessor above and further that
-                        // the index still returned the same (slot, store_id) tuple, offset must be same
-                        // too.
-                        assert!(
-                            new_storage_location.is_offset_equal(&storage_location),
-                            "{message}"
-                        );
-
-                        // If the entry was missing from the cache, that means it must have been flushed,
-                        // and the accounts index is always updated before cache flush, so store_id must
-                        // not indicate being cached at this point.
-                        assert!(!new_storage_location.is_cached(), "{message}");
-
-                        // If this is not a cache entry, then this was a minor fork slot
-                        // that had its storage entries cleaned up by purge_slots() but hasn't been
-                        // cleaned yet. That means this must be rpc access and not replay/banking at the
-                        // very least. Note that purge shouldn't occur even for RPC as caller must hold all
-                        // of ancestor slots..
-                        assert_eq!(load_hint, LoadHint::Unspecified, "{message}");
-
-                        // Everything being assert!()-ed, let's panic!() here as it's an error condition
-                        // after all....
-                        // That reasoning is based on the fact all of code-path reaching this fn
-                        // retry_to_get_account_accessor() must outlive the Arc<Bank> (and its all
-                        // ancestors) over this fn invocation, guaranteeing the prevention of being purged,
-                        // first of all.
-                        // For details, see the comment in AccountIndex::do_checked_scan_accounts(),
-                        // which is referring back here.
-                        panic!("{message}");
-                    });
-            } else if fallback_to_slow_path {
+            if fallback_to_slow_path {
                 // the above bad-index-entry check must had been checked first to retain the same
                 // behavior
                 return Some((
@@ -3856,7 +3822,6 @@ impl AccountsDb {
             }
 
             slot = new_slot;
-            storage_location = new_storage_location;
         }
     }
 
@@ -3890,33 +3855,31 @@ impl AccountsDb {
     ) -> Option<(AccountSharedData, Slot)> {
         let starting_max_root = self.accounts_index.max_root_inclusive();
 
+        // First check the write cache
         let (cache_result, slot_found) = self.load_into_write_cache(ancestors, pubkey);
 
         if let Some(slot_found) = slot_found {
+            // If the version found in the write cache is newer than anything flushed to storage, it must be the right one! return it.
             if slot_found >= self.accounts_cache.fetch_max_flush_root() {
                 return cache_result;
             }
         }
 
+        // Now check the read cache
         let result = self.read_only_accounts_cache.load(*pubkey);
+
+        // If a version was found in the read cache, it must be the newest storage version
+        // Return the newest of the read cache version and the write cache version (if any)
         if let Some(account) = result {
             return Self::select_most_recent_account(account, slot_found, cache_result).0;
         }
 
-        let (slot, storage_location, _maybe_account_accessor) =
-            match self.read_index_for_accessor_or_load_slow(ancestors, pubkey, false) {
-            Some(result) => result,
-            // If we don't find anything in the database, whatever we found in the cache is good!
-            None => return cache_result,
-        };
-
-        let (mut account_accessor, slot) = self.retry_to_get_account_accessor(
-            slot,
-            storage_location,
-            ancestors,
-            pubkey,
-            load_hint,
-        )?;
+        let (mut account_accessor, slot) =
+            match self.get_account_accessor_read(ancestors,pubkey,load_hint) {
+                Some(result) => result,
+                // If we don't find anything in the database, whatever we found in the cache is good!
+                None => return cache_result,
+            };
         // note that the account being in the cache could be different now than it was previously
         // since the cache could be flushed in between the 2 calls.
         let account = account_accessor.check_and_get_loaded_account_shared_data();
