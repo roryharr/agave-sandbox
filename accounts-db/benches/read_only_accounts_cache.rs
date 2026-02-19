@@ -88,7 +88,7 @@ fn bench_read_only_accounts_cache(c: &mut Criterion) {
                             let mut rng = SmallRng::seed_from_u64(i as u64);
                             while !stop_threads.load(Ordering::Relaxed) {
                                 let pubkey = pubkeys.choose(&mut rng).unwrap();
-                                black_box(cache.load(*pubkey, slot));
+                                black_box(cache.load(*pubkey));
                             }
                         }
                     })
@@ -210,7 +210,7 @@ fn bench_read_only_accounts_cache_eviction(
                             let mut rng = SmallRng::seed_from_u64(i as u64);
                             while !stop_threads.load(Ordering::Relaxed) {
                                 let pubkey = pubkeys.choose(&mut rng).unwrap();
-                                black_box(cache.load(*pubkey, slot));
+                                black_box(cache.load(*pubkey));
                             }
                         }
                     })
