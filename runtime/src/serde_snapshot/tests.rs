@@ -795,7 +795,7 @@ mod serde_snapshot_tests {
         // 2nd clean needed to clean-up pubkey1
         accounts.clean_accounts_for_tests();
 
-        // Ensure pubkey2 is cleaned from the index finally
+        // Ensure pubkey1 is cleaned from the index finally
         assert!(!accounts.accounts_index.contains(&pubkey1));
         accounts.assert_not_load_account(current_slot, pubkey1);
         accounts.assert_load_account(current_slot, pubkey2, old_lamport);
