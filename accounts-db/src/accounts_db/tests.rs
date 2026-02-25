@@ -473,7 +473,7 @@ define_accounts_db_test!(test_accountsdb_latest_ancestor, |db| {
 
     db.store_for_tests((0, [(&key, &account0)].as_slice()));
 
-    let account1 = AccountSharedData::new(0, 0, &key);
+    let account1 = AccountSharedData::new(2, 0, &key);
     db.store_for_tests((1, [(&key, &account1)].as_slice()));
 
     let ancestors = vec![(1, 1)].into_iter().collect();
@@ -501,6 +501,12 @@ define_accounts_db_test!(test_accountsdb_latest_ancestor, |db| {
     )
     .expect("should scan accounts");
     assert_eq!(accounts, vec![account1]);
+
+    // A zero-lamport account is not returned by the load path
+    let zero_lamport_account = AccountSharedData::new(0, 0, &key);
+    db.store_for_tests((2, [(&key, &zero_lamport_account)].as_slice()));
+    let ancestors = vec![(2, 2)].into_iter().collect();
+    assert!(db.load_without_fixed_root(&ancestors, &key).is_none());
 });
 
 define_accounts_db_test!(test_accountsdb_latest_ancestor_with_root, |db| {
@@ -509,7 +515,7 @@ define_accounts_db_test!(test_accountsdb_latest_ancestor_with_root, |db| {
 
     db.store_for_tests((0, [(&key, &account0)].as_slice()));
 
-    let account1 = AccountSharedData::new(0, 0, &key);
+    let account1 = AccountSharedData::new(2, 0, &key);
     db.store_for_tests((1, [(&key, &account1)].as_slice()));
     db.add_root(0);
 
@@ -524,6 +530,12 @@ define_accounts_db_test!(test_accountsdb_latest_ancestor_with_root, |db| {
         &db.load_without_fixed_root(&ancestors, &key).unwrap().0,
         &account1
     );
+
+    // A zero-lamport account is not returned by the load path
+    let zero_lamport_account = AccountSharedData::new(0, 0, &key);
+    db.store_for_tests((2, [(&key, &zero_lamport_account)].as_slice()));
+    let ancestors = vec![(2, 2)].into_iter().collect();
+    assert!(db.load_without_fixed_root(&ancestors, &key).is_none());
 });
 
 define_accounts_db_test!(test_accountsdb_root_one_slot, |db| {
@@ -546,14 +558,9 @@ define_accounts_db_test!(test_accountsdb_root_one_slot, |db| {
     let account1 = AccountSharedData::new(0, 0, &key);
     db.store_for_tests((1, [(&key, &account1)].as_slice()));
 
-    // masking accounts is done at the Accounts level, at accountsDB we see
-    // original account (but could also accept "None", which is implemented
-    // at the Accounts level)
+    // account1 has zero lamports; AccountsDb filters it out at the load path
     let ancestors = vec![(0, 0), (1, 1)].into_iter().collect();
-    assert_eq!(
-        &db.load_without_fixed_root(&ancestors, &key).unwrap().0,
-        &account1
-    );
+    assert!(db.load_without_fixed_root(&ancestors, &key).is_none());
 
     // we should see 1 token in slot 2
     let ancestors = vec![(0, 0), (2, 2)].into_iter().collect();
@@ -564,11 +571,11 @@ define_accounts_db_test!(test_accountsdb_root_one_slot, |db| {
 
     db.add_root(0);
 
+    // account1 has zero lamports; AccountsDb filters it out at the load path
     let ancestors = vec![(1, 1)].into_iter().collect();
-    assert_eq!(
-        db.load_without_fixed_root(&ancestors, &key),
-        Some((account1, 1))
-    );
+    assert!(db.load_without_fixed_root(&ancestors, &key).is_none());
+
+    // When loading from a different set of ancestors, the account is still present
     let ancestors = vec![(2, 2)].into_iter().collect();
     assert_eq!(
         db.load_without_fixed_root(&ancestors, &key),
@@ -668,13 +675,9 @@ define_accounts_db_test!(test_accounts_unsquashed, |db0| {
     let account1 = AccountSharedData::new(0, 0, &key);
     db0.store_for_tests((1, [(&key, &account1)].as_slice()));
 
-    // masking accounts is done at the Accounts level, at accountsDB we see
-    // original account
+    // account1 has zero lamports; AccountsDb filters it out at the load path
     let ancestors = vec![(0, 0), (1, 1)].into_iter().collect();
-    assert_eq!(
-        db0.load_without_fixed_root(&ancestors, &key),
-        Some((account1, 1))
-    );
+    assert!(db0.load_without_fixed_root(&ancestors, &key).is_none());
     let ancestors = vec![(0, 0)].into_iter().collect();
     assert_eq!(
         db0.load_without_fixed_root(&ancestors, &key),
@@ -1834,7 +1837,11 @@ fn test_accounts_db_purge_keep_live() {
     accounts.store_for_tests((current_slot, [(&pubkey, &zero_lamport_account)].as_slice()));
     accounts.add_root_and_flush_write_cache(current_slot);
 
-    accounts.assert_load_account(current_slot, pubkey, zero_lamport);
+    // Account is not loadable as it is zero lamport
+    accounts.assert_not_load_account(current_slot, pubkey);
+
+    // Account is still present in the index
+    assert!(accounts.accounts_index.contains_with(&pubkey, None, None));
 
     current_slot += 1;
     accounts.add_root_and_flush_write_cache(current_slot);
@@ -1888,7 +1895,11 @@ fn test_accounts_db_purge1() {
     accounts.store_for_tests((current_slot, [(&pubkey, &zero_lamport_account)].as_slice()));
     accounts.add_root_and_flush_write_cache(current_slot);
 
-    accounts.assert_load_account(current_slot, pubkey, zero_lamport);
+    // Account is not loadable as it is zero lamport
+    accounts.assert_not_load_account(current_slot, pubkey);
+
+    // Account is still present in the index
+    assert!(accounts.accounts_index.contains_with(&pubkey, None, None));
 
     // Otherwise slot 2 will not be removed
     current_slot += 1;
@@ -2973,14 +2984,14 @@ fn test_zero_lamport_new_root_not_cleaned() {
     db.add_root_and_flush_write_cache(0);
     db.add_root_and_flush_write_cache(1);
 
+    // Account should have a ref count of 2 since it's in both slot 0 and slot 1
+    db.assert_ref_count(&account_key, 2);
+
     // Only clean zero lamport accounts up to slot 0
     db.clean_accounts(Some(0), false);
 
-    // Should still be able to find zero lamport account in slot 1
-    assert_eq!(
-        db.load_without_fixed_root(&Ancestors::default(), &account_key),
-        Some((zero_lamport_account, 1))
-    );
+    // Slot 1's entry should still be in the index — only slot 0 was eligible for cleaning
+    db.assert_ref_count(&account_key, 1);
 }
 
 #[test]
@@ -3224,7 +3235,6 @@ fn test_load_with_read_only_accounts_cache() {
             &Ancestors::default(),
             &account_key,
             LoadHint::Unspecified,
-            LoadZeroLamports::None,
             PopulateReadCache::False,
         )
         .unwrap();
@@ -3237,7 +3247,6 @@ fn test_load_with_read_only_accounts_cache() {
             &Ancestors::default(),
             &account_key,
             LoadHint::Unspecified,
-            LoadZeroLamports::None,
             PopulateReadCache::True,
         )
         .unwrap();
@@ -3250,7 +3259,6 @@ fn test_load_with_read_only_accounts_cache() {
         &Ancestors::default(),
         &account_key,
         LoadHint::Unspecified,
-        LoadZeroLamports::None,
         PopulateReadCache::False,
     );
     assert!(account.is_none());
@@ -3262,7 +3270,6 @@ fn test_load_with_read_only_accounts_cache() {
         &Ancestors::default(),
         &account_key,
         LoadHint::Unspecified,
-        LoadZeroLamports::None,
         PopulateReadCache::True,
     );
     assert!(account.is_none());
@@ -3275,7 +3282,6 @@ fn test_load_with_read_only_accounts_cache() {
             &Ancestors::default(),
             &account_key,
             LoadHint::Unspecified,
-            LoadZeroLamports::None,
             PopulateReadCache::False,
         )
         .unwrap();
@@ -3290,7 +3296,6 @@ fn test_load_with_read_only_accounts_cache() {
             &Ancestors::default(),
             &account_key,
             LoadHint::Unspecified,
-            LoadZeroLamports::None,
             PopulateReadCache::True,
         )
         .unwrap();
@@ -3299,9 +3304,6 @@ fn test_load_with_read_only_accounts_cache() {
     assert_eq!(db.read_only_accounts_cache.cache_len(), 0);
     assert_eq!(slot, 2);
 }
-
-/// a test that will accept either answer
-const LOAD_ZERO_LAMPORTS_ANY_TESTS: LoadZeroLamports = LoadZeroLamports::None;
 
 #[test]
 fn test_flush_cache_clean() {
@@ -3398,21 +3400,12 @@ fn test_flush_cache_dont_clean_zero_lamport_account(mark_obsolete_accounts: Mark
     // entry in slot 0 is blocking cleanup of the zero-lamport account.
     // With obsolete accounts enabled, the zero lamport account being newer
     // than the latest full snapshot blocks cleanup
-    // Fine to simulate a transaction load since we are not doing any out of band
-    // removals, only using clean_accounts
-    let load_hint = LoadHint::FixedMaxRoot;
-    assert_eq!(
-        db.do_load(
-            &Ancestors::default(),
-            &zero_lamport_account_key,
-            load_hint,
-            LoadZeroLamports::SomeWithZeroLamportAccountForTests,
-            PopulateReadCache::True,
-        )
-        .unwrap()
-        .0
-        .lamports(),
-        0
+
+    // The ref count check above verifies the zero lamport account is still present in the index.
+    // However it will not be loadable, as the last entry for the pubkey is the zero-lamport account in slot 2
+    assert!(
+        db.load_with_fixed_root(&Ancestors::default(), &zero_lamport_account_key,)
+            .is_none()
     );
 }
 
@@ -4358,13 +4351,7 @@ fn start_load_thread(
 
                 // Load should never be unable to find this key
                 let loaded_account = db
-                    .do_load(
-                        &ancestors,
-                        &pubkey,
-                        load_hint,
-                        LOAD_ZERO_LAMPORTS_ANY_TESTS,
-                        PopulateReadCache::True,
-                    )
+                    .do_load(&ancestors, &pubkey, load_hint, PopulateReadCache::True)
                     .unwrap();
                 // slot + 1 == account.lamports because of the account-cache-flush thread
                 assert_eq!(
@@ -6829,16 +6816,27 @@ fn test_write_accounts_to_cache_scenarios(
         Some(&ancestors),
     );
 
-    // Verify results
-    let loaded = db.load_without_fixed_root(&ancestors, &key);
     match expected_lamports {
-        Some(expected) => {
-            assert!(loaded.is_some(), "Account should be loadable");
-            let (acc, _) = loaded.unwrap();
-            assert_eq!(acc.lamports(), expected, "Wrong lamports");
-        }
         None => {
-            assert!(loaded.is_none(), "Account should not be loadable");
+            // Account was never stored (ephemeral): should be absent from the index.
+            assert!(
+                !db.accounts_index.contains(&key),
+                "Account should not be present in the index"
+            );
+        }
+        Some(expected) => {
+            // Account should have an entry in the index.
+            assert!(
+                db.accounts_index.contains(&key),
+                "Account should be present in the index"
+            );
+            if expected == 0 {
+                // If the lamport count is zero, the account is not loadable
+                db.assert_not_load_account(2, key);
+            } else {
+                // If the lamport count is non-zero, the account should be loadable with the expected lamports
+                db.assert_load_account(2, key, expected);
+            }
         }
     }
 

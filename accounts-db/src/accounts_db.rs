@@ -257,20 +257,6 @@ pub enum StoreReclaims {
     Ignore,
 }
 
-/// specifies how to return zero lamport accounts from a load
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum LoadZeroLamports {
-    /// return None if loaded account has zero lamports
-    None,
-    /// return Some(account with zero lamports) if loaded account has zero lamports
-    /// This used to be the only behavior.
-    /// Note that this is non-deterministic if clean is running asynchronously.
-    /// If a zero lamport account exists in the index, then Some is returned.
-    /// Once it is cleaned from the index, None is returned.
-    #[cfg(feature = "dev-context-only-utils")]
-    SomeWithZeroLamportAccountForTests,
-}
-
 #[derive(Debug)]
 pub(crate) struct ShrinkCollect<'a, T: ShrinkCollectRefs<'a>> {
     pub(crate) slot: Slot,
@@ -3585,13 +3571,7 @@ impl AccountsDb {
         load_hint: LoadHint,
         populate_read_cache: PopulateReadCache,
     ) -> Option<(AccountSharedData, Slot)> {
-        self.do_load(
-            ancestors,
-            pubkey,
-            load_hint,
-            LoadZeroLamports::None,
-            populate_read_cache,
-        )
+        self.do_load(ancestors, pubkey, load_hint, populate_read_cache)
     }
 
     fn read_index_for_accessor_or_load_slow<'a>(
@@ -3891,16 +3871,9 @@ impl AccountsDb {
         ancestors: &Ancestors,
         pubkey: &Pubkey,
         load_hint: LoadHint,
-        load_zero_lamports: LoadZeroLamports,
         populate_read_cache: PopulateReadCache,
     ) -> Option<(AccountSharedData, Slot)> {
-        self.do_load_with_populate_read_cache(
-            ancestors,
-            pubkey,
-            load_hint,
-            load_zero_lamports,
-            populate_read_cache,
-        )
+        self.do_load_with_populate_read_cache(ancestors, pubkey, load_hint, populate_read_cache)
     }
 
     fn do_load_with_populate_read_cache(
@@ -3908,7 +3881,6 @@ impl AccountsDb {
         ancestors: &Ancestors,
         pubkey: &Pubkey,
         load_hint: LoadHint,
-        load_zero_lamports: LoadZeroLamports,
         populate_read_cache: PopulateReadCache,
     ) -> Option<(AccountSharedData, Slot)> {
         let starting_max_root = self.accounts_index.max_root_inclusive();
@@ -3921,7 +3893,7 @@ impl AccountsDb {
         if !in_write_cache {
             let result = self.read_only_accounts_cache.load(*pubkey, slot);
             if let Some(account) = result {
-                if load_zero_lamports == LoadZeroLamports::None && account.is_zero_lamport() {
+                if account.is_zero_lamport() {
                     return None;
                 }
                 return Some((account, slot));
@@ -3939,7 +3911,7 @@ impl AccountsDb {
         // since the cache could be flushed in between the 2 calls.
         let in_write_cache = matches!(account_accessor, LoadedAccountAccessor::Cached(_));
         let account = account_accessor.check_and_get_loaded_account_shared_data();
-        if load_zero_lamports == LoadZeroLamports::None && account.is_zero_lamport() {
+        if account.is_zero_lamport() {
             return None;
         }
 
@@ -6937,13 +6909,11 @@ impl AccountsDb {
             ancestors,
             pubkey,
             LoadHint::FixedMaxRoot,
-            LoadZeroLamports::None,
             PopulateReadCache::True,
         )
     }
 
-    /// note this returns Some for accounts with zero lamports
-    pub fn load_without_fixed_root(
+    fn load_without_fixed_root(
         &self,
         ancestors: &Ancestors,
         pubkey: &Pubkey,
@@ -6952,8 +6922,6 @@ impl AccountsDb {
             ancestors,
             pubkey,
             LoadHint::Unspecified,
-            // callers of this expect zero lamport accounts that exist in the index to be returned as Some(empty)
-            LoadZeroLamports::SomeWithZeroLamportAccountForTests,
             PopulateReadCache::True,
         )
     }

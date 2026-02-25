@@ -290,11 +290,7 @@ mod serde_snapshot_tests {
         db.assert_load_account(new_root, key2, 1);
 
         // Check purged account stays gone
-        let unrooted_slot_ancestors = vec![(unrooted_slot, 1)].into_iter().collect();
-        assert!(
-            db.load_without_fixed_root(&unrooted_slot_ancestors, &key)
-                .is_none()
-        );
+        db.assert_not_load_account(unrooted_slot, key);
     }
 
     #[test_matrix(
@@ -463,7 +459,7 @@ mod serde_snapshot_tests {
 
         accounts.add_root_and_flush_write_cache(current_slot);
 
-        accounts.assert_load_account(current_slot, pubkey, zero_lamport);
+        accounts.assert_not_load_account(current_slot, pubkey);
 
         accounts.print_accounts_stats("accounts");
 
@@ -480,7 +476,7 @@ mod serde_snapshot_tests {
 
         accounts.print_accounts_stats("reconstructed");
 
-        accounts.assert_load_account(current_slot, pubkey, zero_lamport);
+        accounts.assert_not_load_account(current_slot, pubkey);
     }
 
     fn with_chained_zero_lamport_accounts<F>(f: F)
@@ -538,8 +534,8 @@ mod serde_snapshot_tests {
         accounts.print_accounts_stats("post_f");
 
         accounts.assert_load_account(current_slot, pubkey, some_lamport);
-        accounts.assert_load_account(current_slot, purged_pubkey1, 0);
-        accounts.assert_load_account(current_slot, purged_pubkey2, 0);
+        accounts.assert_not_load_account(current_slot, purged_pubkey1);
+        accounts.assert_not_load_account(current_slot, purged_pubkey2);
         accounts.assert_load_account(current_slot, dummy_pubkey, dummy_lamport);
 
         let calculated_capitalization =
@@ -660,8 +656,8 @@ mod serde_snapshot_tests {
         accounts.print_count_and_status("after purge zero");
 
         accounts.assert_load_account(current_slot, pubkey, old_lamport);
-        accounts.assert_load_account(current_slot, purged_pubkey1, 0);
-        accounts.assert_load_account(current_slot, purged_pubkey2, 0);
+        accounts.assert_not_load_account(current_slot, purged_pubkey1);
+        accounts.assert_not_load_account(current_slot, purged_pubkey2);
     }
 
     #[test_case(#[allow(deprecated)] StorageAccess::Mmap)]
@@ -748,7 +744,12 @@ mod serde_snapshot_tests {
         accounts.store_for_tests((current_slot, [(&dummy_pubkey, &dummy_account)].as_slice()));
         accounts.add_root(current_slot);
 
-        accounts.assert_load_account(current_slot, pubkey1, zero_lamport);
+        // pubkey1 is zero lamport — not loadable via the production path
+        accounts.assert_not_load_account(current_slot, pubkey1);
+        // But the zero-lamport index entry must still be present to prevent
+        // snapshot restore from reviving the old step-A state
+        assert!(accounts.accounts_index.contains(&pubkey1));
+
         accounts.assert_load_account(current_slot, pubkey2, old_lamport);
         accounts.assert_load_account(current_slot, dummy_pubkey, dummy_lamport);
 
@@ -771,7 +772,11 @@ mod serde_snapshot_tests {
 
         info!("pubkey: {pubkey1}");
         accounts.print_accounts_stats("pre_clean");
-        accounts.assert_load_account(current_slot, pubkey1, zero_lamport);
+        // pubkey1 is zero lamport — not loadable via the production path
+        accounts.assert_not_load_account(current_slot, pubkey1);
+        // But the zero-lamport index entry must still be present to prevent
+        // snapshot restore from reviving the old step-A state
+        assert!(accounts.accounts_index.contains(&pubkey1));
         accounts.assert_load_account(current_slot, pubkey2, old_lamport);
         accounts.assert_load_account(current_slot, dummy_pubkey, dummy_lamport);
 
@@ -791,6 +796,7 @@ mod serde_snapshot_tests {
         accounts.clean_accounts_for_tests();
 
         // Ensure pubkey2 is cleaned from the index finally
+        assert!(!accounts.accounts_index.contains(&pubkey1));
         accounts.assert_not_load_account(current_slot, pubkey1);
         accounts.assert_load_account(current_slot, pubkey2, old_lamport);
         accounts.assert_load_account(current_slot, dummy_pubkey, dummy_lamport);
