@@ -38,7 +38,7 @@ use {
         account_storage_entry::AccountStorageEntry,
         accounts_cache::{AccountsCache, CachedAccount, SlotCache},
         accounts_db::stats::{
-            AccountsStats, CacheAccountStoreStats, CleanAccountsStats, FlushStats,
+            AccountsStats, CacheAccountStoreStats, CleanAccountsStats, FlushStats, LoadStats,
             ObsoleteAccountsStats, PurgeStats, ShrinkAncientStats, ShrinkStats, ShrinkStatsSub,
             StoreAccountsTiming,
         },
@@ -937,6 +937,8 @@ pub struct AccountsDb {
 
     pub stats: AccountsStats,
 
+    pub load_stats: LoadStats,
+
     clean_accounts_stats: CleanAccountsStats,
 
     // Stats for purges called outside of clean_accounts()
@@ -1148,6 +1150,7 @@ impl AccountsDb {
             shrink_candidate_slots: Mutex::new(ShrinkCandidates::default()),
             write_version: AtomicU64::new(0),
             external_purge_slots_stats: PurgeStats::default(),
+            load_stats: LoadStats::default(),
             clean_accounts_stats: CleanAccountsStats::default(),
             shrink_stats: ShrinkStats::default(),
             shrink_ancient_stats: ShrinkAncientStats::default(),
@@ -3877,6 +3880,19 @@ impl AccountsDb {
     ) -> Option<(AccountSharedData, Slot)> {
         let starting_max_root = self.accounts_index.max_root_inclusive();
 
+        // First check the write cache
+        let cache_result = self.accounts_cache.load_pubkey(pubkey, ancestors);
+
+        if let Some((ref cached_account, cached_slot)) = cache_result {
+            // If the version found in the write cache is newer than anything flushed to storage, it must be the right one! return it.
+            if cached_slot >= self.accounts_cache.fetch_max_flush_root() {
+                self.load_stats
+                    .loaded_from_write_cache
+                    .fetch_add(1, Ordering::Relaxed);
+                return Some((cached_account.account.clone(), cached_slot));
+            }
+        }
+
         let (slot, storage_location, _maybe_account_accessor) =
             self.read_index_for_accessor_or_load_slow(ancestors, pubkey, false)?;
         // Notice the subtle `?` at previous line, we bail out pretty early if missing.
@@ -3885,6 +3901,9 @@ impl AccountsDb {
         if !in_write_cache {
             let result = self.read_only_accounts_cache.load(*pubkey, slot);
             if let Some(account) = result {
+                self.load_stats
+                    .loaded_from_read_cache
+                    .fetch_add(1, Ordering::Relaxed);
                 return Some((account, slot));
             }
         }
@@ -3899,6 +3918,22 @@ impl AccountsDb {
         // note that the account being in the cache could be different now than it was previously
         // since the cache could be flushed in between the 2 calls.
         let in_write_cache = matches!(account_accessor, LoadedAccountAccessor::Cached(_));
+        if in_write_cache {
+            // Call it a write cache hit if the slot is matching
+            if cache_result.is_some_and(|(_, cached_slot)| cached_slot == slot) {
+                self.load_stats
+                    .loaded_from_write_cache
+                    .fetch_add(1, Ordering::Relaxed);
+            } else {
+                self.load_stats
+                    .loaded_from_index_cache
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+        } else {
+            self.load_stats
+                .loaded_from_index_storage
+                .fetch_add(1, Ordering::Relaxed);
+        }
         let account = account_accessor.check_and_get_loaded_account_shared_data();
 
         if !in_write_cache && populate_read_cache == PopulateReadCache::True {
@@ -5969,6 +6004,8 @@ impl AccountsDb {
                     i64
                 ),
             );
+
+            self.load_stats.report();
         }
     }
 
