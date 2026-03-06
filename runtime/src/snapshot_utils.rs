@@ -3,6 +3,7 @@ use solana_accounts_db::utils::create_accounts_run_and_snapshot_dirs;
 use {
     crate::{
         bank::BankFieldsToDeserialize,
+        epoch_stakes::{DeserializableVersionedEpochStakes, VersionedEpochStakes},
         serde_snapshot::{
             self, AccountsDbFields, ExtraFieldsToSerialize, SerdeObsoleteAccountsMap,
             SerializableAccountStorageEntry, SnapshotAccountsDbFields, SnapshotBankFields,
@@ -45,7 +46,7 @@ use {
         accounts_file::{AccountsFile, StorageAccess},
         utils::{ACCOUNTS_RUN_DIR, ACCOUNTS_SNAPSHOT_DIR, move_and_async_delete_path},
     },
-    solana_clock::Slot,
+    solana_clock::{Epoch, Slot},
     solana_measure::{measure::Measure, measure_time, measure_us},
     std::{
         cmp::Ordering,
@@ -78,7 +79,10 @@ const MAX_SNAPSHOT_VERSION_FILE_SIZE: u64 = 8; // byte
 // 2.0.0 - Obsolete Accounts File added, storages flushed file not written anymore
 //         Snapshots created with version 2.0.0 will not fastboot to older versions
 //         Snapshots created with versions <2.0.0 will fastboot to version 2.0.0
-const SNAPSHOT_FASTBOOT_VERSION: Version = Version::new(2, 0, 0);
+// 3.0.0 - Epoch Stakes File added, epoch stakes removed from bank snapshot stream
+//         Snapshots created with version 3.0.0 will not fastboot to older versions
+//         Snapshots created with versions <3.0.0 will fastboot to version 3.0.0
+const SNAPSHOT_FASTBOOT_VERSION: Version = Version::new(3, 0, 0);
 
 /// Information about a bank snapshot. Namely the slot of the bank, the path to the snapshot, and
 /// the kind of the snapshot.
@@ -493,6 +497,7 @@ pub fn serialize_snapshot(
     bank_snapshot_package: BankSnapshotPackage,
     snapshot_storages: &[Arc<AccountStorageEntry>],
     should_flush_and_hard_link_storages: bool,
+    include_epoch_stakes: bool,
 ) -> Result<BankSnapshotInfo> {
     let BankSnapshotPackage {
         mut bank_fields,
@@ -501,6 +506,19 @@ pub fn serialize_snapshot(
     } = bank_snapshot_package;
     let status_cache_slot_deltas = status_cache_slot_deltas.as_slice();
     let slot = bank_fields.slot;
+
+    // Extract epoch stakes before the serializer closure.
+    // When epoch stakes are excluded from the bank snapshot stream (incremental/fastboot),
+    // they may need to be written to a separate file for fastboot.
+    let all_epoch_stakes = mem::take(&mut bank_fields.versioned_epoch_stakes);
+    // When creating a fastbootable snapshot (should_flush_and_hard_link_storages),
+    // always write epoch stakes to a separate file. This is required for fastboot
+    // loading with version >= 3.
+    let epoch_stakes_for_file = if should_flush_and_hard_link_storages {
+        Some(all_epoch_stakes.clone())
+    } else {
+        None
+    };
 
     // this lambda function is to facilitate converting between
     // the AddBankSnapshotError and SnapshotError types
@@ -525,7 +543,13 @@ pub fn serialize_snapshot(
         );
 
         let bank_snapshot_serializer = move |stream: &mut dyn Write| -> Result<()> {
-            let versioned_epoch_stakes = mem::take(&mut bank_fields.versioned_epoch_stakes);
+            // For incremental/fastboot snapshots, epoch stakes are excluded from the
+            // bank snapshot stream (they're stored separately or in the full snapshot).
+            let versioned_epoch_stakes = if include_epoch_stakes {
+                all_epoch_stakes
+            } else {
+                HashMap::default()
+            };
             let extra_fields = ExtraFieldsToSerialize {
                 lamports_per_signature: bank_fields.fee_rate_governor.lamports_per_signature,
                 unused_incremental_snapshot_persistence: None,
@@ -581,6 +605,15 @@ pub fn serialize_snapshot(
                             AddBankSnapshotError::SerializeObsoleteAccounts(Box::new(err))
                         })?
                 });
+
+                // Write epoch stakes to a separate file when they were excluded
+                // from the bank snapshot stream (for fastboot loading)
+                if let Some(epoch_stakes) = &epoch_stakes_for_file {
+                    write_epoch_stakes_to_snapshot(&bank_snapshot_dir, epoch_stakes)
+                        .map_err(|err| {
+                            AddBankSnapshotError::SerializeEpochStakes(Box::new(err))
+                        })?;
+                }
 
                 mark_bank_snapshot_as_loadable(&bank_snapshot_dir)
                     .map_err(AddBankSnapshotError::MarkSnapshotLoadable)?;
@@ -743,6 +776,60 @@ fn deserialize_obsolete_accounts(
     let obsolete_accounts = serde_snapshot::deserialize_from(&mut data_file_stream)?;
 
     Ok(obsolete_accounts)
+}
+
+/// Limit the size of the epoch stakes file
+/// Epoch stakes can be large, but should not exceed the snapshot data file size
+pub const MAX_EPOCH_STAKES_FILE_SIZE: u64 = MAX_SNAPSHOT_DATA_FILE_SIZE;
+
+/// Writes the epoch stakes to a separate file in the bank snapshot directory.
+/// This is used for fastboot so epoch stakes can be removed from the bank snapshot stream.
+pub fn write_epoch_stakes_to_snapshot(
+    bank_snapshot_dir: impl AsRef<Path>,
+    versioned_epoch_stakes: &HashMap<u64, VersionedEpochStakes>,
+) -> Result<u64> {
+    let epoch_stakes_path = bank_snapshot_dir
+        .as_ref()
+        .join(snapshot_paths::SNAPSHOT_EPOCH_STAKES_FILENAME);
+    let mut file_stream = SizeLimitedWriter::new(
+        large_file_buf_writer(&epoch_stakes_path)?,
+        MAX_EPOCH_STAKES_FILE_SIZE,
+    );
+
+    serde_snapshot::serialize_into(&mut file_stream, versioned_epoch_stakes).map_err(|err| {
+        IoError::other(format!(
+            "unable to serialize epoch stakes to file '{}': {err}",
+            epoch_stakes_path.display(),
+        ))
+    })?;
+
+    file_stream.flush()?;
+    Ok(file_stream.bytes_written())
+}
+
+/// Reads epoch stakes from the separate file in the bank snapshot directory.
+pub(crate) fn deserialize_epoch_stakes_from_snapshot(
+    bank_snapshot_dir: impl AsRef<Path>,
+) -> Result<Vec<(Epoch, DeserializableVersionedEpochStakes)>> {
+    let epoch_stakes_path = bank_snapshot_dir
+        .as_ref()
+        .join(snapshot_paths::SNAPSHOT_EPOCH_STAKES_FILENAME);
+    let epoch_stakes_file = fs::File::open(&epoch_stakes_path)?;
+    let metadata = fs::metadata(&epoch_stakes_path)?;
+    if metadata.len() > MAX_EPOCH_STAKES_FILE_SIZE {
+        let error_message = format!(
+            "too large epoch stakes file to deserialize: '{}' has {} bytes (max size is \
+             {MAX_EPOCH_STAKES_FILE_SIZE} bytes)",
+            epoch_stakes_path.display(),
+            metadata.len(),
+        );
+        return Err(IoError::other(error_message).into());
+    }
+
+    let mut data_file_stream = BufReader::new(epoch_stakes_file);
+    let epoch_stakes = serde_snapshot::deserialize_from(&mut data_file_stream)?;
+
+    Ok(epoch_stakes)
 }
 
 pub fn serialize_snapshot_data_file<F>(data_file_path: &Path, serializer: F) -> Result<u64>

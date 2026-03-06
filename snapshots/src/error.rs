@@ -208,6 +208,9 @@ pub enum AddBankSnapshotError {
     #[error("failed to serialize obsolete accounts: {0}")]
     SerializeObsoleteAccounts(#[source] Box<SnapshotError>),
 
+    #[error("failed to serialize epoch stakes: {0}")]
+    SerializeEpochStakes(#[source] Box<SnapshotError>),
+
     #[error("failed to write snapshot version file '{1}': {0}")]
     WriteSnapshotVersionFile(#[source] io::Error, PathBuf),
 

@@ -330,8 +330,28 @@ impl SnapshotBankFields {
     }
 
     /// Collapse the SnapshotBankFields into a single (the latest) BankFieldsToDeserialize.
+    ///
+    /// When an incremental snapshot is present, its bank fields are used. Incremental snapshots
+    /// may only store a subset of epoch stakes (e.g. the leader schedule epoch); the remaining
+    /// epoch stakes are merged from the full snapshot.
     pub fn collapse_into(self) -> BankFieldsToDeserialize {
-        self.incremental.unwrap_or(self.full)
+        match self.incremental {
+            Some(mut incremental) => {
+                // Merge epoch stakes from the full snapshot that aren't in the incremental.
+                let incremental_epochs: HashSet<_> = incremental
+                    .versioned_epoch_stakes
+                    .iter()
+                    .map(|(epoch, _)| *epoch)
+                    .collect();
+                for (epoch, stakes) in self.full.versioned_epoch_stakes {
+                    if !incremental_epochs.contains(&epoch) {
+                        incremental.versioned_epoch_stakes.push((epoch, stakes));
+                    }
+                }
+                incremental
+            }
+            None => self.full,
+        }
     }
 }
 
