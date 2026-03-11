@@ -8531,6 +8531,7 @@ name = "solana-sbf-rust-error-handling"
 version = "4.1.0-alpha.0"
 dependencies = [
  "num-derive",
+ "num-traits",
  "solana-account-info",
  "solana-msg",
  "solana-program-entrypoint",
