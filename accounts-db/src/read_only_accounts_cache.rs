@@ -217,6 +217,34 @@ impl ReadOnlyAccountsCache {
         self.highest_slot_stored.load(Ordering::Acquire) >= slot
     }
 
+    /// If `pubkey` is present in the cache, update its slot and account data
+    /// in-place. The `make_account` closure is only called when the entry
+    /// exists, avoiding unnecessary work (e.g. data copies) for the common
+    /// case where the key is not cached.
+    pub(crate) fn update_if_present_with(
+        &self,
+        pubkey: &Pubkey,
+        slot: Slot,
+        make_account: impl FnOnce() -> AccountSharedData,
+    ) {
+        // Fast path: read-lock to check presence (cheap if not present).
+        if !self.cache.contains_key(pubkey) {
+            return;
+        }
+        // Entry exists — take a write lock to update in-place.
+        if let Some(mut entry) = self.cache.get_mut(pubkey) {
+            let account = make_account();
+            let old_account_size = Self::account_size(&entry.account);
+            let new_account_size = Self::account_size(&account);
+            self.highest_slot_stored.fetch_max(slot, Ordering::Release);
+            entry.account = account;
+            entry.slot = slot;
+            // Preserve the original timestamp — this is a slot migration,
+            // not a fresh access, so it should not reset eviction age.
+            update_stat(&self.data_size, old_account_size, new_account_size);
+        }
+    }
+
     /// remove entry if it exists.
     /// Assume the entry does not exist for performance.
     pub(crate) fn remove_assume_not_present(&self, pubkey: &Pubkey) -> Option<AccountSharedData> {
