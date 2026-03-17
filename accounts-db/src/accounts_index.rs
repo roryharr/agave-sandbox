@@ -640,32 +640,12 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> AccountsIndex<T, U> {
                 // Pass "" not to log metrics, so RPC doesn't get spammy
                 self.do_scan_accounts(metric_name, ancestors, func, range, Some(max_root), config);
             }
-            ScanTypes::Indexed(IndexKey::ProgramId(program_id)) => {
-                self.do_scan_secondary_index(
+            ScanTypes::Indexed(ref index_key) => {
+                let candidates = self.get_candidate_pubkeys(index_key);
+                self.do_scan_secondary_index_candidates(
                     ancestors,
                     func,
-                    &self.program_id_index,
-                    &program_id,
-                    Some(max_root),
-                    config,
-                );
-            }
-            ScanTypes::Indexed(IndexKey::SplTokenMint(mint_key)) => {
-                self.do_scan_secondary_index(
-                    ancestors,
-                    func,
-                    &self.spl_token_mint_index,
-                    &mint_key,
-                    Some(max_root),
-                    config,
-                );
-            }
-            ScanTypes::Indexed(IndexKey::SplTokenOwner(owner_key)) => {
-                self.do_scan_secondary_index(
-                    ancestors,
-                    func,
-                    &self.spl_token_owner_index,
-                    &owner_key,
+                    &candidates,
                     Some(max_root),
                     config,
                 );
@@ -775,30 +755,29 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> AccountsIndex<T, U> {
         }
     }
 
-    fn do_scan_secondary_index<
-        F,
-        SecondaryIndexEntryType: SecondaryIndexEntry + Default + Sync + Send,
-    >(
+    /// Scans a set of candidate pubkeys (obtained from a secondary index) by
+    /// looking each one up in the primary index and invoking `func` for entries
+    /// visible in the given `ancestors`/`max_root`.
+    pub(crate) fn do_scan_secondary_index_candidates<F>(
         &self,
         ancestors: &Ancestors,
         mut func: F,
-        index: &SecondaryIndex<SecondaryIndexEntryType>,
-        index_key: &Pubkey,
+        candidates: &[Pubkey],
         max_root: Option<Slot>,
         config: &ScanConfig,
     ) where
         F: FnMut(&Pubkey, (&T, Slot)),
     {
-        for pubkey in index.get(index_key) {
+        for pubkey in candidates {
             if config.is_aborted() {
                 break;
             }
             self.get_with_and_then(
-                &pubkey,
+                pubkey,
                 Some(ancestors),
                 max_root,
                 true,
-                |(slot, account_info)| func(&pubkey, (&account_info, slot)),
+                |(slot, account_info)| func(pubkey, (&account_info, slot)),
             );
         }
     }
@@ -1218,6 +1197,19 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> AccountsIndex<T, U> {
                     }
                 }
             }
+        }
+    }
+
+    /// Returns all candidate pubkeys from the secondary index for the given `index_key`.
+    ///
+    /// This only consults the secondary index — no primary index lookups or
+    /// ancestor/root filtering is performed. Callers are responsible for
+    /// validating each returned pubkey against the primary index (or cache).
+    pub fn get_candidate_pubkeys(&self, index_key: &IndexKey) -> Vec<Pubkey> {
+        match index_key {
+            IndexKey::ProgramId(key) => self.program_id_index.get(key),
+            IndexKey::SplTokenMint(key) => self.spl_token_mint_index.get(key),
+            IndexKey::SplTokenOwner(key) => self.spl_token_owner_index.get(key),
         }
     }
 
