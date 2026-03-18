@@ -16,9 +16,7 @@ use {
     },
     solana_clap_utils::{
         hidden_unless_forced,
-        input_validators::{
-            is_parsable, is_pubkey, is_pubkey_or_keypair, is_slot, is_url_or_moniker,
-        },
+        input_validators::{is_parsable, is_pubkey, is_pubkey_or_keypair, is_url_or_moniker},
     },
     solana_clock::Slot,
     solana_core::banking_trace::BANKING_TRACE_DIR_DEFAULT_BYTE_LIMIT,
@@ -690,22 +688,6 @@ pub fn test_app<'a>(version: &'a str, default_args: &'a DefaultTestArgs) -> App<
                     "Copy an upgradeable program and its executable data from the cluster \
                      referenced by the --url argument the genesis configuration. If the ledger \
                      already exists then this parameter is silently ignored",
-                ),
-        )
-        .arg(
-            Arg::with_name("warp_slot")
-                .required(false)
-                .long("warp-slot")
-                .short("w")
-                .takes_value(true)
-                .value_name("WARP_SLOT")
-                .validator(is_slot)
-                .min_values(0)
-                .max_values(1)
-                .help(
-                    "Warp the ledger to WARP_SLOT after starting the validator. If no slot is \
-                     provided then the current slot of the cluster referenced by the --url \
-                     argument will be used",
                 ),
         )
         .arg(

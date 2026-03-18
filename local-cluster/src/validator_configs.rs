@@ -46,7 +46,6 @@ pub fn safe_clone_config(config: &ValidatorConfig) -> ValidatorConfig {
         no_os_disk_stats_reporting: config.no_os_disk_stats_reporting,
         enforce_ulimit_nofile: config.enforce_ulimit_nofile,
         poh_pinned_cpu_core: config.poh_pinned_cpu_core,
-        warp_slot: config.warp_slot,
         accounts_db_skip_shrink: config.accounts_db_skip_shrink,
         accounts_db_force_initial_clean: config.accounts_db_force_initial_clean,
         staked_nodes_overrides: config.staked_nodes_overrides.clone(),

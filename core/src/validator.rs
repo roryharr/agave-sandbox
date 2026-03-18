@@ -34,8 +34,7 @@ use {
         tvu::{AlpenglowInitializationState, Tvu, TvuConfig, TvuSockets},
     },
     agave_snapshots::{
-        SnapshotInterval, snapshot_archive_info::SnapshotArchiveInfoGetter as _,
-        snapshot_config::SnapshotConfig, snapshot_hash::StartingSnapshotHashes,
+        SnapshotInterval, snapshot_config::SnapshotConfig, snapshot_hash::StartingSnapshotHashes,
     },
     agave_votor::{
         vote_history::VoteHistory,
@@ -129,7 +128,6 @@ use {
         dependency_tracker::DependencyTracker,
         prioritization_fee_cache::PrioritizationFeeCache,
         runtime_config::RuntimeConfig,
-        snapshot_bank_utils,
         snapshot_controller::SnapshotController,
         snapshot_utils::{self, clean_orphaned_account_snapshot_dirs},
     },
@@ -355,7 +353,6 @@ pub struct ValidatorConfig {
     pub poh_hashes_per_batch: u64,
     pub process_ledger_before_services: bool,
     pub accounts_db_config: AccountsDbConfig,
-    pub warp_slot: Option<Slot>,
     pub accounts_db_skip_shrink: bool,
     pub accounts_db_force_initial_clean: bool,
     pub staked_nodes_overrides: Arc<RwLock<HashMap<Pubkey, u64>>>,
@@ -433,7 +430,6 @@ impl ValidatorConfig {
             poh_pinned_cpu_core: poh_service::DEFAULT_PINNED_CPU_CORE,
             poh_hashes_per_batch: poh_service::DEFAULT_HASHES_PER_BATCH,
             process_ledger_before_services: false,
-            warp_slot: None,
             accounts_db_skip_shrink: false,
             accounts_db_force_initial_clean: false,
             staked_nodes_overrides: Arc::new(RwLock::new(HashMap::new())),
@@ -1121,16 +1117,6 @@ impl Validator {
             &snapshot_controller,
             config,
         );
-
-        maybe_warp_slot(
-            config,
-            &mut process_blockstore,
-            ledger_path,
-            &bank_forks,
-            &leader_schedule_cache,
-            &snapshot_controller,
-        )
-        .map_err(ValidatorError::Other)?;
 
         if config.process_ledger_before_services {
             process_blockstore
@@ -2093,13 +2079,6 @@ fn post_process_restored_tower(
             ));
         }
 
-        if let Some(warp_slot) = config.warp_slot {
-            // unconditionally relax tower requirement so that we can always restore tower
-            // from root bank after the warp
-            should_require_tower = false;
-            return Err(crate::consensus::TowerError::HardFork(warp_slot));
-        }
-
         tower
     });
 
@@ -2448,68 +2427,6 @@ impl<'a> ProcessBlockStore<'a> {
         self.process()?;
         Ok(self.tower.unwrap())
     }
-}
-
-fn maybe_warp_slot(
-    config: &ValidatorConfig,
-    process_blockstore: &mut ProcessBlockStore,
-    ledger_path: &Path,
-    bank_forks: &RwLock<BankForks>,
-    leader_schedule_cache: &LeaderScheduleCache,
-    snapshot_controller: &SnapshotController,
-) -> Result<(), String> {
-    if let Some(warp_slot) = config.warp_slot {
-        let mut bank_forks = bank_forks.write().unwrap();
-
-        let working_bank = bank_forks.working_bank();
-
-        if warp_slot <= working_bank.slot() {
-            return Err(format!(
-                "warp slot ({}) cannot be less than the working bank slot ({})",
-                warp_slot,
-                working_bank.slot()
-            ));
-        }
-        info!("warping to slot {warp_slot}");
-
-        let root_bank = bank_forks.root_bank();
-
-        // An accounts hash calculation from storages will occur in warp_from_parent() below.  This
-        // requires that the accounts cache has been flushed, which requires the parent slot to be
-        // rooted.
-        root_bank.squash();
-        root_bank.force_flush_accounts_cache();
-
-        bank_forks.insert(Bank::warp_from_parent(
-            root_bank,
-            SlotLeader::default(),
-            warp_slot,
-        ));
-        bank_forks.set_root(warp_slot, Some(snapshot_controller), Some(warp_slot));
-        leader_schedule_cache.set_root(&bank_forks.root_bank());
-
-        let full_snapshot_archive_info = match snapshot_bank_utils::bank_to_full_snapshot_archive(
-            ledger_path,
-            &bank_forks.root_bank(),
-            None,
-            &config.snapshot_config.full_snapshot_archives_dir,
-            &config.snapshot_config.incremental_snapshot_archives_dir,
-            config.snapshot_config.archive_format,
-        ) {
-            Ok(archive_info) => archive_info,
-            Err(e) => return Err(format!("Unable to create snapshot: {e}")),
-        };
-        info!(
-            "created snapshot: {}",
-            full_snapshot_archive_info.path().display()
-        );
-
-        drop(bank_forks);
-        // Process blockstore after warping bank forks to make sure tower and
-        // bank forks are in sync.
-        process_blockstore.process()?;
-    }
-    Ok(())
 }
 
 /// Returns the starting slot at which the blockstore should be scanned for

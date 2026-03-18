@@ -50,6 +50,16 @@ pub async fn wait_n_slots(rpc_client: &RpcClient, n: u64) -> u64 {
     }
 }
 
+pub async fn wait_for_min_slot(rpc_client: &RpcClient, min_slot: u64) {
+    loop {
+        let slot = rpc_client.get_slot().await.unwrap();
+        if slot >= min_slot {
+            return;
+        }
+        sleep(Duration::from_millis(DEFAULT_MS_PER_SLOT));
+    }
+}
+
 pub async fn wait_for_next_epoch_plus_n_slots(rpc_client: &RpcClient, n: u64) -> (Epoch, u64) {
     let current_epoch = rpc_client.get_epoch_info().await.unwrap().epoch;
     let next_epoch = current_epoch.saturating_add(1);

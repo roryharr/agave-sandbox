@@ -7,7 +7,7 @@ use {
         cli::{CliCommand, CliConfig, process_command, request_and_confirm_airdrop},
         spend_utils::SpendAmount,
         stake::StakeAuthorizationIndexed,
-        test_utils::{check_ready, wait_for_next_epoch_plus_n_slots},
+        test_utils::{check_ready, wait_for_min_slot},
     },
     solana_cli_output::{OutputFormat, parse_sign_only_reply_string},
     solana_client::nonblocking::blockhash_query::{BlockhashQuery, Source},
@@ -52,7 +52,6 @@ async fn test_stake_delegation_force() {
             /* enable_warmup_epochs = */ false,
         ))
         .faucet_addr(Some(faucet_addr))
-        .warp_slot(DELINQUENT_VALIDATOR_SLOT_DISTANCE * 2) // get out in front of the cli voter delinquency check
         .start_async_with_mint_address(&mint_keypair, SocketAddrSpace::Unspecified)
         .await
         .expect("validator start failed");
@@ -164,7 +163,8 @@ async fn test_stake_delegation_force() {
     };
     process_command(&config).await.unwrap();
 
-    wait_for_next_epoch_plus_n_slots(&rpc_client, 1).await;
+    // Wait until slot exceeds the delinquent threshold
+    wait_for_min_slot(&rpc_client, DELINQUENT_VALIDATOR_SLOT_DISTANCE + 1).await;
 
     // Delegate stake2 fails because voter has not voted, but is now staked
     config.signers = vec![&default_signer];

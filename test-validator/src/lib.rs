@@ -16,7 +16,7 @@ use {
         utils::create_accounts_run_and_snapshot_dirs,
     },
     solana_cli_output::CliAccount,
-    solana_clock::{DEFAULT_MS_PER_SLOT, Slot},
+    solana_clock::DEFAULT_MS_PER_SLOT,
     solana_commitment_config::CommitmentConfig,
     solana_compute_budget::compute_budget::ComputeBudget,
     solana_core::{
@@ -128,7 +128,6 @@ pub struct TestValidatorGenesis {
     rpc_config: JsonRpcConfig,
     pubsub_config: PubSubConfig,
     rpc_ports: Option<(u16, u16)>, // (JsonRpc, JsonRpcPubSub), None == random ports
-    warp_slot: Option<Slot>,
     accounts: HashMap<Pubkey, AccountSharedData>,
     upgradeable_programs: Vec<UpgradeableProgramInfo>,
     ticks_per_slot: Option<u64>,
@@ -163,7 +162,6 @@ impl Default for TestValidatorGenesis {
             rpc_config: JsonRpcConfig::default_for_test(),
             pubsub_config: PubSubConfig::default(),
             rpc_ports: Option::<(u16, u16)>::default(),
-            warp_slot: Option::<Slot>::default(),
             accounts: HashMap::<Pubkey, AccountSharedData>::default(),
             upgradeable_programs: Vec::<UpgradeableProgramInfo>::default(),
             ticks_per_slot: Option::<u64>::default(),
@@ -290,11 +288,6 @@ impl TestValidatorGenesis {
 
     pub fn faucet_addr(&mut self, faucet_addr: Option<SocketAddr>) -> &mut Self {
         self.rpc_config.faucet_addr = faucet_addr;
-        self
-    }
-
-    pub fn warp_slot(&mut self, warp_slot: Slot) -> &mut Self {
-        self.warp_slot = Some(warp_slot);
         self
     }
 
@@ -1215,7 +1208,6 @@ impl TestValidator {
                 incremental_snapshot_archives_dir: ledger_path.to_path_buf(),
                 ..SnapshotConfig::default()
             },
-            warp_slot: config.warp_slot,
             validator_exit: config.validator_exit.clone(),
             max_ledger_shreds: config.max_ledger_shreds,
             no_wait_for_vote_to_start_leader: true,
