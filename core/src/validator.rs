@@ -77,7 +77,7 @@ use {
     solana_hard_forks::HardForks,
     solana_hash::Hash,
     solana_keypair::Keypair,
-    solana_leader_schedule::{FixedSchedule, SlotLeader},
+    solana_leader_schedule::FixedSchedule,
     solana_ledger::{
         bank_forks_utils,
         blockstore::{
