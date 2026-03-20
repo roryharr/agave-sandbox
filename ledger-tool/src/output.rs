@@ -12,7 +12,7 @@ use {
     },
     solana_account::{AccountSharedData, ReadableAccount},
     solana_accounts_db::{
-        accounts_index::{ScanConfig, ScanOrder},
+        accounts_scan::{ScanConfig, ScanOrder},
         is_loadable::IsLoadable as _,
     },
     solana_cli_output::{

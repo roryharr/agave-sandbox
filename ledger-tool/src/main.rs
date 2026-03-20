@@ -26,7 +26,7 @@ use {
     log::*,
     serde::Serialize,
     solana_account::{AccountSharedData, ReadableAccount, WritableAccount, state_traits::StateMut},
-    solana_accounts_db::accounts_index::{ScanConfig, ScanOrder},
+    solana_accounts_db::accounts_scan::{ScanConfig, ScanOrder},
     solana_clap_utils::{
         input_parsers::{cluster_type_of, pubkey_of, pubkeys_of},
         input_validators::{
