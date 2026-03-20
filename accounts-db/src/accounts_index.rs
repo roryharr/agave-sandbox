@@ -8,8 +8,12 @@ mod secondary;
 mod stats;
 use {
     crate::{
-        ancestors::Ancestors, contains::Contains, is_zero_lamport::IsZeroLamport,
-        pubkey_bins::PubkeyBinCalculator24, rolling_bit_field::RollingBitField,
+        accounts_scan::{ScanConfig, ScanError},
+        ancestors::Ancestors,
+        contains::Contains,
+        is_zero_lamport::IsZeroLamport,
+        pubkey_bins::PubkeyBinCalculator24,
+        rolling_bit_field::RollingBitField,
     },
     account_map_entry::{AccountMapEntry, PreAllocatedAccountMapEntry, SlotListWriteGuard},
     accounts_index_storage::AccountsIndexStorage,
@@ -39,7 +43,6 @@ use {
             atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering},
         },
     },
-    thiserror::Error,
 };
 pub use {
     bucket_map_holder::{DEFAULT_NUM_ENTRIES_OVERHEAD, DEFAULT_NUM_ENTRIES_TO_EVICT},
@@ -71,7 +74,6 @@ pub const ACCOUNTS_INDEX_CONFIG_FOR_BENCHMARKS: AccountsIndexConfig = AccountsIn
     scan_results_limit_bytes: None,
     num_initial_accounts: None,
 };
-pub type ScanResult<T> = Result<T, ScanError>;
 pub type SlotList<T> = SmallVec<[SlotListItem<T>; 1]>;
 pub type ReclaimsSlotList<T> = Vec<SlotListItem<T>>;
 pub type SlotListItem<T> = (Slot, T);
@@ -137,37 +139,6 @@ pub enum UpsertReclaim {
     ReclaimOldSlots,
 }
 
-#[derive(Debug, Default)]
-pub struct ScanConfig {
-    /// checked by the scan. When true, abort scan.
-    pub abort: Option<Arc<AtomicBool>>,
-}
-
-impl ScanConfig {
-    /// mark the scan as aborted
-    pub fn abort(&self) {
-        if let Some(abort) = self.abort.as_ref() {
-            abort.store(true, Ordering::Relaxed)
-        }
-    }
-
-    /// use existing 'abort' if available, otherwise allocate one
-    pub fn recreate_with_abort(&self) -> Self {
-        ScanConfig {
-            abort: Some(self.abort.clone().unwrap_or_default()),
-        }
-    }
-
-    /// true if scan should abort
-    pub fn is_aborted(&self) -> bool {
-        if let Some(abort) = self.abort.as_ref() {
-            abort.load(Ordering::Relaxed)
-        } else {
-            false
-        }
-    }
-}
-
 pub trait IsCached {
     fn is_cached(&self) -> bool;
 }
@@ -177,17 +148,6 @@ pub trait IndexValue: 'static + IsCached + IsZeroLamport + DiskIndexValue {}
 pub trait DiskIndexValue:
     'static + Clone + Debug + PartialEq + Copy + Default + Sync + Send
 {
-}
-
-#[derive(Error, Debug, PartialEq, Eq)]
-pub enum ScanError {
-    #[error(
-        "Node detected it replayed bad version of slot {slot:?} with id {bank_id:?}, thus the \
-         scan on said slot was aborted"
-    )]
-    SlotRemoved { slot: Slot, bank_id: BankId },
-    #[error("scan aborted: {0}")]
-    Aborted(String),
 }
 
 enum ScanTypes {
@@ -4049,23 +4009,5 @@ mod tests {
         let mut config = AccountsIndexConfig::default();
         config.bins = Some(3);
         AccountsIndex::<bool, bool>::new(&config, Arc::default());
-    }
-
-    #[test]
-    fn test_scan_config() {
-        let config = ScanConfig::default();
-        assert!(config.abort.is_none()); // not allocated
-        assert!(!config.is_aborted());
-        config.abort(); // has no effect
-        assert!(!config.is_aborted());
-
-        let config = config.recreate_with_abort();
-        assert!(config.abort.is_some());
-        assert!(!config.is_aborted());
-        config.abort();
-        assert!(config.is_aborted());
-
-        let config = config.recreate_with_abort();
-        assert!(config.is_aborted());
     }
 }

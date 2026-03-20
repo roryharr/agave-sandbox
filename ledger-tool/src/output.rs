@@ -11,7 +11,7 @@ use {
         ser::{Impossible, SerializeSeq, SerializeStruct, Serializer},
     },
     solana_account::{AccountSharedData, ReadableAccount},
-    solana_accounts_db::{accounts_index::ScanConfig, is_loadable::IsLoadable as _},
+    solana_accounts_db::{accounts_scan::ScanConfig, is_loadable::IsLoadable as _},
     solana_cli_output::{
         CliAccount, CliAccountNewConfig, OutputFormat, QuietDisplay, VerboseDisplay,
         display::{build_balance_message, writeln_transaction},

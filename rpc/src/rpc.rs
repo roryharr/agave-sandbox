@@ -25,7 +25,8 @@ use {
     },
     solana_accounts_db::{
         accounts::AccountAddressFilter,
-        accounts_index::{AccountIndex, AccountSecondaryIndexes, IndexKey, ScanConfig, ScanResult},
+        accounts_index::{AccountIndex, AccountSecondaryIndexes, IndexKey},
+        accounts_scan::{ScanConfig, ScanResult},
     },
     solana_client::connection_cache::Protocol,
     solana_clock::{Slot, UnixTimestamp},
