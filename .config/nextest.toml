@@ -97,10 +97,6 @@ filter = 'package(solana-core) & test(/^test_snapshots_have_expected_epoch_accou
 slow-timeout = { period = "60s", terminate-after = 2 }
 
 [[profile.ci.overrides]]
-filter = 'package(solana-cli) & test(/^test_stake_delegation_force/)'
-slow-timeout = { period = "60s", terminate-after = 3 }
-
-[[profile.ci.overrides]]
 filter = 'package(solana-client-test) & test(/^test_send_and_confirm_transactions_in_parallel_with_tpu_client/)'
 slow-timeout = { period = "60s", terminate-after = 3 }
 
