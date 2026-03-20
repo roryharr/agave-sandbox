@@ -47,10 +47,11 @@ use {
         accounts_hash::{AccountLtHash, AccountsLtHash, ZERO_LAMPORT_ACCOUNT_LT_HASH},
         accounts_index::{
             AccountSecondaryIndexes, AccountsIndex, AccountsIndexRootsStats,
-            AccountsIndexScanResult, IndexKey, IsCached, ReclaimsSlotList, RefCount, ScanConfig,
-            ScanFilter, ScanResult, SlotList, Startup, UpsertReclaim,
+            AccountsIndexScanResult, IndexKey, IsCached, ReclaimsSlotList, RefCount, ScanFilter,
+            SlotList, Startup, UpsertReclaim,
             in_mem_accounts_index::StartupStats,
         },
+        accounts_scan::{ScanConfig, ScanGuard, ScanResult, ScanState},
         accounts_update_notifier_interface::{AccountForGeyser, AccountsUpdateNotifier},
         active_stats::{ActiveStatItem, ActiveStats},
         ancestors::Ancestors,
@@ -871,6 +872,9 @@ pub struct AccountsDb {
     /// Keeps tracks of index into AppendVec on a per slot basis
     pub accounts_index: AccountInfoAccountsIndex,
 
+    /// All state related to scan lifecycle management.
+    pub scan_state: ScanState,
+
     /// Some(offset) iff we want to squash old append vecs together into 'ancient append vecs'
     /// Some(offset) means for slots up to (max_slot - (slots_per_epoch - 'offset')), put them in ancient append vecs
     pub ancient_append_vec_offset: Option<i64>,
@@ -1085,8 +1089,10 @@ impl AccountsDb {
             .build()
             .expect("new rayon threadpool");
 
+        let scan_results_limit_bytes = accounts_index_config.scan_results_limit_bytes;
         let new = Self {
             accounts_index,
+            scan_state: ScanState::new(scan_results_limit_bytes),
             paths,
             bank_hash_details_dir: accounts_db_config.bank_hash_details_dir,
             temp_paths,
@@ -1382,7 +1388,7 @@ impl AccountsDb {
 
     fn max_clean_root(&self, proposed_clean_root: Option<Slot>) -> Option<Slot> {
         match (
-            self.accounts_index.min_ongoing_scan_root(),
+            self.scan_state.min_ongoing_scan_root(),
             proposed_clean_root,
         ) {
             (None, None) => None,
@@ -2137,12 +2143,13 @@ impl AccountsDb {
             ),
             (
                 "active_scans",
-                self.accounts_index.active_scans.load(Ordering::Relaxed),
+                self.scan_state.active_scans.load(Ordering::Relaxed),
                 i64
             ),
             (
                 "max_distance_to_min_scan_slot",
-                self.accounts_index
+                self
+                    .scan_state
                     .max_distance_to_min_scan_slot
                     .swap(0, Ordering::Relaxed),
                 i64
@@ -3381,10 +3388,15 @@ impl AccountsDb {
     where
         F: FnMut(Option<(&Pubkey, AccountSharedData, Slot)>),
     {
-        // This can error out if the slots being scanned over are aborted
-        self.accounts_index.scan_accounts(
+        let max_root_inclusive = self.accounts_index.max_root_inclusive();
+        let scan = ScanGuard::new(&self.scan_state, ancestors, bank_id, max_root_inclusive)?;
+        let max_root = scan.max_root();
+        let empty = Ancestors::default();
+        let ancestors = scan.resolve_ancestors(ancestors, &empty);
+
+        self.accounts_index.do_scan_accounts(
+            "",
             ancestors,
-            bank_id,
             |pubkey, (account_info, slot)| {
                 let mut account_accessor =
                     self.get_account_accessor(slot, pubkey, &account_info.storage_location());
@@ -3397,10 +3409,12 @@ impl AccountsDb {
                 };
                 scan_func(account_slot)
             },
+            None::<std::ops::Range<Pubkey>>,
+            Some(max_root),
             config,
-        )?;
+        );
 
-        Ok(())
+        scan.finish()
     }
 
     pub fn index_scan_accounts<F>(
@@ -3426,10 +3440,14 @@ impl AccountsDb {
             return Ok(used_index);
         }
 
-        self.accounts_index.index_scan_accounts(
+        let max_root_inclusive = self.accounts_index.max_root_inclusive();
+        let scan = ScanGuard::new(&self.scan_state, ancestors, bank_id, max_root_inclusive)?;
+        let max_root = scan.max_root();
+        let empty = Ancestors::default();
+        let ancestors = scan.resolve_ancestors(ancestors, &empty);
+
+        self.accounts_index.do_scan_indexed_accounts(
             ancestors,
-            bank_id,
-            index_key,
             |pubkey, (account_info, slot)| {
                 let account_slot = self
                     .get_account_accessor(slot, pubkey, &account_info.storage_location())
@@ -3438,8 +3456,12 @@ impl AccountsDb {
                     });
                 scan_func(account_slot)
             },
+            &index_key,
+            Some(max_root),
             config,
-        )?;
+        );
+
+        scan.finish()?;
         let used_index = true;
         Ok(used_index)
     }
@@ -4094,7 +4116,7 @@ impl AccountsDb {
         // and hold a reference to the bank at the tip of the fork they're scanning. Hence it's
         // safe to remove this bank_id from the `removed_bank_ids` list at this point.
         if self
-            .accounts_index
+            .scan_state
             .removed_bank_ids
             .lock()
             .unwrap()
@@ -4330,7 +4352,7 @@ impl AccountsDb {
             //
             // Also note roots are never removed via `remove_unrooted_slot()`, so
             // it's safe to filter them out here as they won't need deletion from
-            // self.accounts_index.removed_bank_ids in `purge_slots_from_cache_and_store()`.
+            // self.scan_state.removed_bank_ids in `purge_slots_from_cache_and_store()`.
             .filter(|slot| !self.accounts_index.is_alive_root(**slot));
         safety_checks_elapsed.stop();
         self.external_purge_slots_stats
@@ -4354,7 +4376,7 @@ impl AccountsDb {
         // banks fail, and any ongoing scans over these slots will detect that they should abort
         // their results
         {
-            let mut locked_removed_bank_ids = self.accounts_index.removed_bank_ids.lock().unwrap();
+            let mut locked_removed_bank_ids = self.scan_state.removed_bank_ids.lock().unwrap();
             for (_slot, remove_bank_id) in remove_slots.iter() {
                 locked_removed_bank_ids.insert(*remove_bank_id);
             }

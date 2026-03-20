@@ -41,8 +41,9 @@ use {
     solana_accounts_db::{
         accounts::AccountAddressFilter,
         accounts_index::{
-            AccountIndex, AccountSecondaryIndexes, ITER_BATCH_SIZE, IndexKey, ScanConfig, ScanError,
+            AccountIndex, AccountSecondaryIndexes, ITER_BATCH_SIZE, IndexKey,
         },
+        accounts_scan::{ScanConfig, ScanError},
         ancestors::Ancestors,
     },
     solana_client_traits::SyncClient,

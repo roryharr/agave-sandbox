@@ -93,7 +93,8 @@ use {
         accounts::{AccountAddressFilter, Accounts, PubkeyAccountSlot},
         accounts_db::{AccountsDb, AccountsDbConfig},
         accounts_hash::AccountsLtHash,
-        accounts_index::{IndexKey, ScanConfig, ScanResult},
+        accounts_index::IndexKey,
+        accounts_scan::{ScanConfig, ScanResult},
         accounts_update_notifier_interface::AccountsUpdateNotifier,
         ancestors::Ancestors,
         blockhash_queue::BlockhashQueue,
@@ -1817,7 +1818,7 @@ impl Bank {
         self.rc
             .accounts
             .accounts_db
-            .accounts_index
+            .scan_state
             .scan_results_limit_bytes
     }
 

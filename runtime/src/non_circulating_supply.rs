@@ -2,7 +2,7 @@ use {
     crate::bank::Bank,
     log::*,
     solana_account::ReadableAccount,
-    solana_accounts_db::accounts_index::{AccountIndex, IndexKey, ScanConfig, ScanResult},
+    solana_accounts_db::{accounts_index::{AccountIndex, IndexKey}, accounts_scan::{ScanConfig, ScanResult}},
     solana_pubkey::Pubkey,
     solana_stake_interface::{self as stake, state::StakeStateV2},
     std::collections::HashSet,

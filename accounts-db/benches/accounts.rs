@@ -12,7 +12,7 @@ use {
         account_info::{AccountInfo, StorageLocation},
         accounts::{AccountAddressFilter, Accounts},
         accounts_db::{ACCOUNTS_DB_CONFIG_FOR_BENCHMARKS, AccountFromStorage, AccountsDb},
-        accounts_index::ScanConfig,
+        accounts_scan::ScanConfig,
         ancestors::Ancestors,
     },
     solana_hash::Hash,
