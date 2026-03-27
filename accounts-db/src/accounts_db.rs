@@ -5557,11 +5557,70 @@ impl AccountsDb {
         }
     }
 
+    /// Returns whether the latest visible version of `pubkey` is zero-lamport,
+    /// checking both the write cache and the accounts index. Returns `None` if
+    /// the account doesn't exist in either (i.e. it is ephemeral).
+    fn is_latest_account_zero_lamport(
+        &self,
+        pubkey: &Pubkey,
+        ancestors: Option<&Ancestors>,
+    ) -> Option<bool> {
+        if let Some(ancestors) = ancestors {
+            let cache_result = self.accounts_cache.load_latest(pubkey, ancestors);
+
+            // Only check the index when the cache missed or the slot is being
+            // flushed (a newer version may already exist in storage).
+            let need_index_check = !matches!(
+                &cache_result,
+                Some((_, _, SlotStatus::Ancestor | SlotStatus::UnflushedRoot))
+            );
+            let index_result = need_index_check
+                .then(|| {
+                    self.accounts_index.get_with_and_then(
+                        pubkey,
+                        Some(ancestors),
+                        None,
+                        true,
+                        |(slot, account)| (slot, account.is_zero_lamport()),
+                    )
+                })
+                .flatten();
+
+            // Pick the result from the higher slot.
+            match (&cache_result, &index_result) {
+                (Some((ca, cache_slot, _)), Some((index_slot, iz))) => {
+                    if *index_slot > *cache_slot {
+                        Some(*iz)
+                    } else {
+                        Some(ca.account.lamports() == 0)
+                    }
+                }
+                (Some((ca, _, _)), None) => Some(ca.account.lamports() == 0),
+                (None, Some((_, iz))) => Some(*iz),
+                (None, None) => None,
+            }
+        } else {
+            // Without ancestors, we can only determine existence, not the
+            // latest version. Return Some(false) if the account exists
+            // anywhere so the caller won't skip it.
+            if self.accounts_cache.contains_pubkey(pubkey) {
+                return Some(false);
+            }
+            if self
+                .accounts_index
+                .get_and_then(pubkey, |account| (true, account.is_some()))
+            {
+                return Some(false);
+            }
+            None
+        }
+    }
+
     // Stores accounts in the write cache. If an account is zero-lamport and not present in the
-    // index, there is no need to store it in the write cache as it will not effect the accounts
-    // hash. The function returns a BitVec indicating whether each account was stored in the cache.
-    // Ordering of account is important as duplicate pubkeys are possible. The last account in
-    // accounts_and_meta_to_store for each pubkey is stored in the write cache
+    // cache or index, there is no need to store it in the write cache as it will not affect the
+    // accounts hash. The function returns a BitVec indicating whether each account was stored in
+    // the cache. Ordering of accounts is important as duplicate pubkeys are possible. The last
+    // account in accounts_and_meta_to_store for each pubkey is stored in the write cache
     fn write_accounts_to_cache<'a, 'b>(
         &self,
         slot: Slot,
@@ -5587,28 +5646,16 @@ impl AccountsDb {
                     return;
                 }
                 if account.is_zero_lamport() {
-                    if ancestors.is_some() {
-                        if let Some(is_zero_lamport) = self.accounts_index.get_with_and_then(
-                            pubkey,
-                            ancestors,
-                            None,
-                            true,
-                            |(_, account)| account.is_zero_lamport(),
-                        ) {
-                            if is_zero_lamport {
-                                stats.num_ancestors_zero_lamport_skipped += 1;
-                                return;
-                            }
-                        } else {
+                    match self.is_latest_account_zero_lamport(pubkey, ancestors) {
+                        None => {
                             stats.num_ephemeral_accounts_skipped += 1;
                             return;
                         }
-                    } else if self
-                        .accounts_index
-                        .get_and_then(pubkey, |account| (true, account.is_none()))
-                    {
-                        stats.num_ephemeral_accounts_skipped += 1;
-                        return;
+                        Some(true) => {
+                            stats.num_ancestors_zero_lamport_skipped += 1;
+                            return;
+                        }
+                        Some(false) => {}
                     }
                 }
 
