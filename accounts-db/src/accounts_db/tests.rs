@@ -6447,3 +6447,33 @@ fn test_index_scan_accounts_excludes_roots_added_during_scan() {
     // slot 3 was rooted after the scan guard's max_root (= 2) was established.
     assert!(!found_pubkeys.contains(&pubkey_new));
 }
+
+#[test_case(Some(42), Some(false); "nonzero_lamports")]
+#[test_case(Some(0),  Some(true);  "zero_lamports")]
+#[test_case(None,     None;        "missing")]
+fn test_is_zero_lamport_with_ancestors(lamports: Option<u64>, expected: Option<bool>) {
+    let db = AccountsDb::new_single_for_tests();
+    let pubkey = Pubkey::new_unique();
+    let ancestors = Ancestors::from(vec![0]);
+    if let Some(lamports) = lamports {
+        let account = AccountSharedData::new(lamports, 0, &Pubkey::default());
+        db.store_for_tests((0, [(&pubkey, &account)].as_slice()));
+        db.add_root_and_flush_write_cache(0);
+    }
+    assert_eq!(db.is_zero_lamport(&pubkey, Some(&ancestors)), expected);
+}
+
+#[test_case(true,  Some(false); "present")]
+#[test_case(false, None;        "missing")]
+fn test_is_zero_lamport_no_ancestors(stored: bool, expected: Option<bool>) {
+    let db = AccountsDb::new_single_for_tests();
+    let pubkey = Pubkey::new_unique();
+    if stored {
+        // Set the account to zero lamports. Since no ancestors are provided, the lamport count is
+        // is not checked, only the existance of the account.
+        let account = AccountSharedData::new(0, 0, &Pubkey::default());
+        db.store_for_tests((0, [(&pubkey, &account)].as_slice()));
+        db.add_root_and_flush_write_cache(0);
+    }
+    assert_eq!(db.is_zero_lamport(&pubkey, None), expected);
+}
