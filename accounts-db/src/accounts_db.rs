@@ -3370,10 +3370,34 @@ impl AccountsDb {
             &empty_ancestors
         };
 
+        // Step 1: Pre-scan the cache index to find the newest visible cached version
+        // of each pubkey. Hold the Arc<CachedAccount> to keep the data alive even if
+        // the cache flushes between now and step 3 (Arc clone is just a refcount bump).
+        let mut cache_versions: HashMap<Pubkey, (Arc<CachedAccount>, Slot)> = HashMap::new();
+        for pubkey in self.accounts_cache.index_pubkeys() {
+            if let Some((cached_account, slot, _)) =
+                self.accounts_cache
+                    .load_latest(&pubkey, ancestors, Some(scan_guard.max_root()))
+            {
+                cache_versions.insert(pubkey, (cached_account, slot));
+            }
+        }
+
+        // Step 2: Scan the accounts_index. For each pubkey, check if the cache has a
+        // newer version. If so, skip it (the cache version will be emitted in step 3).
         self.accounts_index.scan_accounts(
             ancestors,
             scan_guard.max_root(),
             |pubkey, (account_info, slot)| {
+                if let Some((_, cache_slot)) = cache_versions.get(pubkey) {
+                    if *cache_slot > slot {
+                        // Cache has a newer version — skip this entry, handle in step 3
+                        return;
+                    }
+                    // accounts_index version is newer (or equal) — use it, remove from map
+                    cache_versions.remove(pubkey);
+                }
+
                 let mut account_accessor =
                     self.get_account_accessor(slot, pubkey, &account_info.storage_location());
 
@@ -3387,6 +3411,15 @@ impl AccountsDb {
             },
             config,
         );
+
+        // Step 3: Emit remaining cache entries — these are pubkeys where the cache had
+        // the newer version, or pubkeys that only existed in the cache.
+        for (pubkey, (cached_account, slot)) in &cache_versions {
+            if config.is_aborted() {
+                break;
+            }
+            scan_func(Some((pubkey, cached_account.account.clone(), *slot)));
+        }
 
         // Check whether the bank was removed while the scan was in progress.
         if scan_guard.was_scan_corrupted() {
@@ -3932,7 +3965,7 @@ impl AccountsDb {
         let starting_max_root = self.accounts_index.max_root_inclusive();
 
         // First check the write cache
-        let cache_result = self.accounts_cache.load_latest(pubkey, ancestors);
+        let cache_result = self.accounts_cache.load_latest(pubkey, ancestors, None);
 
         if let Some((cached_account, cached_slot, slot_status)) = &cache_result {
             // If the slot is an ancestor or an unflushed root, it hasn't been flushed to

@@ -350,11 +350,13 @@ impl AccountsCache {
     /// Finds the best write-cache entry for `pubkey` visible from `ancestors`. Searches
     /// ancestors first (highest to lowest), then unflushed roots, then roots being flushed.
     /// Ancestors are checked exhaustively before roots, so a lower-slot ancestor wins over a
-    /// higher-slot root. Returns the account, slot, and status, or `None` if not found.
+    /// higher-slot root. When `max_root` is provided, root searches are capped at that slot
+    /// to ensure scan consistency. Returns the account, slot, and status, or `None` if not found.
     pub fn load_latest(
         &self,
         pubkey: &Pubkey,
         ancestors: &Ancestors,
+        max_root: Option<Slot>,
     ) -> Option<(Arc<CachedAccount>, Slot, SlotStatus)> {
         // Exit early if the pubkey isn't in the cache
         let index_max_slot = self.index.max_slot_for_pubkey(pubkey)?;
@@ -383,9 +385,15 @@ impl AccountsCache {
             drop(r_roots_being_flushed);
         }
 
+        // Cap root searches at max_root when provided (for scan consistency),
+        // otherwise fall back to the index's max slot for this pubkey.
+        let max_root_slot = max_root
+            .map(|max_root| max_root.min(index_max_slot))
+            .unwrap_or(index_max_slot);
+
         // If the slot is not found in the ancestors fall back to searching roots
         let r_maybe_unflushed_roots = self.maybe_unflushed_roots.read().unwrap();
-        for &slot in r_maybe_unflushed_roots.range(..=index_max_slot).rev() {
+        for &slot in r_maybe_unflushed_roots.range(..=max_root_slot).rev() {
             if let Some(account) = self.load(slot, pubkey) {
                 return Some((account, slot, SlotStatus::UnflushedRoot));
             }
@@ -393,7 +401,7 @@ impl AccountsCache {
         drop(r_maybe_unflushed_roots);
 
         let r_roots_being_flushed = self.roots_being_flushed.read().unwrap();
-        for &slot in r_roots_being_flushed.range(..=index_max_slot).rev() {
+        for &slot in r_roots_being_flushed.range(..=max_root_slot).rev() {
             if let Some(account) = self.load(slot, pubkey) {
                 return Some((account, slot, SlotStatus::RootBeingFlushed));
             }
@@ -463,6 +471,16 @@ impl AccountsCache {
 
     pub fn contains_pubkey(&self, pubkey: &Pubkey) -> bool {
         self.index.entries.contains_key(pubkey)
+    }
+
+    /// Returns a snapshot of all pubkeys currently in the cache index.
+    /// Each shard is read-locked only long enough to copy its keys out.
+    pub(crate) fn index_pubkeys(&self) -> Vec<Pubkey> {
+        self.index
+            .entries
+            .iter()
+            .map(|entry| *entry.key())
+            .collect()
     }
 
     pub fn num_slots(&self) -> usize {
@@ -716,7 +734,7 @@ mod tests {
 
         let ancestors = Ancestors::from(ancestor_slots.to_vec());
         let result = cache
-            .load_latest(&pk, &ancestors)
+            .load_latest(&pk, &ancestors, None)
             .map(|(account, slot, status)| {
                 assert_eq!(account.account.lamports(), slot);
                 (slot, status)
@@ -733,7 +751,7 @@ mod tests {
         cache.store(10, &pk, AccountSharedData::new(10, 0, &Pubkey::default()));
 
         let ancestors = Ancestors::from(vec![5, 15]);
-        let result = cache.load_latest(&pk, &ancestors);
+        let result = cache.load_latest(&pk, &ancestors, None);
         assert!(result.is_none());
     }
 
@@ -749,7 +767,7 @@ mod tests {
 
         // After clearing flushed roots, slot is no longer visible
         let empty = Ancestors::default();
-        assert!(cache.load_latest(&pk, &empty).is_none());
+        assert!(cache.load_latest(&pk, &empty, None).is_none());
     }
 
     #[test]
@@ -833,6 +851,40 @@ mod tests {
     }
 
     #[test]
+    fn test_load_latest_max_root_caps_root_searches() {
+        let cache = AccountsCache::default();
+        let pk = Pubkey::new_unique();
+
+        // Ancestor at slot 25 (unaffected by max_root), roots at 10 and 20
+        cache.store(25, &pk, AccountSharedData::new(25, 0, &Pubkey::default()));
+        cache.store(10, &pk, AccountSharedData::new(10, 0, &Pubkey::default()));
+        cache.store(20, &pk, AccountSharedData::new(20, 0, &Pubkey::default()));
+        cache.add_root(10);
+        cache.add_root(20);
+
+        let empty = Ancestors::default();
+        let ancestors = Ancestors::from(vec![25]);
+
+        // Without max_root, highest root (20) is returned
+        let (_, slot, status) = cache.load_latest(&pk, &empty, None).unwrap();
+        assert_eq!(slot, 20);
+        assert_eq!(status, SlotStatus::UnflushedRoot);
+
+        // max_root=15 caps roots: slot 20 excluded, slot 10 returned
+        let (_, slot, status) = cache.load_latest(&pk, &empty, Some(15)).unwrap();
+        assert_eq!(slot, 10);
+        assert_eq!(status, SlotStatus::UnflushedRoot);
+
+        // max_root=5 excludes all roots
+        assert!(cache.load_latest(&pk, &empty, Some(5)).is_none());
+
+        // Ancestors are not capped by max_root
+        let (_, slot, status) = cache.load_latest(&pk, &ancestors, Some(5)).unwrap();
+        assert_eq!(slot, 25);
+        assert_eq!(status, SlotStatus::Ancestor);
+    }
+
+    #[test]
     fn test_load_latest_multiple_ancestors_one_being_flushed() {
         let cache = AccountsCache::default();
         let pk = Pubkey::new_unique();
@@ -846,7 +898,7 @@ mod tests {
         cache.begin_flush_roots(None);
 
         let ancestors = Ancestors::from(vec![5, 10]);
-        let (account, slot, status) = cache.load_latest(&pk, &ancestors).unwrap();
+        let (account, slot, status) = cache.load_latest(&pk, &ancestors, None).unwrap();
 
         // Slot 10 is highest ancestor but is being flushed, so should return AncestorBeingFlushed
         assert_eq!(slot, 10);
