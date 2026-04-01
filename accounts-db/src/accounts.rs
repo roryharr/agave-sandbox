@@ -301,6 +301,56 @@ impl Accounts {
             .collect())
     }
 
+    /// Same as `load_largest_accounts` but uses the old scan path (no cache pre-scan).
+    pub fn load_largest_accounts_no_cache(
+        &self,
+        ancestors: &Ancestors,
+        bank_id: BankId,
+        num: usize,
+        filter_by_address: &HashSet<Pubkey>,
+        filter: AccountAddressFilter,
+    ) -> ScanResult<Vec<(Pubkey, u64)>> {
+        if num == 0 {
+            return Ok(vec![]);
+        }
+        let mut account_balances = BinaryHeap::new();
+        self.accounts_db.scan_accounts_no_cache(
+            ancestors,
+            bank_id,
+            |option| {
+                if let Some((pubkey, account, _slot)) = option {
+                    if account.lamports() == 0 {
+                        return;
+                    }
+                    let contains_address = filter_by_address.contains(pubkey);
+                    let collect = match filter {
+                        AccountAddressFilter::Exclude => !contains_address,
+                        AccountAddressFilter::Include => contains_address,
+                    };
+                    if !collect {
+                        return;
+                    }
+                    if account_balances.len() == num {
+                        let Reverse(entry) = account_balances
+                            .peek()
+                            .expect("BinaryHeap::peek should succeed when len > 0");
+                        if *entry >= (account.lamports(), *pubkey) {
+                            return;
+                        }
+                        account_balances.pop();
+                    }
+                    account_balances.push(Reverse((account.lamports(), *pubkey)));
+                }
+            },
+            &ScanConfig::default(),
+        )?;
+        Ok(account_balances
+            .into_sorted_vec()
+            .into_iter()
+            .map(|Reverse((balance, pubkey))| (pubkey, balance))
+            .collect())
+    }
+
     fn load_while_filtering<F: Fn(&AccountSharedData) -> bool>(
         collector: &mut Vec<KeyedAccountSharedData>,
         some_account_tuple: Option<(&Pubkey, AccountSharedData, Slot)>,

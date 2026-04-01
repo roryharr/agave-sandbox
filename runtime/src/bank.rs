@@ -4709,6 +4709,21 @@ impl Bank {
         )
     }
 
+    pub fn get_largest_accounts_no_cache(
+        &self,
+        num: usize,
+        filter_by_address: &HashSet<Pubkey>,
+        filter: AccountAddressFilter,
+    ) -> ScanResult<Vec<(Pubkey, u64)>> {
+        self.rc.accounts.load_largest_accounts_no_cache(
+            &self.ancestors,
+            self.bank_id,
+            num,
+            filter_by_address,
+            filter,
+        )
+    }
+
     /// Return the accumulated executed transaction count
     pub fn transaction_count(&self) -> u64 {
         self.transaction_count.load(Relaxed)

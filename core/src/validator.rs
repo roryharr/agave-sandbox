@@ -649,6 +649,7 @@ pub struct Validator {
     geyser_plugin_service: Option<GeyserPluginService>,
     blockstore_metric_report_service: BlockstoreMetricReportService,
     accounts_background_service: AccountsBackgroundService,
+    scan_benchmark_thread: Option<JoinHandle<()>>,
     repair_quic_endpoints: Option<[Endpoint; 3]>,
     repair_quic_endpoints_runtime: Option<TokioRuntime>,
     repair_quic_endpoints_join_handle: Option<repair::quic_endpoint::AsyncTryJoinHandle>,
@@ -1024,6 +1025,71 @@ impl Validator {
                 pruned_banks_request_handler,
             },
         );
+        let scan_benchmark_thread = {
+            let bank_forks = bank_forks.clone();
+            let exit = exit.clone();
+            Some(
+                Builder::new()
+                    .name("solScanBench".to_string())
+                    .spawn(move || {
+                        info!("Scan benchmark thread started");
+                        let mut iteration = 0u64;
+                        loop {
+                            if exit.load(std::sync::atomic::Ordering::Relaxed) {
+                                break;
+                            }
+                            thread::sleep(std::time::Duration::from_secs(60));
+                            if exit.load(std::sync::atomic::Ordering::Relaxed) {
+                                break;
+                            }
+
+                            let bank = bank_forks.read().unwrap().root_bank();
+
+                            // Skip if another scan is already in progress
+                            if bank.rc.accounts.accounts_db.scan_tracker.active_scans
+                                .load(std::sync::atomic::Ordering::Relaxed) > 0
+                            {
+                                continue;
+                            }
+
+                            let empty_filter = HashSet::new();
+                            let num = 20;
+
+                            // Alternate: even iterations = new (with cache), odd = old (no cache)
+                            let (label, duration_us) = if iteration % 2 == 0 {
+                                let mut timer = Measure::start("scan_with_cache");
+                                let _ = bank.get_largest_accounts(
+                                    num,
+                                    &empty_filter,
+                                    solana_accounts_db::accounts::AccountAddressFilter::Exclude,
+                                );
+                                timer.stop();
+                                ("with_cache", timer.as_us())
+                            } else {
+                                let mut timer = Measure::start("scan_no_cache");
+                                let _ = bank.get_largest_accounts_no_cache(
+                                    num,
+                                    &empty_filter,
+                                    solana_accounts_db::accounts::AccountAddressFilter::Exclude,
+                                );
+                                timer.stop();
+                                ("no_cache", timer.as_us())
+                            };
+
+                            datapoint_info!(
+                                "scan_benchmark",
+                                ("iteration", iteration, i64),
+                                ("variant", label, String),
+                                ("duration_us", duration_us, i64),
+                            );
+                            iteration += 1;
+                        }
+                        info!("Scan benchmark thread stopped");
+                    })
+                    .unwrap(),
+            )
+        };
+
         info!(
             "Using: block-verification-method: {}, block-production-method: {}",
             config.block_verification_method, config.block_production_method,
@@ -1812,6 +1878,7 @@ impl Validator {
             geyser_plugin_service,
             blockstore_metric_report_service,
             accounts_background_service,
+            scan_benchmark_thread,
             repair_quic_endpoints,
             repair_quic_endpoints_runtime,
             repair_quic_endpoints_join_handle,
@@ -1988,6 +2055,11 @@ impl Validator {
         self.accounts_background_service
             .join()
             .expect("accounts_background_service");
+        if let Some(scan_benchmark_thread) = self.scan_benchmark_thread {
+            scan_benchmark_thread
+                .join()
+                .expect("scan_benchmark_thread");
+        }
         if let Some(xdp_transmitter) = self.xdp_transmitter {
             xdp_transmitter.join().expect("xdp_transmitter");
         }

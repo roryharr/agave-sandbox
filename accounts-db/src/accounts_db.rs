@@ -3431,6 +3431,59 @@ impl AccountsDb {
         Ok(())
     }
 
+    /// Original scan_accounts without the cache index pre-scan (for A/B benchmarking).
+    pub(crate) fn scan_accounts_no_cache<F>(
+        &self,
+        ancestors: &Ancestors,
+        bank_id: BankId,
+        mut scan_func: F,
+        config: &ScanConfig,
+    ) -> ScanResult<()>
+    where
+        F: FnMut(Option<(&Pubkey, AccountSharedData, Slot)>),
+    {
+        let scan_guard = ScanGuard::try_new(&self.scan_tracker, bank_id, || {
+            self.accounts_index.max_root_inclusive()
+        })
+        .ok_or(ScanError::SlotRemoved {
+            slot: ancestors.max_slot(),
+            bank_id,
+        })?;
+
+        let empty_ancestors = Ancestors::default();
+        let ancestors = if scan_guard.should_use_ancestors(ancestors) {
+            ancestors
+        } else {
+            &empty_ancestors
+        };
+
+        self.accounts_index.scan_accounts(
+            ancestors,
+            scan_guard.max_root(),
+            |pubkey, (account_info, slot)| {
+                let mut account_accessor =
+                    self.get_account_accessor(slot, pubkey, &account_info.storage_location());
+
+                let account_slot = match account_accessor {
+                    LoadedAccountAccessor::Cached(None) => None,
+                    _ => account_accessor.get_loaded_account(|loaded_account| {
+                        (pubkey, loaded_account.take_account(), slot)
+                    }),
+                };
+                scan_func(account_slot)
+            },
+            config,
+        );
+
+        if scan_guard.was_scan_corrupted() {
+            return Err(ScanError::SlotRemoved {
+                slot: ancestors.max_slot(),
+                bank_id,
+            });
+        }
+        Ok(())
+    }
+
     pub(crate) fn index_scan_accounts<F>(
         &self,
         ancestors: &Ancestors,
