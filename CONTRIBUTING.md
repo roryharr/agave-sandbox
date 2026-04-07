@@ -122,12 +122,13 @@ component author and other potentially interested parties.
 
 ### Draft Pull Requests
 
-Consider opening all PRs as Draft Pull Requests first. Using a draft PR allows
-you to start the CI automation, review the changes, write a detailed problem
-description and explain your solution.
+Consider opening all PRs as Draft Pull Requests first. Using a draft PR
+allows you to review the changes, write a detailed problem description
+and explain your solution.
 
-Once the description is written and CI succeeds, click the "Ready to Review" button
-and add reviewers. Adding reviewers before CI succeeds is a fast path to losing
+Once the description is written and you have passed the local CI checks
+described above, click the "Ready to Review" button and add reviewers. Adding
+reviewers before CI succeeds is a fast path to losing
 reviewer engagement. Not only will they be notified and see the PR is not yet
 ready for them, they will also be bombarded with additional notifications
 each time you push a commit to get past CI or until they "mute" the PR. Once
@@ -137,7 +138,7 @@ sent when you push commits and edit the PR description. Use draft PRs
 liberally.  Don't bug the humans until you have gotten past the bots.
 
 If your PR has received a lot of feedback and needs a lot of rework, feel free
-to convert it into a draft until issues are resolved and CI is green.
+to convert it into a draft until issues are resolved.
 
 Do not add reviewers to draft PRs.  GitHub doesn't automatically clear
 approvals when you click "Ready for Review", so a review that meant "I approve
