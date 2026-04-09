@@ -124,14 +124,17 @@ component author and other potentially interested parties.
 
 Consider opening all PRs as Draft Pull Requests first. Using a draft PR
 allows you to review the changes, write a detailed problem description
-and explain your solution.
+and explain your solution. For community pull requests, reviewers are 
+automatically be added. You should see the community-pr-subscribers added
+as a reviewer.  
 
 Once the description is written and you have passed the local CI checks
-described above, click the "Ready to Review" button and add reviewers. Adding
-reviewers before CI succeeds is a fast path to losing
-reviewer engagement. Not only will they be notified and see the PR is not yet
-ready for them, they will also be bombarded with additional notifications
-each time you push a commit to get past CI or until they "mute" the PR. Once
+described above, click the "Ready to Review" button. Someone from the Anza
+team will review the pull request and add the CI label to trigger CI if
+the direction is appropriate. Making pull requests "Ready To Review" before 
+CI succeeds locally is a fast path to losing reviewer engagement. The reviewer
+will need to add the CI label each time a commit is pushed to re-run the CI
+checks leading to back and forth iterations until they "mute" the PR. Once
 muted, you'll need to reach out over some other medium, such as Discord, to
 request they have another look. When you use draft PRs, no notifications are
 sent when you push commits and edit the PR description. Use draft PRs
