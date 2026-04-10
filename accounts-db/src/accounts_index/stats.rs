@@ -209,6 +209,11 @@ impl Stats {
         let disk_stats = Self::get_stats(disk_per_bucket_counts);
         let mem_per_bucket_counts = in_mem.iter().map(|bin| bin.len()).collect();
         let mem_stats = Self::get_stats(mem_per_bucket_counts);
+        let dirty_per_bin: Vec<usize> = in_mem
+            .iter()
+            .map(|bin| bin.dirty_entry_count().max(0) as usize)
+            .collect();
+        let dirty_stats = Self::get_stats(dirty_per_bin);
 
         const US_PER_MS: u64 = 1_000;
 
@@ -564,6 +569,10 @@ impl Stats {
                         .swap(0, Ordering::Relaxed),
                     i64
                 ),
+                ("min_dirty_entry_count", dirty_stats.0, i64),
+                ("max_dirty_entry_count", dirty_stats.1, i64),
+                ("total_dirty_entry_count", dirty_stats.2, i64),
+                ("median_dirty_entry_count", dirty_stats.3, i64),
             );
         } else {
             datapoint_info!(
@@ -634,6 +643,10 @@ impl Stats {
                 ("max_in_bin_mem", mem_stats.1, i64),
                 ("count_from_bins_mem", mem_stats.2, i64),
                 ("median_from_bins_mem", mem_stats.3, i64),
+                ("min_dirty_entry_count", dirty_stats.0, i64),
+                ("max_dirty_entry_count", dirty_stats.1, i64),
+                ("total_dirty_entry_count", dirty_stats.2, i64),
+                ("median_dirty_entry_count", dirty_stats.3, i64),
             );
         }
     }

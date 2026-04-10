@@ -21,7 +21,7 @@ use {
         num::NonZeroUsize,
         sync::{
             Arc, Mutex, RwLock,
-            atomic::{AtomicBool, AtomicU64, Ordering},
+            atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering},
         },
     },
 };
@@ -59,6 +59,9 @@ pub struct InMemAccountsIndex<T: IndexValue, U: DiskIndexValue + From<T> + Into<
 
     /// stats related to starting up
     pub(crate) startup_stats: Arc<StartupStats>,
+
+    /// number of dirty (needs-flush) entries currently held in this bin's in-memory index
+    dirty_entry_count: AtomicI64,
 }
 
 impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> Debug for InMemAccountsIndex<T, U> {
@@ -144,6 +147,7 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
             ),
             num_ages_to_distribute_flushes,
             startup_stats: Arc::clone(&storage.startup_stats),
+            dirty_entry_count: AtomicI64::new(0),
         }
     }
 
@@ -328,8 +332,9 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
     ) -> bool {
         match entry {
             Entry::Occupied(occupied) => {
-                let result = self
-                    .remove_if_slot_list_empty_value(occupied.get().slot_list_lock_read_len() == 0);
+                let entry = occupied.get();
+                let result =
+                    self.remove_if_slot_list_empty_value(entry.slot_list_lock_read_len() == 0);
                 if result {
                     // note there is a potential race here that has existed.
                     // if someone else holds the arc,
@@ -337,6 +342,9 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
                     // We have to have a write lock to the map here, which means nobody else can get
                     //  the arc, but someone may already have retrieved a clone of it.
                     // account index in_mem flushing is one such possibility
+                    if entry.dirty() {
+                        self.dirty_entry_count.fetch_sub(1, Ordering::Relaxed);
+                    }
                     self.delete_disk_key(occupied.key());
                     self.stats().dec_mem_count();
                     occupied.remove();
@@ -390,17 +398,23 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
         pubkey: &Pubkey,
         user_fn: impl FnOnce(SlotListWriteGuard<T>) -> RT,
     ) -> Option<RT> {
-        self.get_internal_inner(pubkey, |entry| {
+        let mut was_dirty_before = false;
+        let result = self.get_internal_inner(pubkey, |entry| {
             (
                 true,
                 entry.map(|entry| {
+                    was_dirty_before = entry.dirty();
                     let result = user_fn(entry.slot_list_write_lock());
                     // note that to be safe here, we ALWAYS mark the entry as dirty
                     entry.set_dirty(true);
                     result
                 }),
             )
-        })
+        });
+        if result.is_some() && !was_dirty_before {
+            self.dirty_entry_count.fetch_add(1, Ordering::Relaxed);
+        }
+        result
     }
 
     /// Insert a cached entry into the accounts index
@@ -427,8 +441,10 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
     ) {
         let (slot, account_info) = new_value.into();
         let is_cached = account_info.is_cached();
+        let mut was_dirty_before = false;
 
-        self.get_or_create_index_entry_for_pubkey(pubkey, |entry| {
+        let was_occupied = self.get_or_create_index_entry_for_pubkey(pubkey, |entry| {
+            was_dirty_before = entry.dirty();
             if is_cached {
                 Self::cache_entry_at_slot(entry, (slot, account_info));
                 self.set_age_to_future(entry, true);
@@ -443,16 +459,24 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
                 self.set_age_to_future(entry, slot_list_length > 1);
             }
         });
+
+        // New entries are counted at vacant.insert; for existing entries, only count
+        // the clean→dirty transition (dirty entries remain dirty after upsert).
+        if was_occupied && !was_dirty_before {
+            self.dirty_entry_count.fetch_add(1, Ordering::Relaxed);
+        }
     }
 
     /// Gets an entry for `pubkey` and calls `callback` with it.
     /// If the entry is not in the index, an empty entry will be created and passed to `callback`.
     /// If the entry is in the index, it will be passed to `callback` as is.
+    /// Returns `true` if the entry already existed in memory (Occupied), `false` if it was newly
+    /// created (Vacant).
     pub fn get_or_create_index_entry_for_pubkey(
         &self,
         pubkey: &Pubkey,
         callback: impl FnOnce(&AccountMapEntry<T>),
-    ) {
+    ) -> bool {
         let mut updated_in_mem = true;
         // try to get it just from memory first using only a read lock
         self.get_only_in_mem(pubkey, false, |entry| {
@@ -498,6 +522,7 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
                             "Callback must insert item into slot list"
                         );
                         assert!(new_value.dirty());
+                        self.dirty_entry_count.fetch_add(1, Ordering::Relaxed);
                         vacant.insert(Box::new(new_value));
                         stats.inc_mem_count();
                     }
@@ -511,6 +536,7 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
         if updated_in_mem {
             Self::update_stat(&self.stats().updates_in_mem, 1);
         }
+        updated_in_mem
     }
 
     fn update_entry_stats(&self, stopped_measure: Measure, found: bool) {
@@ -890,7 +916,8 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
             return ShouldFlush::No(ReasonToNotFlush::SlotListCached);
         }
 
-        // entry is ready to be flushed
+        // entry is ready to be flushed; dirty was cleared above and will not be re-set
+        self.dirty_entry_count.fetch_sub(1, Ordering::Relaxed);
         ShouldFlush::Yes(slot_list_elem)
     }
 
@@ -1313,6 +1340,11 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
 
     pub fn stats(&self) -> &Stats {
         &self.storage.stats
+    }
+
+    /// Returns the number of dirty entries currently held in this bin's in-memory index.
+    pub fn dirty_entry_count(&self) -> i64 {
+        self.dirty_entry_count.load(Ordering::Relaxed)
     }
 
     fn update_stat(stat: &AtomicU64, value: u64) {
