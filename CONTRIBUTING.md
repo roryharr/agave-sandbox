@@ -125,7 +125,7 @@ component author and other potentially interested parties.
 Consider opening all PRs as Draft Pull Requests first. Using a draft PR
 allows you to review the changes, write a detailed problem description
 and explain your solution. For community pull requests, reviewers are
-automatically be added. You should see the community-pr-subscribers added
+added automatically. You should see the community-pr-subscribers added
 as a reviewer.
 
 Once the description is written and you have passed the local CI checks
