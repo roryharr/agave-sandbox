@@ -4,9 +4,8 @@ use {
         in_mem_accounts_index::{InMemAccountsIndex, StartupStats},
         stats::Stats,
     },
-    crate::waitable_condvar::WaitableCondvar,
+    crate::{accounts_index::rocksdb_disk_index::RocksDbDiskIndex, waitable_condvar::WaitableCondvar},
     log::*,
-    solana_bucket_map::bucket_map::{BucketMap, BucketMapConfig},
     solana_clock::Slot,
     solana_measure::measure::Measure,
     solana_time_utils::AtomicInterval,
@@ -49,7 +48,7 @@ pub const DEFAULT_NUM_ENTRIES_OVERHEAD: usize = 5_000;
 pub const DEFAULT_NUM_ENTRIES_TO_EVICT: usize = 10_000;
 
 pub struct BucketMapHolder<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> {
-    pub disk: Option<BucketMap<(Slot, U)>>,
+    pub disk: Option<Arc<RocksDbDiskIndex>>,
 
     pub count_buckets_flushed: AtomicUsize,
 
@@ -86,7 +85,7 @@ pub struct BucketMapHolder<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>>
     /// and writing to disk in parallel are.
     /// Note startup is an optimization and is not required for correctness.
     startup: AtomicBool,
-    _phantom: PhantomData<T>,
+    _phantom: PhantomData<(T, U)>,
 
     pub(crate) startup_stats: Arc<StartupStats>,
 
@@ -251,17 +250,11 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> BucketMapHolder<T, U>
             .ages_to_stay_in_cache
             .unwrap_or(DEFAULT_AGE_TO_STAY_IN_CACHE);
 
-        let mut bucket_config = BucketMapConfig::new(bins);
-        bucket_config.drives = config.drives.as_ref().cloned();
-        bucket_config.restart_config_file = bucket_config
-            .drives
-            .as_ref()
-            .and_then(|drives| drives.first())
-            .map(|drive| drive.join("accounts_index_restart"));
-
         let disk = match config.index_limit {
             IndexLimit::InMemOnly => None,
-            IndexLimit::Minimal | IndexLimit::Threshold(_) => Some(BucketMap::new(bucket_config)),
+            IndexLimit::Minimal | IndexLimit::Threshold(_) => Some(Arc::new(
+                RocksDbDiskIndex::new(config.drives.as_deref()),
+            )),
         };
 
         // Compute threshold_entries once here

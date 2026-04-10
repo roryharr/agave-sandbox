@@ -198,15 +198,7 @@ impl Stats {
 
         let ms_per_age = self.ms_per_age(storage, elapsed_ms);
 
-        let disk = storage.disk.as_ref();
-        let disk_per_bucket_counts = disk
-            .map(|disk| {
-                (0..self.bins)
-                    .map(|i| disk.get_bucket_from_index(i as usize).bucket_len() as usize)
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-        let disk_stats = Self::get_stats(disk_per_bucket_counts);
+        let disk_stats = Self::get_stats(vec![]);
         let mem_per_bucket_counts = in_mem.iter().map(|bin| bin.len()).collect();
         let mem_stats = Self::get_stats(mem_per_bucket_counts);
         let dirty_per_bin: Vec<usize> = in_mem
@@ -232,34 +224,6 @@ impl Stats {
             "accounts_index"
         };
         if storage.is_disk_index_enabled() {
-            if was_startup {
-                // these stats only apply at startup
-                datapoint_info!(
-                    "accounts_index_startup",
-                    (
-                        "entries_created",
-                        disk.map(|disk| disk
-                            .stats
-                            .index
-                            .startup
-                            .entries_created
-                            .swap(0, Ordering::Relaxed))
-                            .unwrap_or_default(),
-                        i64
-                    ),
-                    (
-                        "entries_reused",
-                        disk.map(|disk| disk
-                            .stats
-                            .index
-                            .startup
-                            .entries_reused
-                            .swap(0, Ordering::Relaxed))
-                            .unwrap_or_default(),
-                        i64
-                    ),
-                );
-            }
             let held_in_mem_clean = self.held_in_mem.clean.swap(0, Ordering::Relaxed);
             let held_in_mem_age = self.held_in_mem.age.swap(0, Ordering::Relaxed);
             let held_in_mem_ref_count = self.held_in_mem.ref_count.swap(0, Ordering::Relaxed);
@@ -439,122 +403,6 @@ impl Stats {
                 (
                     "flush_read_lock_us",
                     self.flush_read_lock_us.swap(0, Ordering::Relaxed),
-                    i64
-                ),
-                (
-                    "disk_index_resizes",
-                    disk.map(|disk| disk.stats.index.resizes.swap(0, Ordering::Relaxed))
-                        .unwrap_or_default(),
-                    i64
-                ),
-                (
-                    "disk_index_failed_resizes",
-                    disk.map(|disk| disk.stats.index.failed_resizes.swap(0, Ordering::Relaxed))
-                        .unwrap_or_default(),
-                    i64
-                ),
-                (
-                    "disk_index_max_size",
-                    disk.map(|disk| { disk.stats.index.max_size.swap(0, Ordering::Relaxed) })
-                        .unwrap_or_default(),
-                    i64
-                ),
-                (
-                    "disk_index_new_file_us",
-                    disk.map(|disk| disk.stats.index.new_file_us.swap(0, Ordering::Relaxed))
-                        .unwrap_or_default(),
-                    i64
-                ),
-                (
-                    "disk_index_resize_us",
-                    disk.map(|disk| disk.stats.index.resize_us.swap(0, Ordering::Relaxed))
-                        .unwrap_or_default(),
-                    i64
-                ),
-                (
-                    "disk_index_flush_file_us",
-                    disk.map(|disk| disk.stats.index.flush_file_us.swap(0, Ordering::Relaxed))
-                        .unwrap_or_default(),
-                    i64
-                ),
-                (
-                    "disk_index_file_size",
-                    disk.map(|disk| disk.stats.index.total_file_size.load(Ordering::Relaxed))
-                        .unwrap_or_default(),
-                    i64
-                ),
-                (
-                    "disk_index_find_index_entry_mut_us",
-                    disk.map(|disk| disk
-                        .stats
-                        .index
-                        .find_index_entry_mut_us
-                        .swap(0, Ordering::Relaxed))
-                        .unwrap_or_default(),
-                    i64
-                ),
-                (
-                    "disk_index_flush_mmap_us",
-                    disk.map(|disk| disk.stats.index.mmap_us.swap(0, Ordering::Relaxed))
-                        .unwrap_or_default(),
-                    i64
-                ),
-                (
-                    "index_exceptional_entry",
-                    disk.map(|disk| disk
-                        .stats
-                        .index
-                        .index_uses_uncommon_slot_list_len_or_refcount
-                        .load(Ordering::Relaxed))
-                        .unwrap_or_default(),
-                    i64
-                ),
-                (
-                    "disk_data_file_size",
-                    disk.map(|disk| disk.stats.data.total_file_size.load(Ordering::Relaxed))
-                        .unwrap_or_default(),
-                    i64
-                ),
-                (
-                    "disk_data_file_count",
-                    disk.map(|disk| disk.stats.data.file_count.load(Ordering::Relaxed))
-                        .unwrap_or_default(),
-                    i64
-                ),
-                (
-                    "disk_data_resizes",
-                    disk.map(|disk| disk.stats.data.resizes.swap(0, Ordering::Relaxed))
-                        .unwrap_or_default(),
-                    i64
-                ),
-                (
-                    "disk_data_max_size",
-                    disk.map(|disk| { disk.stats.data.max_size.swap(0, Ordering::Relaxed) })
-                        .unwrap_or_default(),
-                    i64
-                ),
-                (
-                    "disk_data_new_file_us",
-                    disk.map(|disk| disk.stats.data.new_file_us.swap(0, Ordering::Relaxed))
-                        .unwrap_or_default(),
-                    i64
-                ),
-                (
-                    "disk_data_resize_us",
-                    disk.map(|disk| disk.stats.data.resize_us.swap(0, Ordering::Relaxed))
-                        .unwrap_or_default(),
-                    i64
-                ),
-                (
-                    "disk_data_flush_file_us",
-                    disk.map(|disk| disk.stats.data.flush_file_us.swap(0, Ordering::Relaxed))
-                        .unwrap_or_default(),
-                    i64
-                ),
-                (
-                    "disk_data_flush_mmap_us",
-                    disk.map(|disk| disk.stats.data.mmap_us.swap(0, Ordering::Relaxed))
-                        .unwrap_or_default(),
                     i64
                 ),
                 (

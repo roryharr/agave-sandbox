@@ -106,7 +106,23 @@ impl IsCached for AccountInfo {
 
 impl IndexValue for AccountInfo {}
 
-impl DiskIndexValue for AccountInfo {}
+impl DiskIndexValue for AccountInfo {
+    fn to_bytes(&self) -> [u8; 8] {
+        let mut bytes = [0u8; 8];
+        bytes[..4].copy_from_slice(&self.store_id.to_le_bytes());
+        bytes[4..].copy_from_slice(&self.account_offset_and_flags.into_bytes());
+        bytes
+    }
+
+    fn from_bytes(bytes: [u8; 8]) -> Self {
+        Self {
+            store_id: u32::from_le_bytes(bytes[..4].try_into().unwrap()),
+            account_offset_and_flags: PackedOffsetAndFlags::from_bytes(
+                bytes[4..].try_into().unwrap(),
+            ),
+        }
+    }
+}
 
 impl IsCached for StorageLocation {
     fn is_cached(&self) -> bool {

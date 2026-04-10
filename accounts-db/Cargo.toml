@@ -49,6 +49,7 @@ modular-bitfield = { workspace = true }
 num_cpus = { workspace = true }
 qualifier_attr = { workspace = true, optional = true }
 rand = { workspace = true }
+rocksdb = { version = "0.24.0", default-features = false, features = ["lz4"] }
 rayon = { workspace = true }
 seqlock = { workspace = true }
 serde = { workspace = true, features = ["rc"] }
@@ -58,7 +59,6 @@ solana-address-lookup-table-interface = { workspace = true, features = [
     "bincode",
     "bytemuck",
 ] }
-solana-bucket-map = { workspace = true }
 solana-clock = { workspace = true }
 solana-epoch-schedule = { workspace = true }
 solana-fee-calculator = { workspace = true }

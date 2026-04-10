@@ -8,8 +8,8 @@ use {
         bucket_map_holder::{Age, AtomicAge, BucketMapHolder},
         stats::Stats,
     },
+    crate::accounts_index::rocksdb_disk_index::RocksDbDiskIndex,
     rand::{Rng, rng},
-    solana_bucket_map::bucket_api::BucketApi,
     solana_clock::Slot,
     solana_measure::measure::Measure,
     solana_pubkey::Pubkey,
@@ -40,7 +40,7 @@ pub struct InMemAccountsIndex<T: IndexValue, U: DiskIndexValue + From<T> + Into<
     storage: Arc<BucketMapHolder<T, U>>,
     _bin: usize,
 
-    bucket: Option<Arc<BucketApi<(Slot, U)>>>,
+    disk: Option<Arc<RocksDbDiskIndex>>,
 
     // set to true while this bin is being actively flushed
     flushing_active: AtomicBool,
@@ -131,11 +131,7 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
             map_internal,
             storage: Arc::clone(storage),
             _bin: bin,
-            bucket: storage
-                .disk
-                .as_ref()
-                .map(|disk| disk.get_bucket_from_index(bin))
-                .cloned(),
+            disk: storage.disk.as_ref().map(Arc::clone),
             flushing_active: AtomicBool::default(),
             // initialize this to max, to make it clear we have not flushed at age 0, the starting age
             last_age_flushed: AtomicAge::new(Age::MAX),
@@ -176,7 +172,7 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
         let mut keys: HashSet<_> = self.map_internal.read().unwrap().keys().cloned().collect();
 
         // Next, collect keys from the disk.
-        if let Some(disk) = self.bucket.as_ref() {
+        if let Some(disk) = self.disk.as_ref() {
             let disk_keys = disk.keys();
             keys.reserve(disk_keys.len());
             for key in disk_keys {
@@ -187,7 +183,7 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
     }
 
     fn load_from_disk(&self, pubkey: &Pubkey) -> Option<(SlotList<U>, RefCount)> {
-        self.bucket.as_ref().and_then(|disk| {
+        self.disk.as_ref().and_then(|disk| {
             let m = Measure::start("load_disk_found_count");
             let entry_disk = disk.read_value(pubkey);
             match &entry_disk {
@@ -200,10 +196,7 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
                     Self::update_stat(&self.stats().load_disk_missing_count, 1);
                 }
             }
-            entry_disk.map(|(slot_list, ref_count)| {
-                // SAFETY: ref_count must've come from in-mem first, so converting back is safe.
-                (slot_list, ref_count as RefCount)
-            })
+            entry_disk
         })
     }
 
@@ -319,7 +312,7 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
     }
 
     fn delete_disk_key(&self, pubkey: &Pubkey) {
-        if let Some(disk) = self.bucket.as_ref() {
+        if let Some(disk) = self.disk.as_ref() {
             disk.delete_key(pubkey)
         }
     }
@@ -409,7 +402,7 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
                     let result = user_fn(entry.slot_list_write_lock());
                     entry.set_dirty(true);
                     // Write-through for single-slot non-cached entries, same as upsert.
-                    if entry.ref_count() == 1 && self.bucket.is_some() {
+                    if entry.ref_count() == 1 && self.disk.is_some() {
                         let slot_list = entry.slot_list_read_lock();
                         if slot_list.len() == 1 && !slot_list[0].1.is_cached() {
                             let item = slot_list[0];
@@ -439,17 +432,9 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
         }
         if did_clear_dirty {
             let (slot, account_info) = write_through_item.unwrap();
-            let disk = self.bucket.as_ref().unwrap();
-            let disk_entry = [(slot, account_info.into())];
-            loop {
-                match disk.try_write(pubkey, (&disk_entry, 1)) {
-                    Ok(_) => {
-                        Self::update_stat(&self.stats().flush_entries_updated_on_disk, 1);
-                        break;
-                    }
-                    Err(err) => disk.grow(err),
-                }
-            }
+            let disk = self.disk.as_ref().unwrap();
+            let disk_entry = [(slot, account_info)];
+            disk.write(pubkey, &disk_entry, 1);
         }
         result
     }
@@ -501,7 +486,7 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
                 self.set_age_to_future(entry, slot_list_length > 1);
                 // Clear dirty while the lock is already held, eliminating the second
                 // map_internal.read() + map.get(pubkey) that would otherwise be needed.
-                if slot_list_length == 1 && entry.ref_count() == 1 && self.bucket.is_some() {
+                if slot_list_length == 1 && entry.ref_count() == 1 && self.disk.is_some() {
                     did_clear_dirty = entry.clear_dirty();
                 }
             }
@@ -526,17 +511,10 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
         // This keeps the entry clean so it can be evicted at any time, avoiding
         // background-thread eviction lag under load.
         if did_clear_dirty {
-            let disk = self.bucket.as_ref().unwrap();
-            let disk_entry = [(slot, account_info.into())];
-            loop {
-                match disk.try_write(pubkey, (&disk_entry, 1)) {
-                    Ok(_) => {
-                        Self::update_stat(&self.stats().flush_entries_updated_on_disk, 1);
-                        break;
-                    }
-                    Err(err) => disk.grow(err),
-                }
-            }
+
+            let disk = self.disk.as_ref().unwrap();
+            let disk_entry = [(slot, account_info)];
+            disk.write(pubkey, &disk_entry, 1);
         }
     }
 
@@ -797,7 +775,7 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
         items: impl ExactSizeIterator<Item = (Pubkey, T)>,
     ) {
         assert!(self.storage.get_startup());
-        assert!(self.bucket.is_some());
+        assert!(self.disk.is_some());
 
         let mut insert = self.startup_info.insert.lock().unwrap();
         let m = Measure::start("copy");
@@ -809,7 +787,7 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
 
     pub fn startup_update_duplicates_from_in_memory_only(&self, items: Vec<(Slot, Pubkey)>) {
         assert!(self.storage.get_startup());
-        assert!(self.bucket.is_none());
+        assert!(self.disk.is_none());
 
         let mut duplicates = self.startup_info.duplicates.lock().unwrap();
         duplicates.duplicates_from_in_memory_only.extend(items);
@@ -1017,7 +995,7 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
         let mut duplicates = self.startup_info.duplicates.lock().unwrap();
 
         // merge all items into the disk index now
-        let disk = self.bucket.as_ref().unwrap();
+        let disk = self.disk.as_ref().unwrap();
         let duplicate_entries_and_indices = disk.batch_insert_non_duplicates(&insert);
         let duplicate_addresses: HashSet<_> = duplicate_entries_and_indices
             .iter()
@@ -1478,13 +1456,11 @@ mod tests {
         let slot = 0;
 
         // Simulate an entry on disk
-        let disk_entry: (&[(u64, u64)], u64) = (&[(0u64, 42u64)], 1u64);
         accounts_index
-            .bucket
+            .disk
             .as_ref()
             .unwrap()
-            .try_write(&pubkey, disk_entry)
-            .unwrap();
+            .write(&pubkey, &[(0u64, 42u64)], 1);
 
         // Ensure the entry is not found in memory
         let mut found = false;

@@ -1,6 +1,7 @@
 mod account_map_entry;
 mod accounts_index_storage;
 mod bucket_map_holder;
+mod rocksdb_disk_index;
 pub(crate) mod in_mem_accounts_index;
 mod iter;
 mod roots_tracker;
@@ -143,6 +144,8 @@ pub trait IndexValue: 'static + IsCached + IsZeroLamport + DiskIndexValue {}
 pub trait DiskIndexValue:
     'static + Clone + Debug + PartialEq + Copy + Default + Sync + Send
 {
+    fn to_bytes(&self) -> [u8; 8];
+    fn from_bytes(bytes: [u8; 8]) -> Self;
 }
 
 /// specification of how much memory the in-mem portion of account index can hold
@@ -1467,7 +1470,14 @@ mod tests {
     type AccountInfoTest = f64;
 
     impl IndexValue for AccountInfoTest {}
-    impl DiskIndexValue for AccountInfoTest {}
+    impl DiskIndexValue for AccountInfoTest {
+        fn to_bytes(&self) -> [u8; 8] {
+            self.to_bits().to_le_bytes()
+        }
+        fn from_bytes(bytes: [u8; 8]) -> Self {
+            f64::from_bits(u64::from_le_bytes(bytes))
+        }
+    }
     impl IsCached for AccountInfoTest {
         fn is_cached(&self) -> bool {
             true
@@ -3345,8 +3355,24 @@ mod tests {
 
     impl IndexValue for bool {}
     impl IndexValue for u64 {}
-    impl DiskIndexValue for bool {}
-    impl DiskIndexValue for u64 {}
+    impl DiskIndexValue for bool {
+        fn to_bytes(&self) -> [u8; 8] {
+            let mut bytes = [0u8; 8];
+            bytes[0] = *self as u8;
+            bytes
+        }
+        fn from_bytes(bytes: [u8; 8]) -> Self {
+            bytes[0] != 0
+        }
+    }
+    impl DiskIndexValue for u64 {
+        fn to_bytes(&self) -> [u8; 8] {
+            self.to_le_bytes()
+        }
+        fn from_bytes(bytes: [u8; 8]) -> Self {
+            u64::from_le_bytes(bytes)
+        }
+    }
     impl IsCached for bool {
         fn is_cached(&self) -> bool {
             false
@@ -3374,7 +3400,16 @@ mod tests {
     #[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
     struct CacheableIndexValueTest(bool);
     impl IndexValue for CacheableIndexValueTest {}
-    impl DiskIndexValue for CacheableIndexValueTest {}
+    impl DiskIndexValue for CacheableIndexValueTest {
+        fn to_bytes(&self) -> [u8; 8] {
+            let mut bytes = [0u8; 8];
+            bytes[0] = self.0 as u8;
+            bytes
+        }
+        fn from_bytes(bytes: [u8; 8]) -> Self {
+            Self(bytes[0] != 0)
+        }
+    }
     impl IsCached for CacheableIndexValueTest {
         fn is_cached(&self) -> bool {
             // Return self value as whether the item is cached or not
