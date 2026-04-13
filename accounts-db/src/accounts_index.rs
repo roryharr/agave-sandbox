@@ -315,10 +315,11 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> AccountsIndex<T, U> {
         &self,
         pubkey: &Pubkey,
         ancestors: &Ancestors,
-        max_root: Option<Slot>,
+        _max_root: Option<Slot>,
         should_add_to_in_mem_cache: bool,
         callback: impl FnOnce(SlotListItem<T>) -> R,
     ) -> Option<R> {
+        let max_root = ancestors.min_slot();
         self.get_and_then(pubkey, |entry| {
             let callback_result = entry.and_then(|entry| {
                 self.get_account_info_with_and_then(entry, Some(ancestors), max_root, callback)
