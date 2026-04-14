@@ -246,9 +246,7 @@ pub struct ThresholdEntriesPerBin {
 
 #[cfg(test)]
 mod tests {
-    use {
-        super::*, crate::accounts_index::IndexLimitThreshold, test_case::test_case,
-    };
+    use {super::*, crate::accounts_index::IndexLimitThreshold, test_case::test_case};
 
     #[test]
     fn test_disk_index_enabled() {

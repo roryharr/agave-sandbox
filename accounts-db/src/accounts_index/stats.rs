@@ -1,7 +1,6 @@
 use {
     super::{
-        DiskIndexValue, IndexValue,
-        bucket_map_holder::BucketMapHolder,
+        DiskIndexValue, IndexValue, bucket_map_holder::BucketMapHolder,
         in_mem_accounts_index::InMemAccountsIndex,
     },
     solana_time_utils::AtomicInterval,

@@ -182,7 +182,7 @@ impl Default for AccountsIndexConfig {
             num_flush_threads: None,
             drives: None,
             index_limit: IndexLimit::InMemOnly,
-                    num_initial_accounts: None,
+            num_initial_accounts: None,
         }
     }
 }
@@ -662,25 +662,21 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> AccountsIndex<T, U> {
                 ScanFilter::OnlyAbnormal
                 | ScanFilter::OnlyAbnormalWithVerify
                 | ScanFilter::OnlyAbnormalTest => {
-                    let found =
-                        lock.as_ref()
-                            .unwrap()
-                            .get_only_in_mem(pubkey, |mut entry| {
-                                if entry.is_some() && matches!(filter, ScanFilter::OnlyAbnormalTest)
-                                {
-                                    let local_entry = entry.unwrap();
-                                    if local_entry.ref_count() == 1
-                                        && local_entry.slot_list_lock_read_len() == 1
-                                    {
-                                        // Account was found in memory, but is a single ref single slot account
-                                        // For testing purposes, return None as this can be treated like
-                                        // a normal account that was flushed to storage.
-                                        entry = None;
-                                    }
-                                }
-                                internal_callback(entry);
-                                entry.is_some()
-                            });
+                    let found = lock.as_ref().unwrap().get_only_in_mem(pubkey, |mut entry| {
+                        if entry.is_some() && matches!(filter, ScanFilter::OnlyAbnormalTest) {
+                            let local_entry = entry.unwrap();
+                            if local_entry.ref_count() == 1
+                                && local_entry.slot_list_lock_read_len() == 1
+                            {
+                                // Account was found in memory, but is a single ref single slot account
+                                // For testing purposes, return None as this can be treated like
+                                // a normal account that was flushed to storage.
+                                entry = None;
+                            }
+                        }
+                        internal_callback(entry);
+                        entry.is_some()
+                    });
                     if !found && matches!(filter, ScanFilter::OnlyAbnormalWithVerify) {
                         lock.as_ref().unwrap().get_internal_inner(pubkey, |entry| {
                             assert!(entry.is_some(), "{pubkey}, entry: {entry:?}");
@@ -891,8 +887,7 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> AccountsIndex<T, U> {
                 // this is no longer the default case
                 let mut duplicates_from_in_memory = vec![];
                 items.for_each(|(pubkey, account_info)| {
-                    let new_entry =
-                        PreAllocatedAccountMapEntry::new(slot, account_info, use_disk);
+                    let new_entry = PreAllocatedAccountMapEntry::new(slot, account_info, use_disk);
                     match r_account_maps.insert_new_entry_if_missing_with_lock(pubkey, new_entry) {
                         InsertNewEntryResults::DidNotExist => {
                             num_did_not_exist += 1;
@@ -1800,9 +1795,8 @@ mod tests {
             let slot_list = entry.slot_list_read_lock();
             assert_eq!(entry.ref_count(), RefCount::from(!is_cached));
             assert_eq!(slot_list.as_ref(), &[(slot0, account_infos[0])]);
-            let new_entry =
-                PreAllocatedAccountMapEntry::new(slot0, account_infos[0], false)
-                    .into_account_map_entry();
+            let new_entry = PreAllocatedAccountMapEntry::new(slot0, account_infos[0], false)
+                .into_account_map_entry();
             assert_eq!(slot_list.as_ref(), new_entry.slot_list_read_lock().as_ref(),);
             (false, ())
         });

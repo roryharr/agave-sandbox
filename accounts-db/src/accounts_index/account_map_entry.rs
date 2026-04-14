@@ -248,11 +248,7 @@ impl<T: IndexValue> PreAllocatedAccountMapEntry<T> {
     /// 2. update(slot, account_info)
     ///
     /// This code is called when the first entry [ie. (slot,account_info)] for a pubkey is inserted into the index.
-    pub fn new(
-        slot: Slot,
-        account_info: T,
-        store_raw: bool,
-    ) -> PreAllocatedAccountMapEntry<T> {
+    pub fn new(slot: Slot, account_info: T, store_raw: bool) -> PreAllocatedAccountMapEntry<T> {
         if store_raw {
             Self::Raw((slot, account_info))
         } else {
