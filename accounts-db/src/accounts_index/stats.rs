@@ -1,7 +1,7 @@
 use {
     super::{
-        DiskIndexValue, IndexValue, SlotListItem,
-        bucket_map_holder::{Age, AtomicAge, BucketMapHolder},
+        DiskIndexValue, IndexValue,
+        bucket_map_holder::BucketMapHolder,
         in_mem_accounts_index::InMemAccountsIndex,
     },
     solana_time_utils::AtomicInterval,
@@ -18,17 +18,7 @@ use {
 const STATS_INTERVAL_MS: u64 = 10_000;
 
 #[derive(Debug, Default)]
-pub struct HeldInMemStats {
-    pub clean: AtomicU64,
-    pub age: AtomicU64,
-    pub ref_count: AtomicU64,
-    pub slot_list_len: AtomicU64,
-    pub slot_list_cached: AtomicU64,
-}
-
-#[derive(Debug, Default)]
 pub struct Stats {
-    pub held_in_mem: HeldInMemStats,
     pub get_mem_us: AtomicU64,
     pub gets_from_mem: AtomicU64,
     pub get_missing_us: AtomicU64,
@@ -42,30 +32,19 @@ pub struct Stats {
     pub load_disk_missing_count: AtomicU64,
     pub load_disk_missing_us: AtomicU64,
     pub updates_in_mem: AtomicU64,
-    pub failed_to_evict: AtomicU64,
     pub keys: AtomicU64,
     pub deletes: AtomicU64,
-    pub buckets_scanned: AtomicU64,
     pub inserts: AtomicU64,
     count: AtomicUsize,
     pub bg_waiting_us: AtomicU64,
-    pub bg_throttling_wait_us: AtomicU64,
     pub count_in_mem: AtomicUsize,
     pub capacity_in_mem: AtomicUsize,
     pub flush_entries_updated_on_disk: AtomicU64,
     pub flush_entries_evicted_from_mem: AtomicU64,
     pub active_threads: AtomicU64,
-    last_age: AtomicAge,
-    last_ages_flushed: AtomicU64,
-    pub flush_scan_us: AtomicU64,
-    pub flush_update_us: AtomicU64,
-    pub flush_evict_us: AtomicU64,
-    pub flush_grow_us: AtomicU64,
     last_was_startup: AtomicBool,
     last_time: AtomicInterval,
     bins: u64,
-    pub flush_should_evict_us: AtomicU64,
-    pub flush_read_lock_us: AtomicU64,
 }
 
 impl Stats {
@@ -123,33 +102,6 @@ impl Stats {
         }
     }
 
-    fn ms_per_age<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>>(
-        &self,
-        storage: &BucketMapHolder<T, U>,
-        elapsed_ms: u64,
-    ) -> u64 {
-        let age_now = storage.current_age();
-        let ages_flushed = storage.count_buckets_flushed() as u64;
-        let last_age = self.last_age.swap(age_now, Ordering::Relaxed) as u64;
-        let last_ages_flushed = self.last_ages_flushed.swap(ages_flushed, Ordering::Relaxed);
-        let mut age_now = age_now as u64;
-        if last_age > age_now {
-            // age wrapped
-            age_now += Age::MAX as u64 + 1;
-        }
-        let age_delta = age_now.saturating_sub(last_age);
-        if let Some(v) = elapsed_ms.checked_div(age_delta) {
-            return v;
-        } else {
-            // did not advance an age, but probably did partial work, so report that
-            let bin_delta = ages_flushed.saturating_sub(last_ages_flushed);
-            if let Some(v) = (elapsed_ms * self.bins).checked_div(bin_delta) {
-                return v;
-            }
-        }
-        0 // avoid crazy numbers
-    }
-
     pub fn remaining_until_next_interval(&self) -> u64 {
         self.last_time
             .remaining_until_next_interval(STATS_INTERVAL_MS)
@@ -195,8 +147,6 @@ impl Stats {
         if !self.last_time.should_update(STATS_INTERVAL_MS) {
             return;
         }
-
-        let ms_per_age = self.ms_per_age(storage, elapsed_ms);
 
         let disk = storage.disk.as_ref();
         let disk_per_bucket_counts = disk
@@ -260,38 +210,15 @@ impl Stats {
                     ),
                 );
             }
-            let held_in_mem_clean = self.held_in_mem.clean.swap(0, Ordering::Relaxed);
-            let held_in_mem_age = self.held_in_mem.age.swap(0, Ordering::Relaxed);
-            let held_in_mem_ref_count = self.held_in_mem.ref_count.swap(0, Ordering::Relaxed);
-            let held_in_mem_slot_list_len =
-                self.held_in_mem.slot_list_len.swap(0, Ordering::Relaxed);
-            let held_in_mem_slot_list_cached =
-                self.held_in_mem.slot_list_cached.swap(0, Ordering::Relaxed);
-            // If an entry is held in-mem due to ref count or slot list length,
-            // then assume it has two slot list entries.
-            // Since `approx_size_of_one_entry()` assumes 'regular' entries
-            // (aka ref count == 1 and slot list len == 1), and the single slot list entry is
-            // stored inline in the slot list itself, then when we have larger slot lists,
-            // account for them here.
             let estimate_mem_bytes =
                 // hash map mem usage is based on capacity, and the footprint of a KV-pair
                 // (we ignore other hash map details, such as load factor)
                 capacity_in_mem * InMemAccountsIndex::<T, U>::size_of_uninitialized()
                 // each value in use we assume has a single entry in the slot list
-                + count_in_mem * InMemAccountsIndex::<T, U>::size_of_single_entry()
-                // and for entries held in mem due to ref count or slot list length, assume
-                // conservatively a slot list with two entries
-                + (held_in_mem_ref_count + held_in_mem_slot_list_len) as usize
-                    * size_of::<SlotListItem<T>>() // <-- size of one slot list entry
-                    * 2; // <-- and assume there are two entries
+                + count_in_mem * InMemAccountsIndex::<T, U>::size_of_single_entry();
             datapoint_info!(
                 datapoint_name,
                 ("estimate_mem_bytes", estimate_mem_bytes, i64),
-                (
-                    "flush_should_evict_us",
-                    self.flush_should_evict_us.swap(0, Ordering::Relaxed),
-                    i64
-                ),
                 ("count_in_mem", count_in_mem, i64),
                 ("capacity_in_mem", capacity_in_mem, i64),
                 ("count", self.total_count(), i64),
@@ -302,27 +229,6 @@ impl Stats {
                         thread_time_elapsed_ms
                     ),
                     f64
-                ),
-                (
-                    "bg_throttling_wait_percent",
-                    Self::calc_percent(
-                        self.bg_throttling_wait_us.swap(0, Ordering::Relaxed) / US_PER_MS,
-                        thread_time_elapsed_ms
-                    ),
-                    f64
-                ),
-                ("num_not_flushed_clean", held_in_mem_clean, i64),
-                ("num_not_flushed_age", held_in_mem_age, i64),
-                ("num_not_flushed_ref_count", held_in_mem_ref_count, i64),
-                (
-                    "num_not_flushed_slot_list_len",
-                    held_in_mem_slot_list_len,
-                    i64
-                ),
-                (
-                    "num_not_flushed_slot_list_cached",
-                    held_in_mem_slot_list_cached,
-                    i64
                 ),
                 ("min_in_bin_disk", disk_stats.0, i64),
                 ("max_in_bin_disk", disk_stats.1, i64),
@@ -393,11 +299,6 @@ impl Stats {
                     i64
                 ),
                 (
-                    "failed_to_evict",
-                    self.failed_to_evict.swap(0, Ordering::Relaxed),
-                    i64
-                ),
-                (
                     "updates_in_mem",
                     self.updates_in_mem.swap(0, Ordering::Relaxed),
                     i64
@@ -410,37 +311,6 @@ impl Stats {
                     i64
                 ),
                 ("keys", self.keys.swap(0, Ordering::Relaxed), i64),
-                ("ms_per_age", ms_per_age, i64),
-                (
-                    "buckets_scanned",
-                    self.buckets_scanned.swap(0, Ordering::Relaxed),
-                    i64
-                ),
-                (
-                    "flush_scan_us",
-                    self.flush_scan_us.swap(0, Ordering::Relaxed),
-                    i64
-                ),
-                (
-                    "flush_update_us",
-                    self.flush_update_us.swap(0, Ordering::Relaxed),
-                    i64
-                ),
-                (
-                    "flush_grow_us",
-                    self.flush_grow_us.swap(0, Ordering::Relaxed),
-                    i64
-                ),
-                (
-                    "flush_evict_us",
-                    self.flush_evict_us.swap(0, Ordering::Relaxed),
-                    i64
-                ),
-                (
-                    "flush_read_lock_us",
-                    self.flush_read_lock_us.swap(0, Ordering::Relaxed),
-                    i64
-                ),
                 (
                     "disk_index_resizes",
                     disk.map(|disk| disk.stats.index.resizes.swap(0, Ordering::Relaxed))

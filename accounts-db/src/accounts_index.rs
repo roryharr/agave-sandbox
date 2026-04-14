@@ -14,7 +14,6 @@ use {
     },
     account_map_entry::{AccountMapEntry, PreAllocatedAccountMapEntry, SlotListWriteGuard},
     accounts_index_storage::AccountsIndexStorage,
-    bucket_map_holder::Age,
     in_mem_accounts_index::{
         ExistedLocation, InMemAccountsIndex, InsertNewEntryResults, StartupStats,
     },
@@ -58,7 +57,6 @@ pub const ACCOUNTS_INDEX_CONFIG_FOR_TESTING: AccountsIndexConfig = AccountsIndex
     num_flush_threads: Some(FLUSH_THREADS_TESTING),
     drives: None,
     index_limit: IndexLimit::InMemOnly,
-    ages_to_stay_in_cache: None,
     num_initial_accounts: None,
 };
 pub const ACCOUNTS_INDEX_CONFIG_FOR_BENCHMARKS: AccountsIndexConfig = AccountsIndexConfig {
@@ -66,7 +64,6 @@ pub const ACCOUNTS_INDEX_CONFIG_FOR_BENCHMARKS: AccountsIndexConfig = AccountsIn
     num_flush_threads: Some(FLUSH_THREADS_TESTING),
     drives: None,
     index_limit: IndexLimit::InMemOnly,
-    ages_to_stay_in_cache: None,
     num_initial_accounts: None,
 };
 pub type SlotList<T> = SmallVec<[SlotListItem<T>; 1]>;
@@ -174,7 +171,6 @@ pub struct AccountsIndexConfig {
     pub num_flush_threads: Option<NonZeroUsize>,
     pub drives: Option<Vec<PathBuf>>,
     pub index_limit: IndexLimit,
-    pub ages_to_stay_in_cache: Option<Age>,
     /// Initial number of accounts, used to pre-allocate HashMap capacity at startup.
     pub num_initial_accounts: Option<usize>,
 }
@@ -186,8 +182,7 @@ impl Default for AccountsIndexConfig {
             num_flush_threads: None,
             drives: None,
             index_limit: IndexLimit::InMemOnly,
-            ages_to_stay_in_cache: None,
-            num_initial_accounts: None,
+                    num_initial_accounts: None,
         }
     }
 }
@@ -670,7 +665,7 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> AccountsIndex<T, U> {
                     let found =
                         lock.as_ref()
                             .unwrap()
-                            .get_only_in_mem(pubkey, false, |mut entry| {
+                            .get_only_in_mem(pubkey, |mut entry| {
                                 if entry.is_some() && matches!(filter, ScanFilter::OnlyAbnormalTest)
                                 {
                                     let local_entry = entry.unwrap();
@@ -897,7 +892,7 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> AccountsIndex<T, U> {
                 let mut duplicates_from_in_memory = vec![];
                 items.for_each(|(pubkey, account_info)| {
                     let new_entry =
-                        PreAllocatedAccountMapEntry::new(slot, account_info, storage, use_disk);
+                        PreAllocatedAccountMapEntry::new(slot, account_info, use_disk);
                     match r_account_maps.insert_new_entry_if_missing_with_lock(pubkey, new_entry) {
                         InsertNewEntryResults::DidNotExist => {
                             num_did_not_exist += 1;
@@ -981,12 +976,7 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> AccountsIndex<T, U> {
         //  - The secondary index is never consulted as primary source of truth for gets/stores.
         //  So, what the accounts_index sees alone is sufficient as a source of truth for other non-scan
         //  account operations.
-        let new_item = PreAllocatedAccountMapEntry::new(
-            new_slot,
-            account_info,
-            &self.storage.storage,
-            store_raw,
-        );
+        let new_item = PreAllocatedAccountMapEntry::new(new_slot, account_info, store_raw);
         let map = self.get_bin(pubkey);
 
         map.upsert(pubkey, new_item, Some(old_slot), reclaims, reclaim);
@@ -1329,7 +1319,7 @@ pub(crate) mod test_utils {
 #[cfg(test)]
 mod tests {
     use {
-        super::{bucket_map_holder::BucketMapHolder, *},
+        super::*,
         crate::accounts_index::account_map_entry::AccountMapEntryMeta,
         solana_account::AccountSharedData,
         solana_pubkey::PUBKEY_BYTES,
@@ -1568,17 +1558,16 @@ mod tests {
     fn get_pre_allocated<T: IndexValue>(
         slot: Slot,
         account_info: T,
-        storage: &Arc<BucketMapHolder<T, T>>,
         store_raw: bool,
         to_raw_first: bool,
     ) -> PreAllocatedAccountMapEntry<T> {
-        let entry = PreAllocatedAccountMapEntry::new(slot, account_info, storage, store_raw);
+        let entry = PreAllocatedAccountMapEntry::new(slot, account_info, store_raw);
 
         if to_raw_first {
             // convert to raw
             let (slot2, account_info2) = entry.into();
             // recreate using extracted raw
-            PreAllocatedAccountMapEntry::new(slot2, account_info2, storage, store_raw)
+            PreAllocatedAccountMapEntry::new(slot2, account_info2, store_raw)
         } else {
             entry
         }
@@ -1703,16 +1692,8 @@ mod tests {
                 let slot = 0;
                 // account_info type that IS cached
                 let account_info = AccountInfoTest::default();
-                let index = AccountsIndex::default_for_tests();
-
-                let new_entry = get_pre_allocated(
-                    slot,
-                    account_info,
-                    &index.storage.storage,
-                    store_raw,
-                    to_raw_first,
-                )
-                .into_account_map_entry(&index.storage.storage);
+                let new_entry = get_pre_allocated(slot, account_info, store_raw, to_raw_first)
+                    .into_account_map_entry();
                 assert_eq!(new_entry.ref_count(), 0);
                 assert_eq!(new_entry.slot_list_lock_read_len(), 1);
                 assert_eq!(
@@ -1722,16 +1703,8 @@ mod tests {
 
                 // account_info type that is NOT cached
                 let account_info = true;
-                let index = AccountsIndex::default_for_tests();
-
-                let new_entry = get_pre_allocated(
-                    slot,
-                    account_info,
-                    &index.storage.storage,
-                    store_raw,
-                    to_raw_first,
-                )
-                .into_account_map_entry(&index.storage.storage);
+                let new_entry = get_pre_allocated(slot, account_info, store_raw, to_raw_first)
+                    .into_account_map_entry();
                 assert_eq!(new_entry.ref_count(), 1);
                 assert_eq!(new_entry.slot_list_lock_read_len(), 1);
                 assert_eq!(
@@ -1827,13 +1800,9 @@ mod tests {
             let slot_list = entry.slot_list_read_lock();
             assert_eq!(entry.ref_count(), RefCount::from(!is_cached));
             assert_eq!(slot_list.as_ref(), &[(slot0, account_infos[0])]);
-            let new_entry = PreAllocatedAccountMapEntry::new(
-                slot0,
-                account_infos[0],
-                &index.storage.storage,
-                false,
-            )
-            .into_account_map_entry(&index.storage.storage);
+            let new_entry =
+                PreAllocatedAccountMapEntry::new(slot0, account_infos[0], false)
+                    .into_account_map_entry();
             assert_eq!(slot_list.as_ref(), new_entry.slot_list_read_lock().as_ref(),);
             (false, ())
         });
@@ -1899,12 +1868,7 @@ mod tests {
             (false, *slot_list.last().unwrap())
         });
 
-        let new_entry = PreAllocatedAccountMapEntry::new(
-            slot1,
-            account_infos[1],
-            &index.storage.storage,
-            false,
-        );
+        let new_entry = PreAllocatedAccountMapEntry::new(slot1, account_infos[1], false);
 
         assert_eq!(last_item, new_entry.into());
     }
@@ -1935,8 +1899,7 @@ mod tests {
         let slot = 0;
         let account_info = true;
 
-        let new_entry =
-            PreAllocatedAccountMapEntry::new(slot, account_info, &index.storage.storage, false);
+        let new_entry = PreAllocatedAccountMapEntry::new(slot, account_info, false);
         assert_eq!(0, account_maps_stats_len(&index));
 
         assert_eq!(0, account_maps_stats_len(&index));
@@ -2824,23 +2787,11 @@ mod tests {
             assert_eq!(entry.slot_list_lock_read_len(), 2);
             assert_eq!(
                 entry.slot_list_read_lock()[0],
-                PreAllocatedAccountMapEntry::new(
-                    1,
-                    CacheableIndexValueTest(true),
-                    &index.storage.storage,
-                    false
-                )
-                .into()
+                PreAllocatedAccountMapEntry::new(1, CacheableIndexValueTest(true), false).into()
             );
             assert_eq!(
                 entry.slot_list_read_lock()[1],
-                PreAllocatedAccountMapEntry::new(
-                    2,
-                    CacheableIndexValueTest(false),
-                    &index.storage.storage,
-                    false
-                )
-                .into()
+                PreAllocatedAccountMapEntry::new(2, CacheableIndexValueTest(false), false).into()
             );
             // Verify that the uncached account at slot 0 was reclaimed
             assert_eq!(gc.len(), 1);

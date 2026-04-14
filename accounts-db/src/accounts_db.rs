@@ -564,11 +564,6 @@ impl GenerateIndexTimings {
             ),
             ("total_slots", self.total_slots, i64),
             (
-                "copy_data_us",
-                startup_stats.copy_data_us.swap(0, Ordering::Relaxed),
-                i64
-            ),
-            (
                 "all_accounts_are_zero_lamports_slots",
                 self.all_accounts_are_zero_lamports_slots,
                 i64

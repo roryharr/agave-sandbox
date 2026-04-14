@@ -1,8 +1,5 @@
 use {
-    super::{
-        AtomicRefCount, DiskIndexValue, IndexValue, RefCount, SlotList, SlotListItem,
-        bucket_map_holder::{Age, AtomicAge, BucketMapHolder},
-    },
+    super::{AtomicRefCount, IndexValue, RefCount, SlotList, SlotListItem},
     crate::{account_info::AccountInfo, is_zero_lamport::IsZeroLamport},
     solana_clock::Slot,
     std::{
@@ -95,24 +92,6 @@ impl<T: IndexValue> AccountMapEntry<T> {
             .dirty
             .compare_exchange(true, false, Ordering::AcqRel, Ordering::Relaxed)
             .is_ok()
-    }
-
-    pub fn age(&self) -> Age {
-        self.meta.age.load(Ordering::Acquire)
-    }
-
-    pub fn set_age(&self, value: Age) {
-        self.meta.age.store(value, Ordering::Release)
-    }
-
-    /// set age to 'next_age' if 'self.age' is 'expected_age'
-    pub fn try_exchange_age(&self, next_age: Age, expected_age: Age) {
-        let _ = self.meta.age.compare_exchange(
-            expected_age,
-            next_age,
-            Ordering::AcqRel,
-            Ordering::Relaxed,
-        );
     }
 
     /// Return length of the slot list
@@ -222,26 +201,17 @@ impl<T> DerefMut for SlotListWriteGuard<'_, T> {
 pub struct AccountMapEntryMeta {
     /// true if entry in in-mem idx has changes and needs to be written to disk
     dirty: AtomicBool,
-    /// 'age' at which this entry should be purged from the cache (implements lru)
-    age: AtomicAge,
 }
 
 impl AccountMapEntryMeta {
-    pub fn new_dirty<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>>(
-        storage: &BucketMapHolder<T, U>,
-        is_cached: bool,
-    ) -> Self {
+    pub fn new_dirty() -> Self {
         AccountMapEntryMeta {
             dirty: AtomicBool::new(true),
-            age: AtomicAge::new(storage.future_age_to_flush(is_cached)),
         }
     }
-    pub fn new_clean<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>>(
-        storage: &BucketMapHolder<T, U>,
-    ) -> Self {
+    pub fn new_clean() -> Self {
         AccountMapEntryMeta {
             dirty: AtomicBool::new(false),
-            age: AtomicAge::new(storage.future_age_to_flush(false)),
         }
     }
 }
@@ -278,41 +248,32 @@ impl<T: IndexValue> PreAllocatedAccountMapEntry<T> {
     /// 2. update(slot, account_info)
     ///
     /// This code is called when the first entry [ie. (slot,account_info)] for a pubkey is inserted into the index.
-    pub fn new<U: DiskIndexValue + From<T> + Into<T>>(
+    pub fn new(
         slot: Slot,
         account_info: T,
-        storage: &BucketMapHolder<T, U>,
         store_raw: bool,
     ) -> PreAllocatedAccountMapEntry<T> {
         if store_raw {
             Self::Raw((slot, account_info))
         } else {
-            Self::Entry(Self::allocate(slot, account_info, storage))
+            Self::Entry(Self::allocate(slot, account_info))
         }
     }
 
-    fn allocate<U: DiskIndexValue + From<T> + Into<T>>(
-        slot: Slot,
-        account_info: T,
-        storage: &BucketMapHolder<T, U>,
-    ) -> Box<AccountMapEntry<T>> {
+    fn allocate(slot: Slot, account_info: T) -> Box<AccountMapEntry<T>> {
         let is_cached = account_info.is_cached();
         let ref_count = RefCount::from(!is_cached);
-        let meta = AccountMapEntryMeta::new_dirty(storage, is_cached);
         Box::new(AccountMapEntry::new(
             SlotList::from([(slot, account_info)]),
             ref_count,
-            meta,
+            AccountMapEntryMeta::new_dirty(),
         ))
     }
 
-    pub fn into_account_map_entry<U: DiskIndexValue + From<T> + Into<T>>(
-        self,
-        storage: &BucketMapHolder<T, U>,
-    ) -> Box<AccountMapEntry<T>> {
+    pub fn into_account_map_entry(self) -> Box<AccountMapEntry<T>> {
         match self {
             Self::Entry(entry) => entry,
-            Self::Raw((slot, account_info)) => Self::allocate(slot, account_info, storage),
+            Self::Raw((slot, account_info)) => Self::allocate(slot, account_info),
         }
     }
 }

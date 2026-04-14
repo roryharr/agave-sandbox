@@ -12,6 +12,7 @@ use {
             atomic::{AtomicBool, Ordering},
         },
         thread::{Builder, JoinHandle},
+        time::Duration,
     },
 };
 
@@ -68,8 +69,6 @@ impl BgThreads {
         let handles = Some(
             (0..num_threads)
                 .map(|idx| {
-                    // the first thread we start is special
-                    let can_advance_age = idx == 0;
                     let storage_ = Arc::clone(storage);
                     let local_exit = local_exit.clone();
                     let system_exit = exit.clone();
@@ -79,11 +78,7 @@ impl BgThreads {
                     Builder::new()
                         .name(format!("solIdxFlusher{idx:02}"))
                         .spawn(move || {
-                            storage_.background(
-                                vec![local_exit, system_exit],
-                                in_mem_,
-                                can_advance_age,
-                            );
+                            storage_.background(vec![local_exit, system_exit], in_mem_);
                         })
                         .unwrap()
                 })
@@ -93,7 +88,7 @@ impl BgThreads {
         BgThreads {
             exit: local_exit,
             handles,
-            wait: Arc::clone(&storage.wait_dirty_or_aged),
+            wait: Arc::clone(&storage.wait_exit),
         }
     }
 }
@@ -104,7 +99,29 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> AccountsIndexStorage<
     /// startup=false is 'normal' operation
     pub(crate) fn set_startup(&self, startup: Startup) {
         let is_startup = startup != Startup::Normal;
+        if !is_startup {
+            self.wait_for_idle();
+        }
         self.storage.set_startup(is_startup);
+    }
+
+    /// Wait until all background threads have finished flushing startup data to disk.
+    ///
+    /// Polls each bin's startup_info buffer until all are empty, indicating that the background
+    /// threads have written all startup entries to disk.
+    fn wait_for_idle(&self) {
+        assert!(self.storage.get_startup());
+        if !self.storage.is_disk_index_enabled() {
+            return;
+        }
+        loop {
+            if self.in_mem.iter().all(|bin| bin.startup_info_is_empty()) {
+                return;
+            }
+            self.storage
+                .wait_exit
+                .wait_timeout(Duration::from_millis(10));
+        }
     }
 
     /// allocate BucketMapHolder and InMemAccountsIndex[]
