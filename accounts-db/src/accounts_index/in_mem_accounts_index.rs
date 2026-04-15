@@ -827,8 +827,8 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
     /// To be flushed, `entry` must be dirty and regular.
     /// ('regular' means ref count == 1 and slot list len == 1)
     ///
-    /// If yes can be flushed, then `entry`'s dirty flag will be cleared.
-    /// If no cannot be flushed, then `entry`'s dirty flag will remain set.
+    /// If yes can be flushed, then `entry`'s dirty state will be set to Flushing
+    /// If no cannot be flushed, then `entry`'s dirty state will remain Dirty.
     fn try_make_entry_for_flush(
         &self,
         entry: &AccountMapEntry<T>,
@@ -836,16 +836,14 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
         ages_flushing_now: Age,
     ) -> ShouldFlush<SlotListItem<T>> {
         // Step 1: Perform the cheap checks on the entry
-        // Step 2: Clear the dirty flag
+        // Step 2: Transition Dirty -> Flushing
         // Step 3: Perform all the checks on the entry.
-        // - If any fail, set the dirty flag again, update stats, and return None.
+        // - If any fail, transition back to Dirty, update stats, and return None.
         // Step 4: Extract the data to perform disk update outside the lock
         //
-        // Race condition handling: If a parallel operation dirties the item again after scanning,
-        // then we will mark_dirty() and skip the disk update. The dirty flag will ensure the
-        // next flush picks up the item again. If the item becomes dirty during our disk write,
-        // that's ok - the dirty flag will be picked up on the next flush and prevent us from
-        // evicting the item from the cache.
+        // Race condition handling: if a concurrent write calls mark_dirty() while the entry
+        // is flushing, the dirty state will transition back to Dirty. end_flush() will
+        // then fail the transition to Clean and the entry remains Dirty after the write
 
         if !Self::should_evict_based_on_age(current_age, entry, ages_flushing_now) {
             // entry was bumped in age after initial scan for candidates
@@ -858,15 +856,13 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
             return ShouldFlush::No(ReasonToNotFlush::RefCount);
         }
 
-        // assume we're going to flush this entry, so clear its dirty flag
-        let was_dirty = entry.clear_dirty();
-        if !was_dirty {
-            // entry is not dirty anymore, skip disk write
+        // Transition Dirty to Flushing.  Returns false if already Clean or Flushing
+        if !entry.begin_flush() {
             return ShouldFlush::No(ReasonToNotFlush::Clean);
         }
 
         // lock the slot list and then check *everything*
-        // if a check fails, do not flush, and set dirty flag again
+        // if a check fails, mark_dirty() aborts back to Dirty
         let slot_list = entry.slot_list_read_lock();
 
         // re-check the ref count after locking the slot list
@@ -890,7 +886,7 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
             return ShouldFlush::No(ReasonToNotFlush::SlotListCached);
         }
 
-        // entry is ready to be flushed
+        // entry is ready to be flushed; caller must call end_flush() after disk write
         ShouldFlush::Yes(slot_list_elem)
     }
 
@@ -1201,7 +1197,8 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
         let mut flush_stats = DiskFlushStats::new();
 
         // Process each candidate to flush
-        // For each entry: lock map briefly, get entry, calculate disk value, release lock, then write to disk
+        // For each entry: lock map briefly, transition Dirty to Flushing, extract disk value,
+        // release lock, write to disk, re-lock to transition Flushing to Clean.
         let flush_update_measure = Measure::start("flush_update");
         for key in candidates_to_flush.0 {
             // Entry was dirty at scan time, need to write to disk
@@ -1246,6 +1243,10 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
                     Ok(_) => {
                         // successfully written to disk
                         flush_stats.flush_entries_updated_on_disk += 1;
+                        // Transition state from Flushing to Clean
+                        if let Some(entry) = self.map_internal.read().unwrap().get(&key) {
+                            entry.end_flush();
+                        }
                         break;
                     }
                     Err(err) => {
@@ -1288,10 +1289,10 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
                 if let Entry::Occupied(occupied) = map.entry(*k) {
                     let v = occupied.get();
 
-                    if v.dirty()
+                    if !v.is_evictable()
                         || !Self::should_evict_based_on_age(current_age, v, ages_flushing_now)
                     {
-                        // marked dirty or bumped in age after we looked above
+                        // dirty/flushing or bumped in age after we looked above
                         // these evictions will be handled in later passes (at later ages)
                         failed += 1;
                         continue;

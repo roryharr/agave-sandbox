@@ -1,6 +1,7 @@
 mod account_map_entry;
 mod accounts_index_storage;
 mod bucket_map_holder;
+mod dirty_state;
 pub(crate) mod in_mem_accounts_index;
 mod iter;
 mod roots_tracker;

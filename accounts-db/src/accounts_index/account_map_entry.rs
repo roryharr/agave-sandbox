@@ -2,16 +2,14 @@ use {
     super::{
         AtomicRefCount, DiskIndexValue, IndexValue, RefCount, SlotList, SlotListItem,
         bucket_map_holder::{Age, AtomicAge, BucketMapHolder},
+        dirty_state::{AtomicDirtyState, DirtyState},
     },
     crate::{account_info::AccountInfo, is_zero_lamport::IsZeroLamport},
     solana_clock::Slot,
     std::{
         fmt::Debug,
         ops::{Deref, DerefMut},
-        sync::{
-            RwLock, RwLockReadGuard, RwLockWriteGuard,
-            atomic::{AtomicBool, Ordering},
-        },
+        sync::{RwLock, RwLockReadGuard, RwLockWriteGuard, atomic::Ordering},
     },
 };
 
@@ -82,19 +80,23 @@ impl<T: IndexValue> AccountMapEntry<T> {
     }
 
     pub fn dirty(&self) -> bool {
-        self.meta.dirty.load(Ordering::Acquire)
+        self.meta.dirty.is_dirty()
+    }
+
+    pub fn is_evictable(&self) -> bool {
+        self.meta.dirty.is_evictable()
     }
 
     pub fn mark_dirty(&self) {
-        self.meta.dirty.store(true, Ordering::Release)
+        self.meta.dirty.mark_dirty();
     }
 
-    /// set dirty to false, return true if was dirty
-    pub fn clear_dirty(&self) -> bool {
-        self.meta
-            .dirty
-            .compare_exchange(true, false, Ordering::AcqRel, Ordering::Relaxed)
-            .is_ok()
+    pub fn begin_flush(&self) -> bool {
+        self.meta.dirty.begin_flush()
+    }
+
+    pub fn end_flush(&self) -> bool {
+        self.meta.dirty.end_flush()
     }
 
     pub fn age(&self) -> Age {
@@ -220,8 +222,8 @@ impl<T> DerefMut for SlotListWriteGuard<'_, T> {
 /// used to keep track of consistency with disk index
 #[derive(Debug, Default)]
 pub struct AccountMapEntryMeta {
-    /// true if entry in in-mem idx has changes and needs to be written to disk
-    dirty: AtomicBool,
+    /// Dirty flag tracking sync state with the disk index.
+    dirty: AtomicDirtyState,
     /// 'age' at which this entry should be purged from the cache (implements lru)
     age: AtomicAge,
 }
@@ -232,7 +234,7 @@ impl AccountMapEntryMeta {
         is_cached: bool,
     ) -> Self {
         AccountMapEntryMeta {
-            dirty: AtomicBool::new(true),
+            dirty: AtomicDirtyState::new(DirtyState::Dirty),
             age: AtomicAge::new(storage.future_age_to_flush(is_cached)),
         }
     }
@@ -240,7 +242,7 @@ impl AccountMapEntryMeta {
         storage: &BucketMapHolder<T, U>,
     ) -> Self {
         AccountMapEntryMeta {
-            dirty: AtomicBool::new(false),
+            dirty: AtomicDirtyState::new(DirtyState::Clean),
             age: AtomicAge::new(storage.future_age_to_flush(false)),
         }
     }
