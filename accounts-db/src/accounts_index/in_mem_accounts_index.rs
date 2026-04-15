@@ -405,8 +405,12 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
             (
                 true,
                 entry.map(|entry| {
+                    let slot_list = entry.slot_list_write_lock();
+                    // Capture inside the slot list lock for the same reason as
+                    // lock_and_update_slot_list: prevents two concurrent callers
+                    // from both seeing was_dirty_before=true and double-decrementing.
                     was_dirty_before = entry.dirty();
-                    let result = user_fn(entry.slot_list_write_lock());
+                    let result = user_fn(slot_list);
                     entry.set_dirty(true);
                     // Write-through for single-slot non-cached entries, same as upsert.
                     if entry.ref_count() == 1 && self.bucket.is_some() {
@@ -455,9 +459,12 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
     }
 
     /// Insert a cached entry into the accounts index
-    /// If the entry is already present, just mark dirty and set the age to the future
-    fn cache_entry_at_slot(current: &AccountMapEntry<T>, new_value: SlotListItem<T>) {
+    /// If the entry is already present, just mark dirty and set the age to the future.
+    /// Returns whether the entry was dirty before this call, captured inside the slot
+    /// list lock to prevent the same double-decrement race as lock_and_update_slot_list.
+    fn cache_entry_at_slot(current: &AccountMapEntry<T>, new_value: SlotListItem<T>) -> bool {
         let mut slot_list = current.slot_list_write_lock();
+        let was_dirty_before = current.dirty();
         let (slot, new_entry) = new_value;
         // Find and replace existing entry at this slot, or append if not found
         if let Some(existing_entry) = slot_list.iter_mut().find(|(s, _)| *s == slot) {
@@ -466,6 +473,7 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
             slot_list.push((slot, new_entry));
         }
         current.set_dirty(true);
+        was_dirty_before
     }
 
     pub fn upsert(
@@ -486,24 +494,21 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
         let mut was_dirty_before = false;
 
         let was_occupied = self.get_or_create_index_entry_for_pubkey(pubkey, |entry| {
-            was_dirty_before = entry.dirty();
             if is_cached {
-                Self::cache_entry_at_slot(entry, (slot, account_info));
+                was_dirty_before = Self::cache_entry_at_slot(entry, (slot, account_info));
                 self.set_age_to_future(entry, true);
             } else {
-                let slot_list_length = Self::lock_and_update_slot_list(
+                let (dirty_before, cleared, slot_list_length) = Self::lock_and_update_slot_list(
                     entry,
                     (slot, account_info),
                     other_slot,
                     reclaims,
                     reclaim,
+                    self.bucket.is_some(),
                 );
+                was_dirty_before = dirty_before;
+                did_clear_dirty = cleared;
                 self.set_age_to_future(entry, slot_list_length > 1);
-                // Clear dirty while the lock is already held, eliminating the second
-                // map_internal.read() + map.get(pubkey) that would otherwise be needed.
-                if slot_list_length == 1 && entry.ref_count() == 1 && self.bucket.is_some() {
-                    did_clear_dirty = entry.clear_dirty();
-                }
             }
             did_clear_dirty
         });
@@ -658,8 +663,14 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
         other_slot: Option<Slot>,
         reclaims: &mut ReclaimsSlotList<T>,
         reclaim: UpsertReclaim,
-    ) -> usize {
+        has_disk: bool,
+    ) -> (bool, bool, usize) {
         let mut slot_list = current.slot_list_write_lock();
+        // Capture dirty state while holding the slot list write lock so the capture
+        // is serialized with concurrent upserts to the same entry. If captured outside
+        // the lock, two threads could both see was_dirty_before=true, both successfully
+        // call clear_dirty(), and double-decrement dirty_entry_count.
+        let was_dirty_before = current.dirty();
         let (slot, new_entry) = new_value;
         let (ref_count_change, slot_list_len) = Self::update_slot_list(
             &mut slot_list,
@@ -684,7 +695,14 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
             }
         }
         current.set_dirty(true);
-        slot_list_len
+        // Attempt write-through while the slot list write lock is still held. Performing
+        // clear_dirty() inside the lock is critical: it serialises every concurrent
+        // upsert's (was_dirty_before, did_clear_dirty) pair, preventing the race where
+        // two threads both see was_dirty_before=true and both succeed at clear_dirty()
+        // after an intervening set_dirty, causing a double-decrement of dirty_entry_count.
+        let did_clear_dirty =
+            has_disk && slot_list_len == 1 && current.ref_count() == 1 && current.clear_dirty();
+        (was_dirty_before, did_clear_dirty, slot_list_len)
     }
 
     /// Modifies the slot_list by replacing or appending entries.
@@ -847,12 +865,13 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
                 }
                 drop(slot_list);
 
-                let updated_slot_list_len = Self::lock_and_update_slot_list(
+                let (_, _, updated_slot_list_len) = Self::lock_and_update_slot_list(
                     occupied.get(),
                     (slot, account_info),
                     None, // should be None because we don't expect a different slot # during index generation
                     &mut ReclaimsSlotList::new(),
                     UpsertReclaim::IgnoreReclaims,
+                    false,
                 );
 
                 // In case of a race condition, multiple threads try to insert
@@ -884,6 +903,7 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
                         None,
                         &mut ReclaimsSlotList::new(),
                         UpsertReclaim::IgnoreReclaims,
+                        false,
                     );
                     vacant.insert(Box::new(disk_entry));
                     (
@@ -2249,35 +2269,181 @@ mod tests {
         let info = 65;
         let mut reclaims = ReclaimsSlotList::new();
         // first upsert, should increase
-        let len = InMemAccountsIndex::<u64, u64>::lock_and_update_slot_list(
+        let (_, _, len) = InMemAccountsIndex::<u64, u64>::lock_and_update_slot_list(
             &test,
             (1, info),
             None,
             &mut reclaims,
             UpsertReclaim::IgnoreReclaims,
+            false,
         );
         assert_eq!(test.slot_list_lock_read_len(), len);
         assert_eq!(len, 1);
         // update to different slot, should increase
-        let len = InMemAccountsIndex::<u64, u64>::lock_and_update_slot_list(
+        let (_, _, len) = InMemAccountsIndex::<u64, u64>::lock_and_update_slot_list(
             &test,
             (2, info),
             None,
             &mut reclaims,
             UpsertReclaim::IgnoreReclaims,
+            false,
         );
         assert_eq!(test.slot_list_lock_read_len(), len);
         assert_eq!(len, 2);
         // update to same slot, should not increase
-        let len = InMemAccountsIndex::<u64, u64>::lock_and_update_slot_list(
+        let (_, _, len) = InMemAccountsIndex::<u64, u64>::lock_and_update_slot_list(
             &test,
             (2, info),
             None,
             &mut reclaims,
             UpsertReclaim::IgnoreReclaims,
+            false,
         );
         assert_eq!(test.slot_list_lock_read_len(), len);
         assert_eq!(len, 2);
+    }
+
+    /// The race that caused dirty_entry_count double-decrements:
+    ///
+    /// Entry is dirty, dirty_entry_count=1.
+    /// Thread A: calls LASL (has_disk=true) → was_dirty_before=true, set_dirty, clear_dirty() → dirty=false → DECREMENT ✓
+    /// Thread B: calls LASL after A's clear_dirty → was_dirty_before=false (dirty is false at lock acquisition)
+    ///           → set_dirty, clear_dirty() → (true,true) → NO CHANGE ✓
+    ///
+    /// Old broken code: was_dirty_before was captured *outside* LASL. Both threads could sample dirty=true
+    /// before any clear_dirty ran, then both successfully clear → double-decrement → count=-1 ✗.
+    ///
+    /// Fix: both was_dirty_before capture and clear_dirty() are INSIDE the slot list write lock.
+    /// No interleaving between them is possible.  This test forces the ordering and checks the result.
+    #[test]
+    fn test_lock_and_update_slot_list_was_dirty_before_is_captured_inside_lock() {
+        let entry = Arc::new(AccountMapEntry::<u64>::empty_for_tests());
+        entry.set_dirty(true);
+
+        // Two-thread barrier: A signals after its LASL (which includes clear_dirty inside the lock),
+        // B waits then does its own LASL. Verifies that B sees was_dirty_before=false.
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+
+        // Thread A: LASL with has_disk=true — clear_dirty fires inside the slot list lock.
+        let entry_a = Arc::clone(&entry);
+        let barrier_a = Arc::clone(&barrier);
+        let handle_a = std::thread::spawn(move || {
+            let (was_dirty_before, did_clear_dirty, _) =
+                InMemAccountsIndex::<u64, u64>::lock_and_update_slot_list(
+                    &entry_a,
+                    (0, 1u64),
+                    None,
+                    &mut ReclaimsSlotList::new(),
+                    UpsertReclaim::IgnoreReclaims,
+                    true, // has_disk: clear_dirty runs inside the lock
+                );
+            barrier_a.wait(); // signal B: clear_dirty has already completed
+            (was_dirty_before, did_clear_dirty)
+        });
+
+        // Thread B: wait until A's LASL (including clear_dirty) has finished, then run its own.
+        let entry_b = Arc::clone(&entry);
+        let barrier_b = Arc::clone(&barrier);
+        let handle_b = std::thread::spawn(move || {
+            barrier_b.wait(); // entry is clean (A's clear_dirty completed inside LASL)
+            let (was_dirty_before, _, _) =
+                InMemAccountsIndex::<u64, u64>::lock_and_update_slot_list(
+                    &entry_b,
+                    (0, 2u64),
+                    None,
+                    &mut ReclaimsSlotList::new(),
+                    UpsertReclaim::IgnoreReclaims,
+                    false,
+                );
+            was_dirty_before
+        });
+
+        let (was_dirty_before_a, did_clear_dirty_a) = handle_a.join().unwrap();
+        let was_dirty_before_b = handle_b.join().unwrap();
+
+        assert!(was_dirty_before_a, "A: entry was dirty at lock acquisition");
+        assert!(
+            did_clear_dirty_a,
+            "A: clear_dirty should succeed inside the lock"
+        );
+
+        // B's LASL acquired the lock after A's clear_dirty already ran (inside A's LASL).
+        // So the entry was clean when B captured was_dirty_before — it must be false.
+        assert!(
+            !was_dirty_before_b,
+            "B: was_dirty_before should be false — A's clear_dirty (inside LASL) ran before B's \
+             lock"
+        );
+    }
+
+    /// Stress test: many concurrent upserts to the same key, all meeting write-through
+    /// conditions (single slot, ref_count=1, disk bucket).  The entry starts with
+    /// dirty_entry_count=1.  After all threads finish the count must be >= 0.
+    ///
+    /// With the old code (was_dirty_before captured outside the slot list lock), two threads
+    /// could race: both capture was_dirty_before=true, thread A's clear_dirty() succeeds,
+    /// thread B's LASL re-sets dirty=true, thread B's clear_dirty() also succeeds → two
+    /// (false,true) decrements → dirty_entry_count goes negative.
+    #[test]
+    fn test_dirty_count_no_double_decrement_concurrent() {
+        let accounts_index = Arc::new(new_disk_buckets_for_test::<u64>());
+        let pubkey = solana_pubkey::new_rand();
+        let slot = 0u64;
+        let info = 42u64;
+
+        // Insert the entry once. Single-slot non-cached with a disk bucket → written through
+        // immediately, so dirty_entry_count stays at 0.
+        accounts_index.upsert(
+            &pubkey,
+            PreAllocatedAccountMapEntry::Raw((slot, info)),
+            None,
+            &mut ReclaimsSlotList::new(),
+            UpsertReclaim::IgnoreReclaims,
+        );
+        assert_eq!(accounts_index.dirty_entry_count(), 0);
+
+        // Manually mark the in-memory entry dirty and bump the counter, simulating an entry
+        // that previously couldn't be written through (e.g. temporarily had ref_count > 1).
+        accounts_index.get_only_in_mem(&pubkey, false, |entry| {
+            if let Some(e) = entry {
+                e.set_dirty(true);
+            }
+        });
+        accounts_index
+            .dirty_entry_count
+            .fetch_add(1, Ordering::Relaxed);
+        assert_eq!(accounts_index.dirty_entry_count(), 1);
+
+        // Spawn threads that all try to write-through the dirty entry simultaneously.
+        // A barrier ensures they all start at the same instant to maximise the race window.
+        let n_threads = 16;
+        let barrier = Arc::new(std::sync::Barrier::new(n_threads));
+        let handles: Vec<_> = (0..n_threads)
+            .map(|i| {
+                let index = Arc::clone(&accounts_index);
+                let b = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    b.wait();
+                    index.upsert(
+                        &pubkey,
+                        PreAllocatedAccountMapEntry::Raw((slot, info + i as u64)),
+                        None,
+                        &mut ReclaimsSlotList::new(),
+                        UpsertReclaim::IgnoreReclaims,
+                    );
+                })
+            })
+            .collect();
+
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        assert!(
+            accounts_index.dirty_entry_count() >= 0,
+            "dirty_entry_count went negative ({}): double-decrement race",
+            accounts_index.dirty_entry_count()
+        );
     }
 
     #[test_case(Some(10000);  "with pre-allocation 10000")]
