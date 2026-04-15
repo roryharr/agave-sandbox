@@ -135,7 +135,7 @@ the direction is appropriate. Making pull requests "Ready To Review" before
 CI succeeds locally is a fast path to losing reviewer engagement. The reviewer
 will need to add the CI label each time a commit is pushed to re-run the CI
 checks leading to back and forth iterations until they "mute" the PR. Once
-mute, you'll need to reach out over some other medium, such as Discord, to
+muted, you'll need to reach out over some other medium, such as Discord, to
 request they have another look. When you use draft PRs, reviewers are aware
 that they can ignore any updates to the review. Use draft PRs liberally.
 Don't bug the humans until you can pass the automated tests.
