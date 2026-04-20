@@ -1099,55 +1099,7 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> AccountsIndex<T, U> {
         removed || missing_in_accounts_index
     }
 
-    /// Clean the slot list by removing all slot_list items older than the max_slot
-    /// Decrease the reference count of the entry by the number of removed accounts.
-    /// Returns the slot and account_info of the remaining entry in the slot list
-    /// Note: This must only be called on startup, and reclaims
-    /// must be reclaimed.
-    fn clean_and_unref_slot_list_on_startup(
-        &self,
-        entry: &AccountMapEntry<T>,
-        reclaims: &mut ReclaimsSlotList<T>,
-    ) -> (u64, T) {
-        let mut slot_list = entry.slot_list_write_lock();
-        let max_slot = slot_list
-            .iter()
-            .map(|(slot, _account)| *slot)
-            .max()
-            .expect("Slot list has entries");
-
-        let mut reclaim_count = 0;
-
-        slot_list.retain_and_count(|(slot, value)| {
-            // keep the newest entry, and reclaim all others
-            if *slot < max_slot {
-                assert!(!value.is_cached(), "Unsafe to reclaim cached entries");
-                reclaims.push((*slot, *value));
-                reclaim_count += 1;
-                false
-            } else {
-                true
-            }
-        });
-
-        // Unref
-        entry.unref_by_count(reclaim_count);
-        assert_eq!(
-            entry.ref_count(),
-            1,
-            "ref count should be one after cleaning all entries"
-        );
-
-        entry.mark_dirty();
-
-        // Return the last entry in the slot list, which is the only one
-        *slot_list
-            .last()
-            .expect("Slot list should have at least one entry after cleaning")
-    }
-
     /// Cleans and unrefs all older rooted entries for each pubkey in the accounts index.
-    /// Calls passed in callback on the remaining slot entry
     /// All pubkeys must be from a single bin
     pub fn clean_and_unref_rooted_entries_by_bin(
         &self,
@@ -1161,11 +1113,7 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> AccountsIndex<T, U> {
         };
 
         for pubkey in pubkeys_by_bin {
-            map.get_internal_inner(pubkey, |entry| {
-                let entry = entry.expect("Expected entry to exist in accounts index");
-                self.clean_and_unref_slot_list_on_startup(entry, &mut reclaims);
-                (false, ())
-            });
+            map.clean_and_unref_slot_list_on_startup(pubkey, &mut reclaims);
         }
         reclaims
     }
