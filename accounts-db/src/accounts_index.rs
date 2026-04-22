@@ -8,7 +8,6 @@ mod secondary;
 mod stats;
 use {
     crate::{
-        accounts_scan::ScanConfig,
         ancestors::Ancestors,
         contains::Contains,
         is_zero_lamport::IsZeroLamport,
@@ -295,7 +294,7 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> AccountsIndex<T, U> {
         (account_maps, bin_calculator, storage)
     }
 
-    fn iter<'a>(&'a self) -> AccountsIndexPubkeyIterator<'a, T, U> {
+    pub (crate) fn iter<'a>(&'a self) -> AccountsIndexPubkeyIterator<'a, T, U> {
         AccountsIndexPubkeyIterator::new(self)
     }
 
@@ -399,36 +398,6 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> AccountsIndex<T, U> {
         pubkeys_removed_from_accounts_index
     }
 
-    /// call func with every pubkey and index visible from a given set of ancestors
-    pub(crate) fn scan_accounts<F>(
-        &self,
-        ancestors: &Ancestors,
-        max_root: Slot,
-        mut func: F,
-        config: &ScanConfig,
-    ) where
-        F: FnMut(&Pubkey, (&T, Slot)),
-    {
-        for pubkeys in self.iter() {
-            for pubkey in pubkeys {
-                self.get_and_then(&pubkey, |entry| {
-                    if let Some(list) = entry {
-                        let list_r = &list.slot_list_read_lock();
-                        if let Some(index) =
-                            self.latest_slot(Some(ancestors), list_r, Some(max_root))
-                        {
-                            func(&pubkey, (&list_r[index].1, list_r[index].0));
-                        }
-                    }
-                    let add_to_in_mem_cache = false;
-                    (add_to_in_mem_cache, ())
-                });
-                if config.is_aborted() {
-                    return;
-                }
-            }
-        }
-    }
 
     /// Returns the list of pubkeys from the secondary index for the given key.
     pub(crate) fn get_index_key_pubkeys(&self, index_key: &IndexKey) -> Vec<Pubkey> {
@@ -1294,15 +1263,6 @@ mod tests {
         let ancestors = Ancestors::default();
         let key = &key;
         assert!(!index.contains_with(key, &ancestors, None));
-
-        let mut num = 0;
-        index.scan_accounts(
-            &ancestors,
-            index.max_root_inclusive(),
-            |_pubkey, _index| num += 1,
-            &ScanConfig::default(),
-        );
-        assert_eq!(num, 0);
     }
 
     #[test]
@@ -1371,15 +1331,6 @@ mod tests {
 
         let ancestors = Ancestors::default();
         assert!(!index.contains_with(&key, &ancestors, None));
-
-        let mut num = 0;
-        index.scan_accounts(
-            &ancestors,
-            index.max_root_inclusive(),
-            |_pubkey, _index| num += 1,
-            &ScanConfig::default(),
-        );
-        assert_eq!(num, 0);
     }
 
     type AccountInfoTest = f64;
@@ -1433,24 +1384,9 @@ mod tests {
         let mut ancestors = Ancestors::default();
         assert!(!index.contains_with(pubkey, &ancestors, None));
 
-        let mut num = 0;
-        index.scan_accounts(
-            &ancestors,
-            index.max_root_inclusive(),
-            |_pubkey, _index| num += 1,
-            &ScanConfig::default(),
-        );
-        assert_eq!(num, 0);
         ancestors.insert(slot);
         assert!(index.contains_with(pubkey, &ancestors, None));
         assert_eq!(index.ref_count_from_storage(pubkey), 1);
-        index.scan_accounts(
-            &ancestors,
-            index.max_root_inclusive(),
-            |_pubkey, _index| num += 1,
-            &ScanConfig::default(),
-        );
-        assert_eq!(num, 1);
 
         // not zero lamports
         let index = AccountsIndex::<bool, bool>::default_for_tests();
@@ -1465,24 +1401,9 @@ mod tests {
         let mut ancestors = Ancestors::default();
         assert!(!index.contains_with(pubkey, &ancestors, None));
 
-        let mut num = 0;
-        index.scan_accounts(
-            &ancestors,
-            index.max_root_inclusive(),
-            |_pubkey, _index| num += 1,
-            &ScanConfig::default(),
-        );
-        assert_eq!(num, 0);
         ancestors.insert(slot);
         assert!(index.contains_with(pubkey, &ancestors, None));
         assert_eq!(index.ref_count_from_storage(pubkey), 1);
-        index.scan_accounts(
-            &ancestors,
-            index.max_root_inclusive(),
-            |_pubkey, _index| num += 1,
-            &ScanConfig::default(),
-        );
-        assert_eq!(num, 1);
     }
 
     fn get_pre_allocated<T: IndexValue>(
@@ -1879,23 +1800,8 @@ mod tests {
             (false, ())
         });
 
-        let mut num = 0;
-        index.scan_accounts(
-            &ancestors,
-            index.max_root_inclusive(),
-            |_pubkey, _index| num += 1,
-            &ScanConfig::default(),
-        );
-        assert_eq!(num, 0);
         ancestors.insert(slot);
         assert!(index.contains_with(&key, &ancestors, None));
-        index.scan_accounts(
-            &ancestors,
-            index.max_root_inclusive(),
-            |_pubkey, _index| num += 1,
-            &ScanConfig::default(),
-        );
-        assert_eq!(num, 1);
     }
 
     #[test]
@@ -1917,15 +1823,6 @@ mod tests {
 
         let ancestors = Ancestors::from(vec![1]);
         assert!(!index.contains_with(&key, &ancestors, None));
-
-        let mut num = 0;
-        index.scan_accounts(
-            &ancestors,
-            index.max_root_inclusive(),
-            |_pubkey, _index| num += 1,
-            &ScanConfig::default(),
-        );
-        assert_eq!(num, 0);
     }
     #[test]
     fn test_insert_ignore_reclaims() {
@@ -2046,88 +1943,8 @@ mod tests {
                 assert!(account_info);
             })
             .unwrap();
-
-        let mut num = 0;
-        let mut found_key = false;
-        index.scan_accounts(
-            &ancestors,
-            index.max_root_inclusive(),
-            |pubkey, _index| {
-                if pubkey == &key {
-                    found_key = true
-                };
-                num += 1
-            },
-            &ScanConfig::default(),
-        );
-
-        assert_eq!(num, 1);
-        assert!(found_key);
     }
 
-    fn setup_accounts_index_keys(num_pubkeys: usize) -> (AccountsIndex<bool, bool>, Vec<Pubkey>) {
-        let index = AccountsIndex::<bool, bool>::default_for_tests();
-        let root_slot = 0;
-
-        let mut pubkeys: Vec<Pubkey> = std::iter::repeat_with(|| {
-            let new_pubkey = solana_pubkey::new_rand();
-            index.upsert(
-                root_slot,
-                root_slot,
-                &new_pubkey,
-                &AccountSharedData::default(),
-                &AccountSecondaryIndexes::default(),
-                true,
-                &mut ReclaimsSlotList::new(),
-                UPSERT_RECLAIM_TEST_DEFAULT,
-            );
-            new_pubkey
-        })
-        .take(num_pubkeys.saturating_sub(1))
-        .collect();
-
-        if num_pubkeys != 0 {
-            pubkeys.push(Pubkey::default());
-            index.upsert(
-                root_slot,
-                root_slot,
-                &Pubkey::default(),
-                &AccountSharedData::default(),
-                &AccountSecondaryIndexes::default(),
-                true,
-                &mut ReclaimsSlotList::new(),
-                UPSERT_RECLAIM_TEST_DEFAULT,
-            );
-        }
-
-        index.add_root(root_slot);
-
-        (index, pubkeys)
-    }
-
-    fn run_test_scan_accounts(num_pubkeys: usize) {
-        let (index, _) = setup_accounts_index_keys(num_pubkeys);
-
-        let mut scanned_keys = HashSet::new();
-        index.scan_accounts(
-            &Ancestors::default(),
-            index.max_root_inclusive(),
-            |pubkey, _index| {
-                scanned_keys.insert(*pubkey);
-            },
-            &ScanConfig::default(),
-        );
-        assert_eq!(scanned_keys.len(), num_pubkeys);
-    }
-
-    #[test]
-    fn test_scan_accounts() {
-        run_test_scan_accounts(0);
-        run_test_scan_accounts(1);
-        run_test_scan_accounts(9_999);
-        run_test_scan_accounts(10_000);
-        run_test_scan_accounts(10_001)
-    }
 
     #[test]
     fn test_is_alive_root() {
@@ -2343,23 +2160,6 @@ mod tests {
                 assert!(account_info);
             })
             .unwrap();
-
-        let mut num = 0;
-        let mut found_key = false;
-        index.scan_accounts(
-            &Ancestors::default(),
-            index.max_root_inclusive(),
-            |pubkey, index| {
-                if pubkey == &key {
-                    found_key = true;
-                    assert_eq!(index, (&true, 3));
-                };
-                num += 1
-            },
-            &ScanConfig::default(),
-        );
-        assert_eq!(num, 1);
-        assert!(found_key);
     }
 
     #[test]

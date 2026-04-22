@@ -3377,29 +3377,19 @@ impl AccountsDb {
             &max_root_ancestors
         };
 
-        // Bound max_root by ancestors.min_slot() so that roots from slots
-        // beyond the querying bank's ancestor chain are not visible.
-        let mut max_root = scan_guard.max_root();
-        if let Some(min) = ancestors.min_slot() {
-            max_root = max_root.min(min);
-        }
-        self.accounts_index.scan_accounts(
-            ancestors,
-            max_root,
-            |pubkey, (account_info, slot)| {
-                let mut account_accessor =
-                    self.get_account_accessor(slot, pubkey, &account_info.storage_location());
+        for pubkeys in self.accounts_index.iter() {
+            for pubkey in pubkeys {
+                if config.is_aborted() {
+                    break;
+                }
 
-                let account_slot = match account_accessor {
-                    LoadedAccountAccessor::Cached(None) => None,
-                    _ => account_accessor.get_loaded_account(|loaded_account| {
-                        (pubkey, loaded_account.take_account(), slot)
-                    }),
-                };
-                scan_func(account_slot)
-            },
-            config,
-        );
+                if let Some((account, slot)) =
+                    self.do_load(ancestors, &pubkey, LoadHint::Unspecified, PopulateReadCache::False)
+                {
+                    scan_func(Some((&pubkey, account, slot)));
+                }
+            }
+        }
 
         // Check whether the bank was removed while the scan was in progress.
         if scan_guard.was_scan_corrupted() {
@@ -3453,32 +3443,20 @@ impl AccountsDb {
             &max_root_ancestors
         };
 
-        // Bound max_root by ancestors.min_slot() so that roots from slots
-        // beyond the querying bank's ancestor chain are not visible. A root
-        // between min_slot and max_slot that is not an ancestor belongs to a
-        // different fork and should not appear in scan results.
-        let mut max_root = scan_guard.max_root();
-        if let Some(min) = ancestors.min_slot() {
-            max_root = max_root.min(min);
-        }
         for pubkey in self.accounts_index.get_index_key_pubkeys(&index_key) {
             if config.is_aborted() {
                 break;
             }
-            self.accounts_index.get_with_and_then(
-                &pubkey,
+            let account = self.do_load(
                 ancestors,
-                Some(max_root),
-                true,
-                |(slot, account_info)| {
-                    let account_slot = self
-                        .get_account_accessor(slot, &pubkey, &account_info.storage_location())
-                        .get_loaded_account(|loaded_account| {
-                            (&pubkey, loaded_account.take_account(), slot)
-                        });
-                    scan_func(account_slot)
-                },
+                &pubkey,
+                LoadHint::Unspecified,
+                PopulateReadCache::False,
             );
+
+            if let Some((account, slot)) = account {
+                scan_func(Some((&pubkey, account, slot)));
+            }
         }
 
         // Check whether the bank was removed while the scan was in progress.

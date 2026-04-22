@@ -44,6 +44,7 @@ use {
     serde::{Deserialize, Serialize},
     solana_account::ReadableAccount,
     solana_accounts_db::{
+        accounts::{AccountAddressFilter},
         accounts_db::{ACCOUNTS_DB_CONFIG_FOR_TESTING, AccountsDbConfig},
         accounts_update_notifier_interface::AccountsUpdateNotifier,
         utils::{move_and_async_delete_path_contents, validate_account_paths_for_direct_io},
@@ -633,6 +634,7 @@ pub struct Validator {
     geyser_plugin_service: Option<GeyserPluginService>,
     blockstore_metric_report_service: BlockstoreMetricReportService,
     accounts_background_service: AccountsBackgroundService,
+    scan_accounts_perf_thread: Option<JoinHandle<()>>,
     xdp_transmitter: Option<Transmitter>,
     // This runtime is used to run the client owned by SendTransactionService.
     // We don't wait for its JoinHandle here because ownership and shutdown
@@ -1008,6 +1010,45 @@ impl Validator {
                 pruned_banks_request_handler,
             },
         );
+        let scan_accounts_perf_thread = {
+            let bank_forks = bank_forks.clone();
+            let exit = exit.clone();
+            Some(
+                Builder::new()
+                    .name("solScanAcctPerf".to_string())
+                    .spawn(move || {
+                        while !exit.load(Ordering::Relaxed) {
+                            let bank = bank_forks.read().unwrap().root_bank();
+                            let ancestors = bank.ancestors.clone();
+                            let bank_id = bank.bank_id();
+                            let start = Instant::now();
+                            let result = bank.accounts().load_largest_accounts(
+                                &ancestors,
+                                bank_id,
+                                20,
+                                &HashSet::new(),
+                                AccountAddressFilter::Exclude,
+                            );
+                            let elapsed = start.elapsed();
+                            match result {
+                                Ok(accounts) => {
+                                    datapoint_info!(
+                                        "scan_accounts_perf",
+                                        ("duration_ms", elapsed.as_millis() as i64, i64),
+                                        ("num_accounts", accounts.len() as i64, i64),
+                                    );
+                                }
+                                Err(e) => {
+                                    warn!("scan_accounts_perf: load_largest_accounts error: {e}");
+                                }
+                            }
+                            thread::sleep(Duration::from_secs(60));
+                        }
+                    })
+                    .unwrap(),
+            )
+        };
+
         info!(
             "Using: block-verification-method: {}, block-production-method: {}",
             config.block_verification_method, config.block_production_method,
@@ -1739,6 +1780,7 @@ impl Validator {
             geyser_plugin_service,
             blockstore_metric_report_service,
             accounts_background_service,
+            scan_accounts_perf_thread,
             xdp_transmitter,
             _tpu_client_next_runtime: tpu_client_next_runtime,
         })
@@ -1902,6 +1944,11 @@ impl Validator {
         self.accounts_background_service
             .join()
             .expect("accounts_background_service");
+        if let Some(scan_accounts_perf_thread) = self.scan_accounts_perf_thread {
+            scan_accounts_perf_thread
+                .join()
+                .expect("scan_accounts_perf_thread");
+        }
         if let Some(xdp_transmitter) = self.xdp_transmitter {
             xdp_transmitter.join().expect("xdp_transmitter");
         }
