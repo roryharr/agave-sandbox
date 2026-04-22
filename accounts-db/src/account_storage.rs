@@ -31,6 +31,14 @@ pub struct AccountStorage {
 }
 
 impl AccountStorage {
+    /// Construct an `AccountStorage` populated with `map`.
+    pub fn new_with_map(map: AccountStorageMap) -> Self {
+        Self {
+            map,
+            shrink_in_progress_map: RwLock::default(),
+        }
+    }
+
     /// Return the append vec in 'slot' and with id='store_id'.
     /// can look in 'map' and 'shrink_in_progress_map' to find the specified append vec
     /// when shrinking begins, shrinking_in_progress is called.
@@ -119,6 +127,7 @@ impl AccountStorage {
         self.map.get(&slot).map(|entry| Arc::clone(entry.value()))
     }
 
+    #[cfg(test)]
     pub(crate) fn all_slots(&self) -> Vec<Slot> {
         assert!(
             self.no_shrink_in_progress(),

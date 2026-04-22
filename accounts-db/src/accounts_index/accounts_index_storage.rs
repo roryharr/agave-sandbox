@@ -1,7 +1,7 @@
 use {
     super::{
-        AccountsIndexConfig, DiskIndexValue, IndexValue, Startup,
-        bucket_map_holder::BucketMapHolder, in_mem_accounts_index::InMemAccountsIndex,
+        AccountsIndexConfig, DiskIndexValue, IndexValue, bucket_map_holder::BucketMapHolder,
+        in_mem_accounts_index::InMemAccountsIndex,
     },
     crate::{accounts_index, waitable_condvar::WaitableCondvar},
     std::{
@@ -99,14 +99,6 @@ impl BgThreads {
 }
 
 impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> AccountsIndexStorage<T, U> {
-    /// startup=true causes:
-    ///      in mem to act in a way that flushes to disk asap
-    /// startup=false is 'normal' operation
-    pub(crate) fn set_startup(&self, startup: Startup) {
-        let is_startup = startup != Startup::Normal;
-        self.storage.set_startup(is_startup);
-    }
-
     /// allocate BucketMapHolder and InMemAccountsIndex[]
     pub fn new(bins: usize, config: &AccountsIndexConfig, exit: Arc<AtomicBool>) -> Self {
         let num_flush_threads = config

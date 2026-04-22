@@ -3,8 +3,7 @@
 use {
     super::{SnapshotError, SnapshotFrom},
     crate::serde_snapshot::{
-        SerdeObsoleteAccounts, SerdeObsoleteAccountsMap, reconstruct_single_storage,
-        remap_and_reconstruct_single_storage,
+        SerdeObsoleteAccounts, SerdeObsoleteAccountsMap, remap_and_reconstruct_single_storage,
     },
     agave_fs::FileInfo,
     crossbeam_channel::{Receiver, Sender, select, unbounded},
@@ -18,10 +17,10 @@ use {
         account_storage::AccountStorageMap,
         accounts_db::{AccountsFileId, AtomicAccountsFileId},
         accounts_file::StorageAccess,
+        reconstruct_single_storage,
     },
     solana_clock::Slot,
     std::{
-        collections::HashMap,
         path::PathBuf,
         str::FromStr as _,
         sync::{
@@ -39,8 +38,6 @@ pub(crate) struct SnapshotStorageRebuilder {
     file_receiver: Receiver<FileInfo>,
     /// Number of threads to rebuild with
     num_threads: usize,
-    /// Snapshot storage lengths - from the snapshot file
-    snapshot_storage_lengths: HashMap<Slot, usize>,
     /// Container for storing rebuilt snapshot storages
     storage: AccountStorageMap,
     /// Tracks next append_vec_id
@@ -64,17 +61,14 @@ impl SnapshotStorageRebuilder {
         file_receiver: Receiver<FileInfo>,
         num_threads: usize,
         next_append_vec_id: Arc<AtomicAccountsFileId>,
-        snapshot_storage_lengths: HashMap<Slot, usize>,
         snapshot_from: SnapshotFrom,
         storage_access: StorageAccess,
         obsolete_accounts: Option<SerdeObsoleteAccountsMap>,
     ) -> Self {
-        let storage = AccountStorageMap::with_capacity(snapshot_storage_lengths.len());
         Self {
             file_receiver,
             num_threads,
-            snapshot_storage_lengths,
-            storage,
+            storage: AccountStorageMap::default(),
             next_append_vec_id,
             processed_slot_count: AtomicUsize::new(0),
             num_collisions: AtomicUsize::new(0),
@@ -90,7 +84,6 @@ impl SnapshotStorageRebuilder {
     ///
     /// Spawn threads for processing buffered append_vec_files, and then received files
     pub(crate) fn spawn_rebuilder_threads(
-        snapshot_storage_lengths: HashMap<Slot, usize>,
         append_vec_files: Vec<FileInfo>,
         file_receiver: Receiver<FileInfo>,
         num_threads: usize,
@@ -103,7 +96,6 @@ impl SnapshotStorageRebuilder {
             file_receiver,
             num_threads,
             next_append_vec_id,
-            snapshot_storage_lengths,
             snapshot_from,
             storage_access,
             obsolete_accounts,
@@ -183,32 +175,26 @@ impl SnapshotStorageRebuilder {
     fn process_complete_slot(&self, slot: Slot, file_info: FileInfo) -> Result<(), SnapshotError> {
         let filename = file_info.path.file_name().unwrap().to_str().unwrap();
         let (_, old_append_vec_id) = get_slot_and_append_vec_id(filename)?;
-        let Some(&current_len) = self.snapshot_storage_lengths.get(&slot) else {
-            return Err(SnapshotError::RebuildStorages(format!(
-                "account storage file '{filename}' for slot outside of expected range in snapshot"
-            )));
-        };
 
         let storage_entry = match &self.snapshot_from {
             SnapshotFrom::Archive => remap_and_reconstruct_single_storage(
                 slot,
                 old_append_vec_id,
-                current_len,
                 file_info,
                 &self.next_append_vec_id,
                 &self.num_collisions,
                 self.storage_access,
             )?,
             SnapshotFrom::Dir => reconstruct_single_storage(
-                &slot,
+                slot,
                 file_info,
-                current_len,
                 old_append_vec_id as AccountsFileId,
                 self.storage_access,
                 self.obsolete_accounts
                     .remove(&slot)
-                    .map(|(_, accounts)| accounts.into_tuple()),
-            )?,
+                    .map(|(_, accounts)| accounts.into_id_and_accounts()),
+            )
+            .map_err(SnapshotError::from)?,
         };
 
         let storage_id = storage_entry.id();
@@ -228,7 +214,7 @@ impl SnapshotStorageRebuilder {
         &self,
         exit_receiver: Receiver<Result<(), SnapshotError>>,
     ) -> Result<(), SnapshotError> {
-        let num_slots = self.snapshot_storage_lengths.len();
+        let num_slots = self.storage.len();
         let mut last_log_time = Instant::now();
         loop {
             select! {

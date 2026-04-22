@@ -20,16 +20,11 @@ use {
         mem,
         num::NonZeroUsize,
         sync::{
-            Arc, Mutex, RwLock,
+            Arc, RwLock,
             atomic::{AtomicBool, AtomicU64, Ordering},
         },
     },
 };
-
-#[derive(Debug, Default)]
-pub struct StartupStats {
-    pub copy_data_us: AtomicU64,
-}
 
 // one instance of this represents one bin of the accounts index.
 pub struct InMemAccountsIndex<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> {
@@ -45,9 +40,6 @@ pub struct InMemAccountsIndex<T: IndexValue, U: DiskIndexValue + From<T> + Into<
     // set to true while this bin is being actively flushed
     flushing_active: AtomicBool,
 
-    /// info to streamline initial index generation
-    startup_info: StartupInfo<T, U>,
-
     /// how many more ages to skip before this bucket is flushed (as opposed to being skipped).
     /// When this reaches 0, this bucket is flushed.
     remaining_ages_to_skip_flushing: AtomicAge,
@@ -56,9 +48,6 @@ pub struct InMemAccountsIndex<T: IndexValue, U: DiskIndexValue + From<T> + Into<
     /// Higher numbers mean we flush less buckets/s
     /// Lower numbers mean we flush more buckets/s
     num_ages_to_distribute_flushes: Age,
-
-    /// stats related to starting up
-    pub(crate) startup_stats: Arc<StartupStats>,
 }
 
 impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> Debug for InMemAccountsIndex<T, U> {
@@ -84,26 +73,16 @@ pub enum ExistedLocation {
     OnDisk,
 }
 
-#[derive(Default, Debug)]
-struct StartupInfoDuplicates<T: IndexValue> {
-    /// entries that were found to have duplicate index entries.
-    /// When all entries have been inserted, these can be resolved and held in memory.
-    duplicates: Vec<(Slot, Pubkey, T)>,
-    /// pubkeys that were already added to disk and later found to be duplicates,
-    duplicates_put_on_disk: HashSet<(Slot, Pubkey)>,
-
-    /// (slot, pubkey) pairs that are found to be duplicates when we are
-    /// starting from in-memory only index. This field is used only when disk
-    /// index is disabled.
-    duplicates_from_in_memory_only: Vec<(Slot, Pubkey)>,
-}
-
-#[derive(Default, Debug)]
-struct StartupInfo<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> {
-    /// entries to add next time we are flushing to disk
-    insert: Mutex<Vec<(Pubkey, (Slot, U))>>,
-    /// pubkeys with more than 1 entry
-    duplicates: Mutex<StartupInfoDuplicates<T>>,
+/// Result of [`InMemAccountsIndex::insert_if_newer`]
+#[derive(Debug)]
+pub enum InsertIfNewerResult<T> {
+    /// The pubkey was not in the index; the new entry was inserted.
+    Inserted,
+    /// The pubkey was in the index at an older slot; it was replaced by the new entry.
+    /// Returns the slot and account info of the displaced entry.
+    Replaced { old_slot: Slot, old_info: T },
+    /// The pubkey is already in the index at a newer-or-equal slot; nothing was changed.
+    ExistingIsNewer,
 }
 
 impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T, U> {
@@ -136,14 +115,12 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
             flushing_active: AtomicBool::default(),
             // initialize this to max, to make it clear we have not flushed at age 0, the starting age
             last_age_flushed: AtomicAge::new(Age::MAX),
-            startup_info: StartupInfo::default(),
             // Spread out the scanning across all ages within the window.
             // This causes us to scan 1/N of the bins each 'Age'
             remaining_ages_to_skip_flushing: AtomicAge::new(
                 rng().random_range(0..num_ages_to_distribute_flushes),
             ),
             num_ages_to_distribute_flushes,
-            startup_stats: Arc::clone(&storage.startup_stats),
         }
     }
 
@@ -412,49 +389,6 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
         })
     }
 
-    /// Clean the slot list by removing all slot_list items older than the max_slot.
-    /// Decrease the reference count of the entry by the number of removed accounts.
-    /// Note: This must only be called on startup, and reclaims must be reclaimed.
-    pub(crate) fn clean_and_unref_slot_list_on_startup(
-        &self,
-        pubkey: &Pubkey,
-        reclaims: &mut ReclaimsSlotList<T>,
-    ) {
-        self.slot_list_mut_with_entry(pubkey, |mut slot_list, entry| {
-            let max_slot = slot_list
-                .iter()
-                .map(|(slot, _account)| *slot)
-                .max()
-                .expect("Slot list has entries");
-
-            let mut reclaim_count = 0;
-            let count = slot_list.retain_and_count(|(slot, value)| {
-                // keep the newest entry, and reclaim all others
-                if *slot < max_slot {
-                    assert!(!value.is_cached(), "Unsafe to reclaim cached entries");
-                    reclaims.push((*slot, *value));
-                    reclaim_count += 1;
-                    false
-                } else {
-                    true
-                }
-            });
-
-            assert_eq!(
-                count, 1,
-                "Slot list should have exactly one entry after cleaning"
-            );
-
-            entry.unref_by_count(reclaim_count);
-            assert_eq!(
-                entry.ref_count(),
-                1,
-                "ref count should be one after cleaning all entries"
-            );
-        })
-        .expect("Expected entry to exist in accounts index");
-    }
-
     /// Insert a cached entry into the accounts index
     /// If the entry is already present, just mark dirty and set the age to the future
     fn cache_entry_at_slot(current: &AccountMapEntry<T>, new_value: SlotListItem<T>) {
@@ -720,32 +654,6 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
         )
     }
 
-    /// Queue up these insertions for when the flush thread is dealing with this bin.
-    /// This is very fast and requires no lookups or disk access.
-    pub fn startup_insert_only(
-        &self,
-        slot: Slot,
-        items: impl ExactSizeIterator<Item = (Pubkey, T)>,
-    ) {
-        assert!(self.storage.get_startup());
-        assert!(self.bucket.is_some());
-
-        let mut insert = self.startup_info.insert.lock().unwrap();
-        let m = Measure::start("copy");
-        insert.extend(items.map(|(k, v)| (k, (slot, v.into()))));
-        self.startup_stats
-            .copy_data_us
-            .fetch_add(m.end_as_us(), Ordering::Relaxed);
-    }
-
-    pub fn startup_update_duplicates_from_in_memory_only(&self, items: Vec<(Slot, Pubkey)>) {
-        assert!(self.storage.get_startup());
-        assert!(self.bucket.is_none());
-
-        let mut duplicates = self.startup_info.duplicates.lock().unwrap();
-        duplicates.duplicates_from_in_memory_only.extend(items);
-    }
-
     /// Upsert `new_entry` for `pubkey` into the primary index
     ///
     /// Returns info about existing entries for `pubkey`.
@@ -847,6 +755,75 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
             }
         } else {
             InsertNewEntryResults::DidNotExist
+        }
+    }
+
+    /// Insert `(new_slot, new_info)` for `pubkey` only if `new_slot` is strictly greater than
+    /// any existing slot for that pubkey. Used during index generation to ensure the highest-slot
+    /// entry wins when storages are processed in arbitrary order.
+    ///
+    /// Holds the map write lock for the duration to make the read-compare-write atomic.
+    pub fn insert_if_newer(
+        &self,
+        new_slot: Slot,
+        pubkey: &Pubkey,
+        new_info: T,
+    ) -> InsertIfNewerResult<T> {
+        let use_disk = self.storage.is_disk_index_enabled();
+        let mut map = self.map_internal.write().unwrap();
+        match map.entry(*pubkey) {
+            Entry::Occupied(occupied) => {
+                let entry = occupied.get();
+                let mut slot_list = entry.slot_list_write_lock();
+                debug_assert_eq!(
+                    slot_list.len(),
+                    1,
+                    "slot_list should have exactly one entry (branch invariant)"
+                );
+                let (existing_slot, existing_info) = slot_list[0];
+                if new_slot > existing_slot {
+                    slot_list[0] = (new_slot, new_info);
+                    drop(slot_list);
+                    entry.mark_dirty();
+                    InsertIfNewerResult::Replaced {
+                        old_slot: existing_slot,
+                        old_info: existing_info,
+                    }
+                } else {
+                    InsertIfNewerResult::ExistingIsNewer
+                }
+            }
+            Entry::Vacant(vacant) => {
+                let disk_entry = self.load_account_entry_from_disk(vacant.key());
+                if let Some(disk_entry) = disk_entry {
+                    let mut slot_list = disk_entry.slot_list_write_lock();
+                    debug_assert_eq!(slot_list.len(), 1);
+                    let (existing_slot, existing_info) = slot_list[0];
+                    if new_slot > existing_slot {
+                        slot_list[0] = (new_slot, new_info);
+                        drop(slot_list);
+                        disk_entry.mark_dirty();
+                        vacant.insert(Box::new(disk_entry));
+                        InsertIfNewerResult::Replaced {
+                            old_slot: existing_slot,
+                            old_info: existing_info,
+                        }
+                    } else {
+                        drop(slot_list);
+                        vacant.insert(Box::new(disk_entry));
+                        InsertIfNewerResult::ExistingIsNewer
+                    }
+                } else {
+                    self.stats().inc_insert();
+                    let new_entry = AccountMapEntry::new(
+                        SlotList::from([(new_slot, new_info)]),
+                        1,
+                        AccountMapEntryMeta::new_dirty(&self.storage, use_disk),
+                    );
+                    vacant.insert(Box::new(new_entry));
+                    InsertIfNewerResult::Inserted
+                }
+            }
         }
     }
 
@@ -1014,207 +991,15 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
         possible_evictions
     }
 
-    /// Takes self's `startup_info` and writes it to disk and in-mem.
-    ///
-    /// If the configured memory limit is "minimal", nothing is writen to in-mem.
-    /// Otherwise write to in-mem (and respect the memory limit).
-    fn write_startup_info(&self) {
-        let insert = std::mem::take(&mut *self.startup_info.insert.lock().unwrap());
-        if insert.is_empty() {
-            // nothing to insert for this bin
-            return;
-        }
-
-        // this fn should only be called from a single thread, so holding the lock is fine
-        let mut duplicates = self.startup_info.duplicates.lock().unwrap();
-
-        // merge all items into the disk index now
-        let disk = self.bucket.as_ref().unwrap();
-        let duplicate_entries_and_indices = disk.batch_insert_non_duplicates(&insert);
-        let duplicate_addresses: HashSet<_> = duplicate_entries_and_indices
-            .iter()
-            .map(|(index, _entry)| &insert[*index].0)
-            .collect();
-        let mut count = insert.len() as u64;
-        for (i, duplicate_entry) in duplicate_entries_and_indices {
-            let (k, entry) = &insert[i];
-            duplicates.duplicates.push((entry.0, *k, entry.1.into()));
-            // accurately account for there being a duplicate for the first entry that was previously added to the disk index.
-            // That entry could not have known yet that it was a duplicate.
-            // It is important to capture each slot with a duplicate because of slot limits applied to clean.
-            duplicates
-                .duplicates_put_on_disk
-                .insert((duplicate_entry.0, *k));
-            count -= 1;
-        }
-
-        if let Some(threshold_entries_per_bin) = self.storage.threshold_entries_per_bin.as_ref() {
-            // If a memory threshold is set, then insert into the in-mem index here,
-            // up to that limit.  This way we pre-populate the in-mem index, and can
-            // avoid having to load some entries from disk on first access.
-            let mut map = self.map_internal.write().unwrap();
-            // Insert up to the low water mark.  Purposely do not insert all the way up  to the
-            // high water mark, as that then causes the flush loop condition to immediately trigger
-            // and evict down to the low water mark anyway.
-            let num_available = threshold_entries_per_bin
-                .low_water_mark
-                .saturating_sub(map.len());
-            for (address, (slot, disk_index_value)) in insert
-                .iter()
-                .filter(|(address, _entry)| !duplicate_addresses.contains(address)) // <- skip known duplicates
-                .take(num_available)
-            {
-                match map.entry(*address) {
-                    Entry::Vacant(vacant) => {
-                        let index_value = (*disk_index_value).into();
-                        let slot_list = SlotList::from([(*slot, index_value)]);
-                        let ref_count = 1;
-                        let meta = AccountMapEntryMeta::new_clean(&self.storage);
-                        let account_map_entry = AccountMapEntry::new(slot_list, ref_count, meta);
-                        vacant.insert(Box::new(account_map_entry));
-                    }
-                    Entry::Occupied(_occupied) => {
-                        // If the account already has an entry in the in-mem index, then that means
-                        // it is a duplicate.  We could merge them here, however duplicates
-                        // handling happens later during startup/index generation, in
-                        // populate_and_retrieve_duplicate_keys_from_startup(), which will insert
-                        // them back into the in-mem index.  Thus we should *not* insert any
-                        // accounts with duplicate entries here.
-                        // Additionally, once marking obsolete accounts is always on, we then
-                        // should no longer have any duplicates to worry about.
-                    }
-                }
-            }
-
-            // Related to the comment in the Entry::Occupied match arm above, if inserting
-            // into disk (batch_insert_non_duplicates()) returned duplicates, we need to check
-            // and make sure they are not in the in-mem index.  (Since the first time we encounter
-            // a duplicate we do not know it is a duplicate, so it will have been inserted
-            // in mem.)  We must remove them here.
-            for duplicate_address in duplicate_addresses {
-                map.remove(duplicate_address);
-            }
-            drop(map);
-        } else {
-            // Else, we should not have anything in the in-mem index at all.
-            let map_internal = self.map_internal.read().unwrap();
-            assert!(
-                map_internal.is_empty(),
-                "len: {}, first: {:?}",
-                map_internal.len(),
-                map_internal.iter().take(1).collect::<Vec<_>>()
-            );
-            drop(map_internal);
-        }
-
-        self.stats().inc_insert_count(count);
-    }
-
-    /// pull out all duplicate pubkeys from 'startup_info'
-    /// duplicate pubkeys have a slot list with len > 1
-    /// These were collected for this bin when we did batch inserts in the bg flush threads.
-    /// Insert these into the in-mem index, then return the duplicate (Slot, Pubkey)
-    pub fn populate_and_retrieve_duplicate_keys_from_startup(&self) -> Vec<(Slot, Pubkey)> {
-        // in order to return accurate and complete duplicates, we must have nothing left remaining to insert
-        assert!(self.startup_info.insert.lock().unwrap().is_empty());
-
-        let mut duplicate_items = self.startup_info.duplicates.lock().unwrap();
-        let duplicates = std::mem::take(&mut duplicate_items.duplicates);
-        let duplicates_put_on_disk = std::mem::take(&mut duplicate_items.duplicates_put_on_disk);
-        drop(duplicate_items);
-
-        // accumulated stats after inserting pubkeys into the index
-        let mut num_did_not_exist = 0;
-        let mut num_existed_in_mem = 0;
-        let mut num_existed_on_disk = 0;
-
-        let storage = self.storage.as_ref();
-        let duplicates = duplicates_put_on_disk
-            .into_iter()
-            .chain(duplicates.into_iter().map(|(slot, key, info)| {
-                let entry = PreAllocatedAccountMapEntry::new(slot, info, storage, true);
-                match self.insert_new_entry_if_missing_with_lock(key, entry) {
-                    InsertNewEntryResults::DidNotExist => {
-                        num_did_not_exist += 1;
-                    }
-                    InsertNewEntryResults::Existed {
-                        other_slot: _,
-                        location,
-                    } => match location {
-                        ExistedLocation::InMem => {
-                            num_existed_in_mem += 1;
-                        }
-                        ExistedLocation::OnDisk => {
-                            num_existed_on_disk += 1;
-                        }
-                    },
-                };
-                (slot, key)
-            }))
-            .collect();
-
-        let stats = self.stats();
-
-        // stats for inserted entries that previously did *not* exist
-        stats.inc_insert_count(num_did_not_exist);
-        stats.add_mem_count(num_did_not_exist as usize);
-
-        // stats for inserted entries that previous did exist *in-mem*
-        stats
-            .entries_from_mem
-            .fetch_add(num_existed_in_mem, Ordering::Relaxed);
-        stats
-            .updates_in_mem
-            .fetch_add(num_existed_in_mem, Ordering::Relaxed);
-
-        // stats for inserted entries that previously did exist *on-disk*
-        stats.add_mem_count(num_existed_on_disk as usize);
-        stats
-            .entries_missing
-            .fetch_add(num_existed_on_disk, Ordering::Relaxed);
-        stats
-            .updates_in_mem
-            .fetch_add(num_existed_on_disk, Ordering::Relaxed);
-
-        duplicates
-    }
-
-    pub fn startup_take_duplicates_from_in_memory_only(&self) -> Vec<(Slot, Pubkey)> {
-        let mut duplicates = self.startup_info.duplicates.lock().unwrap();
-        std::mem::take(&mut duplicates.duplicates_from_in_memory_only)
-    }
-
     /// synchronize the in-mem index with the disk index
     fn flush_internal(&self, flush_guard: &FlushGuard, can_advance_age: bool) {
         let current_age = self.storage.current_age();
         let iterate_for_age = self.get_should_age(current_age);
-        let startup = self.storage.get_startup();
-
-        if startup {
-            // At startup we do not insert index entries into the normal in-mem index.
-            // Instead, they are written to a startup-only struct.  Thus, at startup
-            // we only need to flush that startup struct and then can return early.
-            self.write_startup_info();
-
-            if iterate_for_age {
-                // Note we still have to iterate ages too, since it is checked when
-                // transitioning from startup back to normal/steady state.
-                assert_eq!(current_age, self.storage.current_age());
-                self.set_has_aged(current_age, can_advance_age);
-            }
-            return;
-        }
-
-        // from this point forward, we know startup == false
-        debug_assert!(!startup);
 
         if !iterate_for_age {
             // no need to age, so no need to flush this bucket
             return;
         }
-
-        // from this point forward, we know iterate_for_age == true
-        debug_assert!(iterate_for_age);
 
         // For threshold-based flushing, check if current entry count warrants flushing
         let entries_in_bin = self.map_internal.read().unwrap().len();
@@ -1550,13 +1335,9 @@ enum ReasonToNotFlush {
 mod tests {
     use {
         super::*,
-        crate::accounts_index::{
-            ACCOUNTS_INDEX_CONFIG_FOR_TESTING, AccountsIndexConfig, BINS_FOR_TESTING, IndexLimit,
-            IndexLimitThreshold, bucket_map_holder::ThresholdEntriesPerBin,
-        },
+        crate::accounts_index::{AccountsIndexConfig, BINS_FOR_TESTING, IndexLimit},
         assert_matches::assert_matches,
         itertools::Itertools,
-        std::iter,
         test_case::test_case,
     };
 
@@ -2607,81 +2388,5 @@ mod tests {
                 assert_eq!(total_capacity, 0);
             }
         }
-    }
-
-    /// Ensure `write_startup_info()` populates the in-mem index,
-    /// while also respecting the configured memory threshold.
-    #[test]
-    fn test_write_startup_info() {
-        let num_bins = 1;
-        let num_entries_overhead = 300;
-        let num_entries_to_evict = 200;
-        let config = AccountsIndexConfig {
-            bins: Some(num_bins),
-            index_limit: {
-                // Ensure we use an IndexLimit that (1) enables the disk index,
-                // and (2) is a valid threshold, as per the logic in BucketMapHolder::new().
-                // We will override the threshold afterwards, so the actual value doesn't matter.
-                IndexLimit::Threshold(IndexLimitThreshold {
-                    num_bytes: 25_000_000_000,
-                    num_entries_overhead,
-                    num_entries_to_evict,
-                })
-            },
-            ..ACCOUNTS_INDEX_CONFIG_FOR_TESTING
-        };
-        let mut holder = BucketMapHolder::new(num_bins, &config, 1);
-
-        // Override the threshold values to make testing faster.
-        let low_water_mark = 100;
-        let high_water_mark = low_water_mark + num_entries_to_evict;
-        holder.threshold_entries_per_bin = Some(ThresholdEntriesPerBin {
-            _target_entries: high_water_mark + num_entries_overhead,
-            high_water_mark,
-            low_water_mark,
-        });
-        let holder = Arc::new(holder);
-        let index = InMemAccountsIndex::<u64, u64>::new(&holder, num_bins - 1, None);
-
-        // Emulate index generation where we push startup values into the `startup_info`
-        // side-band struct when disk index is enabled.  Ensure we push more than
-        // `low_water_mark` number of values.
-        let to_insert = iter::repeat_with(|| {
-            // the addresses need to be unique, but the actual values do not matter
-            (Pubkey::new_unique(), (/*slot*/ 11, /*T*/ 42))
-        })
-        .take(high_water_mark);
-        index.startup_info.insert.lock().unwrap().extend(to_insert);
-
-        // Also push some duplicates, to ensure we do not put those in-mem
-        let duplicate_pubkey = Pubkey::new_unique();
-        {
-            let mut startup_info_insert = index.startup_info.insert.lock().unwrap();
-            // Yes, we want three duplicates.  Two is the minimum (by definition), but we want
-            // three to ensure we don't see the first two, remove 'em, then see a third and think
-            // "oh, this is a new non-duplicate!" and erroneously insert it in-mem.
-            startup_info_insert.push((duplicate_pubkey, (/*slot*/ 13, /*T*/ 43)));
-            startup_info_insert.push((duplicate_pubkey, (/*slot*/ 14, /*T*/ 44)));
-            startup_info_insert.push((duplicate_pubkey, (/*slot*/ 15, /*T*/ 45)));
-            // Reverse the vec to ensure the duplicates end up at the front.
-            // Otherwise they would not be selected to be put in-mem.
-            startup_info_insert.reverse();
-        }
-        assert!(index.map_internal.read().unwrap().is_empty());
-
-        // Index generation calls `write_startup_info()`, which is responsible for writing the
-        // values to disk, and also populating the in-mem index. So call `write_startup_info()`
-        // here, and ensure:
-        // - we end up with the expected number of items in the in-mem index
-        // - duplicates do not end up in-mem
-        index.write_startup_info();
-        assert_eq!(index.map_internal.read().unwrap().len(), low_water_mark);
-        assert!(
-            !index
-                .map_internal
-                .read()
-                .unwrap()
-                .contains_key(&duplicate_pubkey)
-        );
     }
 }

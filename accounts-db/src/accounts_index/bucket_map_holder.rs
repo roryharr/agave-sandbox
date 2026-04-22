@@ -1,8 +1,7 @@
 use {
     super::{
         AccountsIndexConfig, DiskIndexValue, IndexLimit, IndexValue,
-        in_mem_accounts_index::{InMemAccountsIndex, StartupStats},
-        stats::Stats,
+        in_mem_accounts_index::InMemAccountsIndex, stats::Stats,
     },
     crate::waitable_condvar::WaitableCondvar,
     log::*,
@@ -81,18 +80,15 @@ pub struct BucketMapHolder<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>>
     /// how many ages should elapse from the last time an item is used where the item will remain in the cache
     pub ages_to_stay_in_cache: Age,
 
-    /// startup is a special time for flush to focus on moving everything to disk as fast and efficiently as possible
-    /// with less thread count limitations. LRU and access patterns are not important. Freeing memory
-    /// and writing to disk in parallel are.
-    /// Note startup is an optimization and is not required for correctness.
-    startup: AtomicBool,
     _phantom: PhantomData<T>,
-
-    pub(crate) startup_stats: Arc<StartupStats>,
 
     /// Precomputed thresholds per bin for flushing and eviction
     /// None for Minimal/InMemOnly, Some(threshold_entries_per_bin) for Threshold
     pub(super) threshold_entries_per_bin: Option<ThresholdEntriesPerBin>,
+
+    /// When true, the flush/eviction loop is a no-op. Used when the bin store manages
+    /// its own memory (e.g. RocksDB), so in-memory eviction is unnecessary.
+    pub disable_eviction: bool,
 }
 
 impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> Debug for BucketMapHolder<T, U> {
@@ -110,6 +106,9 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> BucketMapHolder<T, U>
 
     /// Check if flushing to disk should occur based on entry count threshold per bin
     pub fn should_flush(&self, entries_in_bin: usize) -> bool {
+        if self.disable_eviction {
+            return false;
+        }
         match &self.threshold_entries_per_bin {
             None => self.is_disk_index_enabled(),
             Some(threshold_entries_per_bin) => {
@@ -166,40 +165,6 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> BucketMapHolder<T, U>
     fn has_age_interval_elapsed(&self) -> bool {
         // note that when this returns true, state of age_timer is modified
         self.age_timer.should_update(self.age_interval_ms())
-    }
-
-    /// used by bg processes to determine # active threads and how aggressively to flush
-    pub fn get_startup(&self) -> bool {
-        self.startup.load(Ordering::Relaxed)
-    }
-
-    /// startup=true causes:
-    ///      in mem to act in a way that flushes to disk asap
-    /// startup=false is 'normal' operation
-    pub fn set_startup(&self, value: bool) {
-        if !value {
-            self.wait_for_idle();
-        }
-        self.startup.store(value, Ordering::Relaxed)
-    }
-
-    /// return when the bg threads have reached an 'idle' state
-    pub fn wait_for_idle(&self) {
-        assert!(self.get_startup());
-        if !self.is_disk_index_enabled() {
-            return;
-        }
-
-        let start_age = self.current_age();
-        loop {
-            self.wait_dirty_or_aged
-                .wait_timeout(Duration::from_millis(self.age_interval_ms()));
-            // when age has incremented twice or more from the starting age, we know that we have
-            // made it through scanning all bins since we started waiting, so we are then 'idle'
-            if self.current_age().wrapping_sub(start_age) > 1 {
-                break;
-            }
-        }
     }
 
     pub fn current_age(&self) -> Age {
@@ -340,11 +305,10 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> BucketMapHolder<T, U>
             age_ms,
             age_timer: AtomicInterval::default(),
             bins,
-            startup: AtomicBool::default(),
             threads,
             _phantom: PhantomData,
-            startup_stats: Arc::default(),
             threshold_entries_per_bin,
+            disable_eviction: config.disable_eviction,
         }
     }
 

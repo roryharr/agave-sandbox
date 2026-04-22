@@ -3,9 +3,8 @@ use solana_hash::Hash;
 use {
     crate::bank::{Bank, BankFieldsToSerialize, BankHashStats, BankSlotDelta},
     agave_snapshots::{SnapshotArchiveKind, SnapshotKind, snapshot_hash::SnapshotHash},
-    solana_accounts_db::account_storage_entry::AccountStorageEntry,
     solana_clock::Slot,
-    std::{sync::Arc, time::Instant},
+    std::time::Instant,
 };
 
 mod compare;
@@ -16,7 +15,6 @@ pub struct SnapshotPackage {
     pub snapshot_kind: SnapshotKind,
     pub slot: Slot,
     pub hash: SnapshotHash,
-    pub snapshot_storages: Vec<Arc<AccountStorageEntry>>,
     pub bank_snapshot_package: BankSnapshotPackage,
 
     /// The instant this snapshot package was sent to the queue.
@@ -28,7 +26,6 @@ impl SnapshotPackage {
     pub fn new(
         snapshot_kind: SnapshotKind,
         bank: &Bank,
-        snapshot_storages: Vec<Arc<AccountStorageEntry>>,
         status_cache_slot_deltas: Vec<BankSlotDelta>,
     ) -> Self {
         let slot = bank.slot();
@@ -56,7 +53,6 @@ impl SnapshotPackage {
             slot,
             hash,
             bank_snapshot_package,
-            snapshot_storages,
             enqueued: Instant::now(),
         }
     }
@@ -77,7 +73,6 @@ impl SnapshotPackage {
             snapshot_kind: SnapshotKind::Archive(SnapshotArchiveKind::Full),
             slot: Slot::default(),
             hash: SnapshotHash(Hash::default()),
-            snapshot_storages: Vec::default(),
             bank_snapshot_package,
             enqueued: Instant::now(),
         }

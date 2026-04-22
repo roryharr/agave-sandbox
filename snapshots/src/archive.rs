@@ -5,27 +5,20 @@ use {
     },
     agave_fs::buffered_writer::large_file_buf_writer,
     log::info,
-    solana_accounts_db::{
-        account_storage::AccountStoragesOrderer, account_storage_entry::AccountStorageEntry,
-        account_storage_reader::AccountStorageReader, accounts_file::AccountsFile,
-    },
+    solana_accounts_db::accounts_db::AccountsDb,
     solana_clock::Slot,
     solana_measure::measure::Measure,
     solana_metrics::datapoint_info,
-    std::{fs, io::Write, path::Path, sync::Arc},
+    std::{fs, io::Write, path::Path},
 };
-
-// Balance large and small files order in snapshot tar with bias towards small (4 small + 1 large),
-// such that during unpacking large writes are mixed with file metadata operations
-// and towards the end of archive (sizes equalize) writes are >256KiB / file.
-const INTERLEAVE_TAR_ENTRIES_SMALL_TO_LARGE_RATIO: (usize, usize) = (4, 1);
 
 /// Archives a snapshot into `archive_path`
 pub fn archive_snapshot(
     snapshot_archive_kind: SnapshotArchiveKind,
     snapshot_slot: Slot,
     snapshot_hash: SnapshotHash,
-    snapshot_storages: &[Arc<AccountStorageEntry>],
+    base_slot: Option<Slot>,
+    accounts_db: &AccountsDb,
     bank_snapshot_dir: impl AsRef<Path>,
     archive_path: impl AsRef<Path>,
     archive_format: ArchiveFormat,
@@ -111,28 +104,21 @@ pub fn archive_snapshot(
                 .append_dir_all(paths::BANK_SNAPSHOTS_DIR, &staging_snapshots_dir)
                 .map_err(E::ArchiveSnapshotsDir)?;
 
-            let storages_orderer = AccountStoragesOrderer::with_small_to_large_ratio(
-                snapshot_storages,
-                INTERLEAVE_TAR_ENTRIES_SMALL_TO_LARGE_RATIO,
-            );
-            for storage in storages_orderer.iter() {
-                let path_in_archive = Path::new(ACCOUNTS_DIR)
-                    .join(AccountsFile::file_name(storage.slot(), storage.id()));
-
-                let reader =
-                    AccountStorageReader::new(storage, Some(snapshot_slot)).map_err(|err| {
-                        E::AccountStorageReaderError(err, storage.path().to_path_buf())
-                    })?;
-                let mut header = tar::Header::new_gnu();
-                header.set_path(path_in_archive).map_err(|err| {
-                    E::ArchiveAccountStorageFile(err, storage.path().to_path_buf())
-                })?;
-                header.set_size(reader.len() as u64);
-                header.set_cksum();
-                archive.append(&header, reader).map_err(|err| {
-                    E::ArchiveAccountStorageFile(err, storage.path().to_path_buf())
-                })?;
-            }
+            accounts_db
+                .write_snapshot_archive_entries(
+                    base_slot,
+                    snapshot_slot,
+                    |filename, reader, len| {
+                        let path_in_archive = Path::new(ACCOUNTS_DIR).join(filename);
+                        let mut header = tar::Header::new_gnu();
+                        header.set_path(&path_in_archive)?;
+                        header.set_size(len);
+                        header.set_cksum();
+                        archive.append(&header, reader)?;
+                        Ok(())
+                    },
+                )
+                .map_err(E::ArchiveStorages)?;
 
             archive.into_inner().map_err(E::FinishArchive)?;
             Ok(())

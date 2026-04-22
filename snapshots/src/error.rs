@@ -3,7 +3,9 @@ use {
     agave_fs::FileInfo,
     crossbeam_channel::SendError,
     semver::Version,
-    solana_accounts_db::{accounts_db::AccountsFileId, accounts_file::AccountsFileError},
+    solana_accounts_db::{
+        StorageRestoreError, accounts_db::AccountsFileId, accounts_file::AccountsFileError,
+    },
     solana_clock::{Epoch, Slot},
     std::{io, ops::RangeInclusive, path::PathBuf, process::ExitStatus},
     thiserror::Error,
@@ -104,6 +106,21 @@ pub enum SnapshotError {
 
     #[error("capitalization mismatch: expected: {0}, calculated: {1}")]
     MismatchedCapitalization(u64, u64),
+}
+
+impl From<StorageRestoreError> for SnapshotError {
+    fn from(err: StorageRestoreError) -> Self {
+        match err {
+            StorageRestoreError::MismatchedId { expected, found } => {
+                Self::MismatchedAccountsFileId(expected, found)
+            }
+            StorageRestoreError::DuplicateSlot { slot } => {
+                Self::RebuildStorages(format!("duplicate storage entry for slot {slot}"))
+            }
+            StorageRestoreError::AccountsFile(e) => Self::AccountsFileError(e),
+            StorageRestoreError::Io(e) => Self::Io(e),
+        }
+    }
 }
 
 impl From<SendError<FileInfo>> for SnapshotError {
@@ -271,6 +288,9 @@ pub enum ArchiveSnapshotPackageError {
 
     #[error("failed to create account storage reader '{1}': {0}")]
     AccountStorageReaderError(#[source] io::Error, PathBuf),
+
+    #[error("failed to archive account storages: {0}")]
+    ArchiveStorages(#[source] io::Error),
 }
 
 /// Errors that can happen in `hard_link_storages_to_snapshot()`

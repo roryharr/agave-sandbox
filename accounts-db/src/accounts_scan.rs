@@ -5,7 +5,7 @@ use {
         collections::{HashSet, btree_map::BTreeMap},
         sync::{
             Arc, Mutex, RwLock,
-            atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+            atomic::{AtomicBool, AtomicUsize, Ordering},
         },
     },
     thiserror::Error,
@@ -72,8 +72,6 @@ pub struct ScanTracker {
     pub removed_bank_ids: Mutex<HashSet<BankId>>,
     /// # scans active currently
     pub active_scans: AtomicUsize,
-    /// # of slots between latest max and latest scan
-    pub max_distance_to_min_scan_slot: AtomicU64,
 }
 
 impl ScanTracker {
@@ -130,16 +128,6 @@ impl<'a> ScanGuard<'a> {
             // make sure inverse doesn't happen to avoid
             // deadlock
             let max_root_inclusive = max_root_inclusive_fn();
-            if let Some(min_ongoing_scan_root) =
-                ScanTracker::min_ongoing_scan_root_from_btree(&w_ongoing_scan_roots)
-            {
-                if min_ongoing_scan_root < max_root_inclusive {
-                    let current = max_root_inclusive - min_ongoing_scan_root;
-                    scan_tracker
-                        .max_distance_to_min_scan_slot
-                        .fetch_max(current, Ordering::Relaxed);
-                }
-            }
             *w_ongoing_scan_roots.entry(max_root_inclusive).or_default() += 1;
             max_root_inclusive
         };

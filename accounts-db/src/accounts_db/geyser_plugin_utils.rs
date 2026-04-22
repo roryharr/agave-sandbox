@@ -102,50 +102,46 @@ mod tests {
         let key2 = Pubkey::new_unique();
         let account = AccountSharedData::new(1, 0, &Pubkey::default());
 
-        // Account with key1 is updated twice in two different slots, should get notified twice
-        // Need to add root and flush write cache for each slot to ensure accounts are written
-        // to correct slots. Cache flush can skip writes if accounts have already been written to
-        // a newer slot
+        // Populate slots with accounts via the write cache, then flush each
+        // slot to backend storage. We do NOT set the Geyser notifier until after
+        // the stores+flushes are done, so the runtime store path doesn't fire any
+        // notifications. The test then verifies that `generate_index` (the
+        // restore-from-snapshot path) emits the expected notifications.
+        //
+        // The snapshot-restore Geyser stream emits one notification per *live*
+        // pubkey at its latest slot, so an older copy of key1 at slot0 is not
+        // re-notified once a newer copy at slot1 supersedes it.
+        let flush_no_clean = |slot| {
+            accounts_db.add_root(slot);
+            accounts_db.flush_accounts_cache_slot_for_tests(slot);
+        };
+
+        // Account with key1 is stored twice; only the latest (slot1) is notified.
         let slot0 = 0;
-        let storage0 = accounts_db.create_and_insert_store(slot0, /*size*/ 4_096, "");
-        storage0
-            .accounts
-            .write_accounts(&(slot0, [(&key1, &account)].as_slice()), /*skip*/ 0);
+        accounts_db.store_for_tests((slot0, [(&key1, &account)].as_slice()));
+        flush_no_clean(slot0);
 
         let slot1 = 1;
-        let storage1 = accounts_db.create_and_insert_store(slot1, /*size*/ 4_096, "");
-        storage1
-            .accounts
-            .write_accounts(&(slot1, [(&key1, &account)].as_slice()), /*skip*/ 0);
+        accounts_db.store_for_tests((slot1, [(&key1, &account)].as_slice()));
+        flush_no_clean(slot1);
 
-        // Account with key2 is updated in a single slot, should get notified once
+        // Account with key2 is updated in a single slot, should get notified once.
         let slot2 = 2;
-        let storage2 = accounts_db.create_and_insert_store(slot2, /*size*/ 4_096, "");
-        storage2
-            .accounts
-            .write_accounts(&(slot2, [(&key2, &account)].as_slice()), /*skip*/ 0);
+        accounts_db.store_for_tests((slot2, [(&key2, &account)].as_slice()));
+        flush_no_clean(slot2);
 
-        // Do the notification
+        // Set notifier AFTER stores so the write path doesn't fire notifications,
+        // then trigger the snapshot-restore Geyser path via generate_index.
         let notifier = GeyserTestPlugin::default();
         let notifier = Arc::new(notifier);
         accounts_db.set_geyser_plugin_notifier(Some(notifier.clone()));
         accounts_db.generate_index(None, false);
 
-        // Ensure key1 was notified twice in different slots
+        // Ensure key1 was notified once at the latest slot (slot1).
         {
             let notified_key1 = notifier.accounts_notified.get(&key1).unwrap();
-            assert_eq!(notified_key1.len(), 2);
-
-            // Since index generation goes through storages in parallel, there's not a
-            // deterministic order for which slots will notify first.
-            // So, we sort the accounts_notified values to ensure we can assert correctly.
-            let mut notified_key1_values = notified_key1.value().clone();
-            notified_key1_values.sort_unstable_by_key(|k| k.0);
-
-            let (slot, write_version, _account) = &notified_key1_values[0];
-            assert_eq!(*slot, slot0);
-            assert_eq!(*write_version, 0);
-            let (slot, write_version, _account) = &notified_key1_values[1];
+            assert_eq!(notified_key1.len(), 1);
+            let (slot, write_version, _account) = &notified_key1.value()[0];
             assert_eq!(*slot, slot1);
             assert_eq!(*write_version, 0);
         }

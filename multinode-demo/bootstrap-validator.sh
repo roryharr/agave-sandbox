@@ -85,7 +85,7 @@ while [[ -n $1 ]]; do
     elif [[ $1 == --no-snapshot-fetch ]]; then
       args+=("$1")
       shift
-    elif [[ $1 == --accounts-db-skip-shrink ]]; then
+    elif [[ $1 == --accounts-db-skip-initial-clean ]]; then
       args+=("$1")
       shift
     elif [[ $1 == --skip-require-tower ]]; then

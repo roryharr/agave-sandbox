@@ -8,13 +8,13 @@ use {
         bank::{Bank, BankFieldsToDeserialize, BankFieldsToSerialize, BankHashStats, BankRc},
         epoch_stakes::{DeserializableVersionedEpochStakes, VersionedEpochStakes},
         runtime_config::RuntimeConfig,
-        snapshot_utils::StorageAndNextAccountsFileId,
         stake_account::StakeAccount,
         stakes::{DeserializableStakes, Stakes, serialize_stake_accounts_to_delegation_format},
     },
     agave_fs::FileInfo,
     agave_snapshots::error::SnapshotError,
     bincode::{self, Error, config::Options},
+    dashmap::DashMap,
     log::*,
     serde::{Deserialize, Serialize, de::DeserializeOwned},
     smallvec::SmallVec,
@@ -29,6 +29,7 @@ use {
         accounts_hash::AccountsLtHash,
         accounts_update_notifier_interface::AccountsUpdateNotifier,
         blockhash_queue::BlockhashQueue,
+        reconstruct_single_storage,
     },
     solana_clock::{Epoch, Slot, UnixTimestamp},
     solana_epoch_schedule::EpochSchedule,
@@ -39,7 +40,6 @@ use {
     solana_inflation::Inflation,
     solana_lattice_hash::lt_hash::LtHash,
     solana_leader_schedule::SlotLeader,
-    solana_measure::measure::Measure,
     solana_pubkey::Pubkey,
     solana_serde::default_on_eof,
     solana_stake_interface::state::Delegation,
@@ -55,7 +55,6 @@ use {
         thread,
         time::Instant,
     },
-    storage::SerializableStorage,
     types::{SerdeAccountsLtHash, UnusedRentCollector},
     wincode::{SchemaReadOwned, SchemaWrite, io::std_write::WriteAdapter},
 };
@@ -78,6 +77,7 @@ type MaxStreamSizeConfig = wincode::config::Configuration<true, MAX_STREAM_SIZE>
 
 #[cfg_attr(feature = "frozen-abi", derive(AbiExample))]
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 pub(crate) struct AccountsDbFields<T>(
     Vec<(Slot, SmallVec<[T; 1]>)>,
     u64, // unused, formerly write_version
@@ -90,38 +90,6 @@ pub(crate) struct AccountsDbFields<T>(
     #[serde(deserialize_with = "default_on_eof")]
     Vec<(Slot, Hash)>,
 );
-
-impl<T: SerializableStorage> AccountsDbFields<T> {
-    /// Get snapshot storage lengths filtering to slots above base slot (if provided).
-    ///
-    /// Returns an error if storage slots exceed snapshot slot indicating inconsistency of data.
-    pub(crate) fn get_storage_lengths_for_snapshot_slots(
-        &self,
-        base_slot: Option<Slot>,
-    ) -> Result<HashMap<Slot, usize>, SnapshotError> {
-        let AccountsDbFields(snapshot_storage, _, snapshot_slot, ..) = self;
-        let filtered_min_slot = base_slot.map(|slot| slot + 1).unwrap_or(Slot::MIN);
-        let mut lengths = HashMap::with_capacity(snapshot_storage.len());
-
-        for (slot, slot_storage) in snapshot_storage {
-            if slot > snapshot_slot {
-                return Err(SnapshotError::MismatchedSnapshotStorageSlot(
-                    *slot,
-                    *snapshot_slot,
-                ));
-            }
-            if *slot < filtered_min_slot {
-                // Serialized bank includes storage mapping for all slots, but it might be used for
-                // rebuilding storages only up from `base_slot`, so this case is not an error.
-                continue;
-            }
-            assert_eq!(slot_storage.len(), 1, "invalid storage count (slot={slot})");
-            let storage_entry = &slot_storage[0];
-            lengths.insert(*slot, storage_entry.current_len());
-        }
-        Ok(lengths)
-    }
-}
 
 #[cfg_attr(feature = "frozen-abi", derive(AbiExample))]
 #[cfg_attr(feature = "dev-context-only-utils", derive(Default, PartialEq))]
@@ -137,8 +105,8 @@ pub struct UnusedIncrementalSnapshotPersistence {
 #[cfg_attr(feature = "frozen-abi", derive(AbiExample))]
 #[derive(Clone, Default, Debug, Serialize, Deserialize, PartialEq, Eq)]
 struct BankHashInfo {
-    unused_accounts_delta_hash: [u8; 32],
-    unused_accounts_hash: [u8; 32],
+    _unused_accounts_delta_hash: [u8; 32],
+    _unused_accounts_hash: [u8; 32],
     stats: BankHashStats,
 }
 
@@ -221,7 +189,6 @@ impl From<DeserializableVersionedBank> for BankFieldsToDeserialize {
             is_delta: dvb.is_delta,
             versioned_epoch_stakes: vec![], // populated from ExtraFieldsToDeserialize
             accounts_lt_hash: AccountsLtHash(LT_HASH_CANARY), // populated from ExtraFieldsToDeserialize
-            bank_hash_stats: BankHashStats::default(),        // populated from AccountsDbFields
             block_id: None, // populated from ExtraFieldsToDeserialize
         }
     }
@@ -337,44 +304,6 @@ impl SnapshotBankFields {
     }
 }
 
-/// Helper type to wrap AccountsDbFields when reconstructing AccountsDb from either just a full
-/// snapshot, or both a full and incremental snapshot
-#[derive(Debug)]
-pub struct SnapshotAccountsDbFields<T> {
-    full_snapshot_accounts_db_fields: AccountsDbFields<T>,
-    incremental_snapshot_accounts_db_fields: Option<AccountsDbFields<T>>,
-}
-
-impl<T> SnapshotAccountsDbFields<T> {
-    pub(crate) fn new(
-        full_snapshot_accounts_db_fields: AccountsDbFields<T>,
-        incremental_snapshot_accounts_db_fields: Option<AccountsDbFields<T>>,
-    ) -> Self {
-        Self {
-            full_snapshot_accounts_db_fields,
-            incremental_snapshot_accounts_db_fields,
-        }
-    }
-
-    /// Extract final bank hash info from full and incremental accounts db fields.
-    ///
-    /// If there is no incremental snapshot, this returns the field from the full snapshot.
-    /// Otherwise, gets it from the incremental snapshot.
-    fn into_bank_hash_info(self) -> BankHashInfo {
-        let AccountsDbFields(
-            _snapshot_storages,
-            _snapshot_write_version,
-            _snapshot_slot,
-            snapshot_bank_hash_info,
-            _snapshot_historical_roots,
-            _snapshot_historical_roots_with_hash,
-        ) = self
-            .incremental_snapshot_accounts_db_fields
-            .unwrap_or(self.full_snapshot_accounts_db_fields);
-        snapshot_bank_hash_info
-    }
-}
-
 pub(crate) fn serialize_into<W, T>(writer: W, value: &T) -> wincode::WriteResult<()>
 where
     W: Write,
@@ -455,13 +384,7 @@ pub struct ExtraFieldsToSerialize {
 
 fn deserialize_bank_fields<R>(
     mut stream: &mut BufReader<R>,
-) -> Result<
-    (
-        BankFieldsToDeserialize,
-        AccountsDbFields<SerializableAccountStorageEntry>,
-    ),
-    Error,
->
+) -> Result<BankFieldsToDeserialize, Error>
 where
     R: Read,
 {
@@ -472,10 +395,10 @@ where
         )));
     }
     let mut bank_fields = BankFieldsToDeserialize::from(deserializable_bank);
-    let accounts_db_fields = deserialize_accounts_db_fields(stream)?;
+    // Must deserialize to advance the stream past accounts db fields before reading extra fields.
+    let _accounts_db_fields = deserialize_accounts_db_fields(stream)?;
     let extra_fields = deserialize_from(stream)?;
 
-    // Process extra fields
     let ExtraFieldsToDeserialize {
         lamports_per_signature,
         _unused_incremental_snapshot_persistence,
@@ -494,50 +417,30 @@ where
         .into();
     bank_fields.block_id = block_id;
 
-    Ok((bank_fields, accounts_db_fields))
+    Ok(bank_fields)
 }
 
 pub(crate) fn fields_from_stream<R: Read>(
     snapshot_stream: &mut BufReader<R>,
-) -> std::result::Result<
-    (
-        BankFieldsToDeserialize,
-        AccountsDbFields<SerializableAccountStorageEntry>,
-    ),
-    Error,
-> {
+) -> std::result::Result<BankFieldsToDeserialize, Error> {
     deserialize_bank_fields(snapshot_stream)
 }
 
 #[cfg(feature = "dev-context-only-utils")]
 pub(crate) fn fields_from_streams(
     snapshot_streams: &mut SnapshotStreams<impl Read>,
-) -> std::result::Result<
-    (
-        SnapshotBankFields,
-        SnapshotAccountsDbFields<SerializableAccountStorageEntry>,
-    ),
-    Error,
-> {
-    let (full_snapshot_bank_fields, full_snapshot_accounts_db_fields) =
-        fields_from_stream(snapshot_streams.full_snapshot_stream)?;
-    let (incremental_snapshot_bank_fields, incremental_snapshot_accounts_db_fields) =
-        snapshot_streams
-            .incremental_snapshot_stream
-            .as_mut()
-            .map(|stream| fields_from_stream(stream))
-            .transpose()?
-            .unzip();
+) -> std::result::Result<SnapshotBankFields, Error> {
+    let full_snapshot_bank_fields = fields_from_stream(snapshot_streams.full_snapshot_stream)?;
+    let incremental_snapshot_bank_fields = snapshot_streams
+        .incremental_snapshot_stream
+        .as_mut()
+        .map(|stream| fields_from_stream(stream))
+        .transpose()?;
 
-    let snapshot_bank_fields = SnapshotBankFields {
+    Ok(SnapshotBankFields {
         full: full_snapshot_bank_fields,
         incremental: incremental_snapshot_bank_fields,
-    };
-    let snapshot_accounts_db_fields = SnapshotAccountsDbFields {
-        full_snapshot_accounts_db_fields,
-        incremental_snapshot_accounts_db_fields,
-    };
-    Ok((snapshot_bank_fields, snapshot_accounts_db_fields))
+    })
 }
 
 /// This struct contains side-info while reconstructing the bank from streams
@@ -553,7 +456,6 @@ pub struct BankFromStreamsInfo {
 pub(crate) fn bank_from_streams<R>(
     snapshot_streams: &mut SnapshotStreams<R>,
     account_paths: &[PathBuf],
-    storage_and_next_append_vec_id: StorageAndNextAccountsFileId,
     genesis_config: &GenesisConfig,
     runtime_config: &RuntimeConfig,
     debug_keys: Option<Arc<HashSet<Pubkey>>>,
@@ -566,14 +468,13 @@ pub(crate) fn bank_from_streams<R>(
 where
     R: Read,
 {
-    let (bank_fields, accounts_db_fields) = fields_from_streams(snapshot_streams)?;
+    let bank_fields = fields_from_streams(snapshot_streams)?;
     let (bank, info) = reconstruct_bank_from_fields(
         bank_fields,
-        accounts_db_fields,
         genesis_config,
         runtime_config,
         account_paths,
-        storage_and_next_append_vec_id,
+        None, // obsolete_accounts — archive path has none
         debug_keys,
         None, // leader_for_tests
         limit_load_slot_count_from_snapshot,
@@ -591,21 +492,11 @@ where
 }
 
 #[cfg(test)]
-pub(crate) fn bank_to_stream<W>(
-    stream: &mut io::BufWriter<W>,
-    bank: &Bank,
-    snapshot_storages: &[Arc<AccountStorageEntry>],
-) -> Result<(), Error>
+pub(crate) fn bank_to_stream<W>(stream: &mut io::BufWriter<W>, bank: &Bank) -> Result<(), Error>
 where
     W: Write,
 {
-    bincode::serialize_into(
-        stream,
-        &SerializableBankAndStorage {
-            bank,
-            snapshot_storages,
-        },
-    )
+    bincode::serialize_into(stream, &SerializableBankAndStorage { bank })
 }
 
 /// Serializes bank snapshot into `stream` with bincode
@@ -613,20 +504,13 @@ pub fn serialize_bank_snapshot_into(
     stream: &mut dyn Write,
     bank_fields: BankFieldsToSerialize,
     bank_hash_stats: BankHashStats,
-    account_storage_entries: &[Arc<AccountStorageEntry>],
     extra_fields: ExtraFieldsToSerialize,
 ) -> Result<(), Error> {
     let mut serializer = bincode::Serializer::new(
         stream,
         bincode::DefaultOptions::new().with_fixint_encoding(),
     );
-    serialize_bank_snapshot_with(
-        &mut serializer,
-        bank_fields,
-        bank_hash_stats,
-        account_storage_entries,
-        extra_fields,
-    )
+    serialize_bank_snapshot_with(&mut serializer, bank_fields, bank_hash_stats, extra_fields)
 }
 
 /// Serializes bank snapshot with `serializer`
@@ -634,7 +518,6 @@ pub fn serialize_bank_snapshot_with<S>(
     serializer: S,
     bank_fields: BankFieldsToSerialize,
     bank_hash_stats: BankHashStats,
-    account_storage_entries: &[Arc<AccountStorageEntry>],
     extra_fields: ExtraFieldsToSerialize,
 ) -> Result<S::Ok, S::Error>
 where
@@ -642,9 +525,8 @@ where
 {
     let slot = bank_fields.slot;
     let serializable_bank = SerializableVersionedBank::from(bank_fields);
-    let serializable_accounts_db = SerializableAccountsDb::<'_> {
+    let serializable_accounts_db = SerializableAccountsDb {
         slot,
-        account_storage_entries,
         bank_hash_stats,
     };
     (serializable_bank, serializable_accounts_db, extra_fields).serialize(serializer)
@@ -653,7 +535,6 @@ where
 #[cfg(test)]
 struct SerializableBankAndStorage<'a> {
     bank: &'a Bank,
-    snapshot_storages: &'a [Arc<AccountStorageEntry>],
 }
 
 #[cfg(test)]
@@ -669,11 +550,10 @@ impl Serialize for SerializableBankAndStorage<'_> {
         let versioned_epoch_stakes = std::mem::take(&mut bank_fields.versioned_epoch_stakes);
         let accounts_lt_hash = Some(bank_fields.accounts_lt_hash.clone().into());
         let block_id = Some(bank_fields.block_id);
-        let bank_fields_to_serialize = (
+        (
             SerializableVersionedBank::from(bank_fields),
-            SerializableAccountsDb::<'_> {
+            SerializableAccountsDb {
                 slot,
-                account_storage_entries: self.snapshot_storages,
                 bank_hash_stats,
             },
             ExtraFieldsToSerialize {
@@ -684,15 +564,14 @@ impl Serialize for SerializableBankAndStorage<'_> {
                 accounts_lt_hash,
                 block_id,
             },
-        );
-        bank_fields_to_serialize.serialize(serializer)
+        )
+            .serialize(serializer)
     }
 }
 
 #[cfg(test)]
 struct SerializableBankAndStorageNoExtra<'a> {
     bank: &'a Bank,
-    snapshot_storages: &'a [Arc<AccountStorageEntry>],
 }
 
 #[cfg(test)]
@@ -706,9 +585,8 @@ impl Serialize for SerializableBankAndStorageNoExtra<'_> {
         let bank_hash_stats = self.bank.get_bank_hash_stats();
         (
             SerializableVersionedBank::from(bank_fields),
-            SerializableAccountsDb::<'_> {
+            SerializableAccountsDb {
                 slot,
-                account_storage_entries: self.snapshot_storages,
                 bank_hash_stats,
             },
         )
@@ -719,49 +597,30 @@ impl Serialize for SerializableBankAndStorageNoExtra<'_> {
 #[cfg(test)]
 impl<'a> From<SerializableBankAndStorageNoExtra<'a>> for SerializableBankAndStorage<'a> {
     fn from(s: SerializableBankAndStorageNoExtra<'a>) -> SerializableBankAndStorage<'a> {
-        let SerializableBankAndStorageNoExtra {
-            bank,
-            snapshot_storages,
-        } = s;
-        SerializableBankAndStorage {
-            bank,
-            snapshot_storages,
-        }
+        SerializableBankAndStorage { bank: s.bank }
     }
 }
 
-struct SerializableAccountsDb<'a> {
+struct SerializableAccountsDb {
     slot: Slot,
-    account_storage_entries: &'a [Arc<AccountStorageEntry>],
     bank_hash_stats: BankHashStats,
 }
 
-impl Serialize for SerializableAccountsDb<'_> {
+impl Serialize for SerializableAccountsDb {
     fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
     where
         S: serde::ser::Serializer,
     {
-        // (1st of 3 elements) write the list of account storage entry lists out as a map
-        let entries = utils::serialize_iter_as_map(self.account_storage_entries.iter().map(|x| {
-            (
-                x.slot(),
-                utils::serialize_iter_as_seq(
-                    [x].into_iter()
-                        .map(|x| SerializableAccountStorageEntry::new(x, self.slot)),
-                ),
-            )
-        }));
+        // Always serialize an empty storage map — the load path scans account_paths directly.
+        let entries = utils::serialize_iter_as_map(std::iter::empty::<(Slot, ())>());
         let bank_hash_info = BankHashInfo {
-            unused_accounts_delta_hash: [0; 32],
-            unused_accounts_hash: [0; 32],
+            _unused_accounts_delta_hash: [0; 32],
+            _unused_accounts_hash: [0; 32],
             stats: self.bank_hash_stats.clone(),
         };
-
         let historical_roots = Vec::<Slot>::default();
         let historical_roots_with_hash = Vec::<(Slot, Hash)>::default();
-
-        let mut serialize_account_storage_timer = Measure::start("serialize_account_storage_ms");
-        let result = (
+        (
             entries,
             0u64, // unused, formerly write_version
             self.slot,
@@ -769,19 +628,12 @@ impl Serialize for SerializableAccountsDb<'_> {
             historical_roots,
             historical_roots_with_hash,
         )
-            .serialize(serializer);
-        serialize_account_storage_timer.stop();
-        datapoint_info!(
-            "serialize_account_storage_ms",
-            ("duration", serialize_account_storage_timer.as_ms(), i64),
-            ("num_entries", self.account_storage_entries.len(), i64),
-        );
-        result
+            .serialize(serializer)
     }
 }
 
 #[cfg(feature = "frozen-abi")]
-impl solana_frozen_abi::abi_example::TransparentAsHelper for SerializableAccountsDb<'_> {}
+impl solana_frozen_abi::abi_example::TransparentAsHelper for SerializableAccountsDb {}
 
 /// This struct contains side-info while reconstructing the bank from fields
 #[derive(Debug)]
@@ -794,13 +646,12 @@ pub(crate) struct ReconstructedBankInfo {
 }
 
 #[expect(clippy::too_many_arguments)]
-pub(crate) fn reconstruct_bank_from_fields<E>(
+pub(crate) fn reconstruct_bank_from_fields(
     bank_fields: SnapshotBankFields,
-    snapshot_accounts_db_fields: SnapshotAccountsDbFields<E>,
     genesis_config: &GenesisConfig,
     runtime_config: &RuntimeConfig,
     account_paths: &[PathBuf],
-    storage_and_next_append_vec_id: StorageAndNextAccountsFileId,
+    obsolete_accounts: Option<DashMap<Slot, (ObsoleteAccounts, AccountsFileId)>>,
     debug_keys: Option<Arc<HashSet<Pubkey>>>,
     leader_for_tests: Option<SlotLeader>,
     limit_load_slot_count_from_snapshot: Option<usize>,
@@ -808,10 +659,7 @@ pub(crate) fn reconstruct_bank_from_fields<E>(
     accounts_db_config: AccountsDbConfig,
     accounts_update_notifier: Option<AccountsUpdateNotifier>,
     exit: Arc<AtomicBool>,
-) -> Result<(Bank, ReconstructedBankInfo), Error>
-where
-    E: SerializableStorage + std::marker::Sync,
-{
+) -> Result<(Bank, ReconstructedBankInfo), Error> {
     let mut bank_fields = bank_fields.collapse_into();
     // Epoch stakes take several seconds to reconstruct, do it in parallel with loading accountsdb
     let deserializable_epoch_stakes = std::mem::take(&mut bank_fields.versioned_epoch_stakes);
@@ -824,16 +672,14 @@ where
                 .collect()
         })?;
     let (accounts_db, reconstructed_accounts_db_info) = reconstruct_accountsdb_from_fields(
-        snapshot_accounts_db_fields,
         account_paths,
-        storage_and_next_append_vec_id,
+        obsolete_accounts,
         limit_load_slot_count_from_snapshot,
         verify_index,
         accounts_db_config,
         accounts_update_notifier,
         exit,
     )?;
-    bank_fields.bank_hash_stats = reconstructed_accounts_db_info.bank_hash_stats;
 
     let bank_rc = BankRc::new(Accounts::new(Arc::new(accounts_db)));
     let runtime_config = Arc::new(runtime_config.clone());
@@ -859,39 +705,20 @@ where
     ))
 }
 
-pub(crate) fn reconstruct_single_storage(
-    slot: &Slot,
+pub(crate) fn reconstruct_single_storage_for_snapshot(
+    slot: Slot,
     append_vec_file_info: FileInfo,
-    current_len: usize,
     id: AccountsFileId,
     storage_access: StorageAccess,
-    obsolete_accounts: Option<(ObsoleteAccounts, AccountsFileId, usize)>,
+    obsolete_accounts: Option<(ObsoleteAccounts, AccountsFileId)>,
 ) -> Result<Arc<AccountStorageEntry>, SnapshotError> {
-    // When restoring from an archive, obsolete accounts will always be `None`
-    // When restoring from fastboot, obsolete accounts will be 'Some' if the storage contained
-    // accounts marked obsolete at the time the snapshot was taken.
-    let (current_len, obsolete_accounts) = if let Some(obsolete_accounts) = obsolete_accounts {
-        let updated_len = current_len + obsolete_accounts.2;
-        if obsolete_accounts.1 != id {
-            return Err(SnapshotError::MismatchedAccountsFileId(
-                id,
-                obsolete_accounts.1,
-            ));
-        }
-
-        (updated_len, obsolete_accounts.0)
-    } else {
-        (current_len, ObsoleteAccounts::default())
-    };
-
-    let accounts_file =
-        AccountsFile::new_for_startup(append_vec_file_info, current_len, storage_access)?;
-    Ok(Arc::new(AccountStorageEntry::new_existing(
-        *slot,
+    Ok(reconstruct_single_storage(
+        slot,
+        append_vec_file_info,
         id,
-        accounts_file,
+        storage_access,
         obsolete_accounts,
-    )))
+    )?)
 }
 
 // Remap the AppendVec ID to handle any duplicate IDs that may previously existed
@@ -979,7 +806,6 @@ pub(crate) fn remap_append_vec_file(
 pub(crate) fn remap_and_reconstruct_single_storage(
     slot: Slot,
     old_append_vec_id: SerializedAccountsFileId,
-    current_len: usize,
     append_vec_file_info: FileInfo,
     next_append_vec_id: &AtomicAccountsFileId,
     num_collisions: &AtomicUsize,
@@ -992,10 +818,9 @@ pub(crate) fn remap_and_reconstruct_single_storage(
         next_append_vec_id,
         num_collisions,
     )?;
-    let storage = reconstruct_single_storage(
-        &slot,
+    let storage = reconstruct_single_storage_for_snapshot(
+        slot,
         remapped_append_vec_file_info,
-        current_len,
         remapped_append_vec_id,
         storage_access,
         None,
@@ -1012,67 +837,36 @@ pub struct ReconstructedAccountsDbInfo {
     pub calculated_accounts_lt_hash: AccountsLtHash,
     /// The capitalization, in lamports, calculated during index generation.
     pub calculated_capitalization: u64,
-    pub bank_hash_stats: BankHashStats,
 }
 
-fn reconstruct_accountsdb_from_fields<E>(
-    snapshot_accounts_db_fields: SnapshotAccountsDbFields<E>,
+fn reconstruct_accountsdb_from_fields(
     account_paths: &[PathBuf],
-    storage_and_next_append_vec_id: StorageAndNextAccountsFileId,
+    obsolete_accounts: Option<DashMap<Slot, (ObsoleteAccounts, AccountsFileId)>>,
     limit_load_slot_count_from_snapshot: Option<usize>,
     verify_index: bool,
     accounts_db_config: AccountsDbConfig,
     accounts_update_notifier: Option<AccountsUpdateNotifier>,
     exit: Arc<AtomicBool>,
-) -> Result<(AccountsDb, ReconstructedAccountsDbInfo), Error>
-where
-    E: SerializableStorage + std::marker::Sync,
-{
-    let mut accounts_db = AccountsDb::new_with_config(
+) -> Result<(AccountsDb, ReconstructedAccountsDbInfo), Error> {
+    info!("Building accounts index...");
+    let start = Instant::now();
+    let (
+        accounts_db,
+        IndexGenerationInfo {
+            accounts_data_len,
+            calculated_accounts_lt_hash,
+            calculated_capitalization,
+        },
+    ) = AccountsDb::from_snapshot(
         account_paths.to_vec(),
         accounts_db_config,
         accounts_update_notifier,
         exit,
-    );
-
-    let snapshot_bank_hash_info = snapshot_accounts_db_fields.into_bank_hash_info();
-
-    // Ensure all account paths exist
-    for path in &accounts_db.paths {
-        std::fs::create_dir_all(path)
-            .unwrap_or_else(|err| panic!("Failed to create directory {}: {}", path.display(), err));
-    }
-
-    let StorageAndNextAccountsFileId {
-        storage,
-        next_append_vec_id,
-    } = storage_and_next_append_vec_id;
-
-    assert!(
-        !storage.is_empty(),
-        "At least one storage entry must exist from deserializing stream"
-    );
-
-    let next_append_vec_id = next_append_vec_id.load(Ordering::Acquire);
-    let max_append_vec_id = next_append_vec_id - 1;
-    assert!(
-        max_append_vec_id <= AccountsFileId::MAX / 2,
-        "Storage id {max_append_vec_id} larger than allowed max"
-    );
-
-    // Process deserialized data, set necessary fields in self
-    accounts_db.storage.initialize(storage);
-    accounts_db
-        .next_id
-        .store(next_append_vec_id, Ordering::Release);
-
-    info!("Building accounts index...");
-    let start = Instant::now();
-    let IndexGenerationInfo {
-        accounts_data_len,
-        calculated_accounts_lt_hash,
-        calculated_capitalization,
-    } = accounts_db.generate_index(limit_load_slot_count_from_snapshot, verify_index);
+        obsolete_accounts,
+        limit_load_slot_count_from_snapshot,
+        verify_index,
+    )
+    .map_err(|e| Box::new(bincode::ErrorKind::Custom(e.to_string())))?;
     info!("Building accounts index... Done in {:?}", start.elapsed());
 
     Ok((
@@ -1081,7 +875,6 @@ where
             accounts_data_len,
             calculated_accounts_lt_hash,
             calculated_capitalization,
-            bank_hash_stats: snapshot_bank_hash_info.stats,
         },
     ))
 }

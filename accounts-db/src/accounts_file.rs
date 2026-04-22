@@ -87,6 +87,13 @@ impl AccountsFile {
         Ok(Self::AppendVec(av))
     }
 
+    /// Prevent the underlying file from being deleted when this is dropped.
+    pub(crate) fn keep_file_on_drop(&self) {
+        match self {
+            Self::AppendVec(av) => av.keep_file_on_drop(),
+        }
+    }
+
     /// if storage is not readonly, reopen another instance that is read only
     pub(crate) fn reopen_as_readonly(&self) -> Option<Self> {
         match self {
@@ -99,6 +106,14 @@ impl AccountsFile {
     pub(crate) fn dead_bytes_due_to_zero_lamport_single_ref(&self, count: usize) -> usize {
         match self {
             Self::AppendVec(av) => av.dead_bytes_due_to_zero_lamport_single_ref(count),
+        }
+    }
+
+    /// Truncates the file on disk to the current written length.
+    /// See [`AppendVec::truncate_to_len`].
+    pub fn truncate_to_len(&self) -> std::io::Result<()> {
+        match self {
+            Self::AppendVec(av) => av.truncate_to_len(),
         }
     }
 

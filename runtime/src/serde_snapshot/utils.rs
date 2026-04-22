@@ -1,47 +1,6 @@
-use serde::{
-    Serialize, Serializer,
-    ser::{SerializeSeq, SerializeTuple},
-};
+use serde::{Serialize, Serializer, ser::SerializeTuple};
 #[cfg(all(test, feature = "frozen-abi"))]
 use solana_frozen_abi::abi_example::TransparentAsHelper;
-
-// consumes an iterator and returns an object that will serialize as a serde seq
-pub fn serialize_iter_as_seq<I>(iter: I) -> impl Serialize
-where
-    I: IntoIterator,
-    <I as IntoIterator>::Item: Serialize,
-    <I as IntoIterator>::IntoIter: ExactSizeIterator,
-{
-    struct SerializableSequencedIterator<I> {
-        iter: std::cell::RefCell<Option<I>>,
-    }
-
-    #[cfg(all(test, feature = "frozen-abi"))]
-    impl<I> TransparentAsHelper for SerializableSequencedIterator<I> {}
-
-    impl<I> Serialize for SerializableSequencedIterator<I>
-    where
-        I: IntoIterator,
-        <I as IntoIterator>::Item: Serialize,
-        <I as IntoIterator>::IntoIter: ExactSizeIterator,
-    {
-        fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-        where
-            S: Serializer,
-        {
-            let iter = self.iter.borrow_mut().take().unwrap().into_iter();
-            let mut seq = serializer.serialize_seq(Some(iter.len()))?;
-            for item in iter {
-                seq.serialize_element(&item)?;
-            }
-            seq.end()
-        }
-    }
-
-    SerializableSequencedIterator {
-        iter: std::cell::RefCell::new(Some(iter)),
-    }
-}
 
 // consumes an iterator and returns an object that will serialize as a serde tuple
 #[expect(dead_code)]

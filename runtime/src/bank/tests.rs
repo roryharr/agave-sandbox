@@ -983,14 +983,6 @@ fn test_bank_update_rewards_determinism() {
     }
 }
 
-impl VerifyAccountsHashConfig {
-    fn default_for_test() -> Self {
-        Self {
-            require_rooted_bank: false,
-        }
-    }
-}
-
 // Test that purging 0 lamports accounts works.
 #[test]
 fn test_purge_empty_accounts() {
@@ -1060,7 +1052,7 @@ fn test_purge_empty_accounts() {
 
         if pass == 0 {
             add_root_and_flush_write_cache(&bank0);
-            assert!(bank0.verify_accounts(VerifyAccountsHashConfig::default_for_test(), None));
+            assert!(bank0.verify_accounts(None));
             continue;
         }
 
@@ -1069,14 +1061,14 @@ fn test_purge_empty_accounts() {
         bank0.squash();
         add_root_and_flush_write_cache(&bank0);
         if pass == 1 {
-            assert!(bank0.verify_accounts(VerifyAccountsHashConfig::default_for_test(), None));
+            assert!(bank0.verify_accounts(None));
             continue;
         }
 
         bank1.freeze();
         bank1.squash();
         add_root_and_flush_write_cache(&bank1);
-        assert!(bank1.verify_accounts(VerifyAccountsHashConfig::default_for_test(), None));
+        assert!(bank1.verify_accounts(None));
 
         // keypair should have 0 tokens on both forks
         assert_eq!(bank0.get_account(&keypair.pubkey()), None);
@@ -1084,7 +1076,7 @@ fn test_purge_empty_accounts() {
 
         bank1.clean_accounts_for_tests();
 
-        assert!(bank1.verify_accounts(VerifyAccountsHashConfig::default_for_test(), None));
+        assert!(bank1.verify_accounts(None));
     }
 }
 
@@ -2250,7 +2242,7 @@ fn test_bank_hash_internal_state() {
     bank2.transfer(amount, &mint_keypair, &pubkey2).unwrap();
     bank2.squash();
     bank2.force_flush_accounts_cache();
-    assert!(bank2.verify_accounts(VerifyAccountsHashConfig::default_for_test(), None));
+    assert!(bank2.verify_accounts(None));
 }
 
 #[test]
@@ -2284,7 +2276,7 @@ fn test_bank_hash_internal_state_verify() {
             // we later modify bank 2, so this flush is destructive to the test
             bank2.freeze();
             add_root_and_flush_write_cache(&bank2);
-            assert!(bank2.verify_accounts(VerifyAccountsHashConfig::default_for_test(), None));
+            assert!(bank2.verify_accounts(None));
         }
         let bank3 = Bank::new_from_parent_with_bank_forks(
             &bank_forks,
@@ -2295,7 +2287,7 @@ fn test_bank_hash_internal_state_verify() {
         assert_eq!(bank0_state, bank0.hash_internal_state());
         if pass == 0 {
             // this relies on us having set bank2's accounts hash in the pass==0 if above
-            assert!(bank2.verify_accounts(VerifyAccountsHashConfig::default_for_test(), None));
+            assert!(bank2.verify_accounts(None));
             continue;
         }
         if pass == 1 {
@@ -2304,7 +2296,7 @@ fn test_bank_hash_internal_state_verify() {
             // Doing so throws an assert. So, we can't flush 3 until 2 is flushed.
             bank3.freeze();
             add_root_and_flush_write_cache(&bank3);
-            assert!(bank3.verify_accounts(VerifyAccountsHashConfig::default_for_test(), None));
+            assert!(bank3.verify_accounts(None));
             continue;
         }
 
@@ -2313,7 +2305,7 @@ fn test_bank_hash_internal_state_verify() {
         bank2.freeze(); // <-- keep freeze() *outside* `if pass == 2 {}`
         if pass == 2 {
             add_root_and_flush_write_cache(&bank2);
-            assert!(bank2.verify_accounts(VerifyAccountsHashConfig::default_for_test(), None));
+            assert!(bank2.verify_accounts(None));
 
             // Verifying the accounts lt hash is only intended to be called at startup, and
             // normally in the background.  Since here we're *not* at startup, and doing it
@@ -2328,7 +2320,7 @@ fn test_bank_hash_internal_state_verify() {
 
         bank3.freeze();
         add_root_and_flush_write_cache(&bank3);
-        assert!(bank3.verify_accounts(VerifyAccountsHashConfig::default_for_test(), None));
+        assert!(bank3.verify_accounts(None));
     }
 }
 
@@ -3570,109 +3562,6 @@ fn test_add_duplicate_static_program() {
             InstructionError::Custom(42)
         ))
     );
-}
-
-#[test]
-fn test_add_instruction_processor_for_existing_unrelated_accounts() {
-    for pass in 0..5 {
-        let mut bank = create_simple_test_bank(500);
-
-        declare_process_instruction!(MockBuiltin, 1, |_invoke_context| {
-            Err(InstructionError::Custom(42))
-        });
-
-        // Non-builtin loader accounts can not be used for instruction processing
-        {
-            let stakes = bank.stakes_cache.stakes();
-            assert!(stakes.vote_accounts().as_ref().is_empty());
-        }
-        assert!(bank.stakes_cache.stakes().stake_delegations().is_empty());
-        if pass == 0 {
-            add_root_and_flush_write_cache(&bank);
-            assert_eq!(
-                bank.calculate_capitalization_for_tests(),
-                bank.capitalization()
-            );
-            continue;
-        }
-
-        let ((vote_id, vote_account), (stake_id, stake_account)) =
-            crate::stakes::tests::create_staked_node_accounts(1_0000, &bank.rent_collector.rent);
-        bank.capitalization
-            .fetch_add(vote_account.lamports() + stake_account.lamports(), Relaxed);
-        bank.store_account(&vote_id, &vote_account);
-        bank.store_account(&stake_id, &stake_account);
-        {
-            let stakes = bank.stakes_cache.stakes();
-            assert!(!stakes.vote_accounts().as_ref().is_empty());
-        }
-        assert!(!bank.stakes_cache.stakes().stake_delegations().is_empty());
-        if pass == 1 {
-            add_root_and_flush_write_cache(&bank);
-            assert_eq!(
-                bank.calculate_capitalization_for_tests(),
-                bank.capitalization()
-            );
-            continue;
-        }
-
-        bank.add_builtin(
-            vote_id,
-            "mock_program1",
-            ProgramCacheEntry::new_builtin(0, 0, MockBuiltin::register),
-        );
-        bank.add_builtin(
-            stake_id,
-            "mock_program2",
-            ProgramCacheEntry::new_builtin(0, 0, MockBuiltin::register),
-        );
-        {
-            let stakes = bank.stakes_cache.stakes();
-            assert!(stakes.vote_accounts().as_ref().is_empty());
-        }
-        assert!(bank.stakes_cache.stakes().stake_delegations().is_empty());
-        if pass == 2 {
-            add_root_and_flush_write_cache(&bank);
-            assert_eq!(
-                bank.calculate_capitalization_for_tests(),
-                bank.capitalization()
-            );
-            continue;
-        }
-        assert_eq!(
-            "mock_program1",
-            String::from_utf8_lossy(bank.get_account(&vote_id).unwrap_or_default().data())
-        );
-        assert_eq!(
-            "mock_program2",
-            String::from_utf8_lossy(bank.get_account(&stake_id).unwrap_or_default().data())
-        );
-
-        // Re-adding builtin programs should be no-op
-        let old_hash = bank.calculate_accounts_lt_hash_for_tests();
-        bank.add_mockup_builtin(vote_id, MockBuiltin::register);
-        bank.add_mockup_builtin(stake_id, MockBuiltin::register);
-        add_root_and_flush_write_cache(&bank);
-        let new_hash = bank.calculate_accounts_lt_hash_for_tests();
-        assert_eq!(old_hash, new_hash);
-        {
-            let stakes = bank.stakes_cache.stakes();
-            assert!(stakes.vote_accounts().as_ref().is_empty());
-        }
-        assert!(bank.stakes_cache.stakes().stake_delegations().is_empty());
-        assert_eq!(
-            bank.calculate_capitalization_for_tests(),
-            bank.capitalization()
-        );
-        assert_eq!(
-            "mock_program1",
-            String::from_utf8_lossy(bank.get_account(&vote_id).unwrap_or_default().data())
-        );
-        assert_eq!(
-            "mock_program2",
-            String::from_utf8_lossy(bank.get_account(&stake_id).unwrap_or_default().data())
-        );
-    }
 }
 
 #[allow(deprecated)]
@@ -5346,21 +5235,10 @@ fn test_shrink_candidate_slots_cached() {
     // Slots 0 and 1 should be candidates for shrinking, but slot 2
     // shouldn't because none of its accounts are outdated by a later
     // root
-    assert_eq!(bank2.shrink_candidate_slots(), 2);
-    let alive_counts: Vec<usize> = (0..3)
-        .map(|slot| {
-            bank2
-                .rc
-                .accounts
-                .accounts_db
-                .alive_account_count_in_slot(slot)
-        })
-        .collect();
+    assert_eq!(bank2.shrink(/*include_ancient*/ false), 2);
 
     // No more slots should be shrunk
-    assert_eq!(bank2.shrink_candidate_slots(), 0);
-    // alive_counts represents the count of alive accounts in the three slots 0,1,2
-    assert_eq!(alive_counts, vec![14, 1, 6]);
+    assert_eq!(bank2.shrink(/*include_ancient*/ false), 0);
 }
 
 #[test]
@@ -8102,50 +7980,6 @@ fn do_test_clean_dropped_unrooted_banks(freeze_bank1: FreezeBank1) {
     bank_forks.write().unwrap().remove(1);
     drop(bank1);
     bank2.clean_accounts_for_tests();
-
-    let expected_ref_count_for_cleaned_up_keys = 0;
-    let expected_ref_count_for_keys_in_both_slot1_and_slot2 = 1;
-
-    assert_eq!(
-        bank2
-            .rc
-            .accounts
-            .accounts_db
-            .accounts_index
-            .ref_count_from_storage(&key1.pubkey()),
-        expected_ref_count_for_cleaned_up_keys,
-    );
-    assert_eq!(
-        bank2
-            .rc
-            .accounts
-            .accounts_db
-            .accounts_index
-            .ref_count_from_storage(&key3.pubkey()),
-        expected_ref_count_for_keys_in_both_slot1_and_slot2,
-    );
-    assert_eq!(
-        bank2
-            .rc
-            .accounts
-            .accounts_db
-            .accounts_index
-            .ref_count_from_storage(&key4.pubkey()),
-        expected_ref_count_for_cleaned_up_keys,
-    );
-    assert_eq!(
-        bank2
-            .rc
-            .accounts
-            .accounts_db
-            .accounts_index
-            .ref_count_from_storage(&key5.pubkey()),
-        expected_ref_count_for_keys_in_both_slot1_and_slot2,
-    );
-    assert_eq!(
-        bank2.rc.accounts.accounts_db.alive_account_count_in_slot(1),
-        0
-    );
 }
 
 #[test]
@@ -10363,7 +10197,7 @@ fn test_verify_accounts() {
     bank.force_flush_accounts_cache();
 
     // ensure the accounts verify successfully
-    assert!(bank.verify_accounts(VerifyAccountsHashConfig::default_for_test(), None));
+    assert!(bank.verify_accounts(None));
 }
 
 #[test]
@@ -10529,9 +10363,29 @@ fn test_create_zero_lamport_with_clean() {
         bank.squash();
         bank.force_flush_accounts_cache();
         // do clean and assert that it actually did its job
-        assert_eq!(6, bank.get_snapshot_storages(None).len());
+        assert_eq!(
+            6,
+            bank.rc
+                .accounts
+                .accounts_db
+                .backend
+                .as_append_vec()
+                .get_storages(0..=bank.slot())
+                .0
+                .len()
+        );
         bank.clean_accounts();
-        assert_eq!(5, bank.get_snapshot_storages(None).len());
+        assert_eq!(
+            5,
+            bank.rc
+                .accounts
+                .accounts_db
+                .backend
+                .as_append_vec()
+                .get_storages(0..=bank.slot())
+                .0
+                .len()
+        );
     });
 }
 
@@ -11610,18 +11464,16 @@ fn test_new_from_snapshot_uses_rent_from_sysvar() {
     bank.set_block_id(Some(Hash::default()));
 
     // Serialize bank to snapshot
-    let snapshot_storages = bank.get_snapshot_storages(None);
     let mut buf = vec![];
     crate::serde_snapshot::bank_to_stream(
         &mut std::io::BufWriter::new(Cursor::new(&mut buf)),
         &bank,
-        &snapshot_storages,
     )
     .unwrap();
 
     // Deserialize fields and corrupt the rent
     let mut reader = std::io::BufReader::new(Cursor::new(&buf));
-    let (mut fields, _accounts_db_fields) = fields_from_stream(&mut reader).unwrap();
+    let mut fields = fields_from_stream(&mut reader).unwrap();
     let epoch_stakes = std::mem::take(&mut fields.versioned_epoch_stakes)
         .into_iter()
         .map(|(epoch, stakes)| (epoch, stakes.into()))

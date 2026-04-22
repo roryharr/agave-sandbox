@@ -1,7 +1,7 @@
 use {
     super::{AccountShrinkThreshold, DEFAULT_ACCOUNTS_SHRINK_THRESHOLD_OPTION},
     crate::{
-        accounts_file::StorageAccess,
+        accounts_file::{AccountsFileProvider, StorageAccess},
         accounts_index::{
             ACCOUNTS_INDEX_CONFIG_FOR_BENCHMARKS, ACCOUNTS_INDEX_CONFIG_FOR_TESTING,
             AccountSecondaryIndexes, AccountsIndexConfig, ScanFilter,
@@ -47,6 +47,9 @@ pub struct AccountsDbConfig {
     pub use_registered_io_uring_buffers: bool,
     /// Enables direct I/O for operations on snapshots, their archives and contents being unpacked
     pub snapshots_use_direct_io: bool,
+    /// Format used when creating new account storage files. Tests override
+    /// this to exercise different file formats; production uses the default.
+    pub accounts_file_provider: AccountsFileProvider,
 }
 
 pub const ACCOUNTS_DB_CONFIG_FOR_TESTING: AccountsDbConfig = AccountsDbConfig {
@@ -70,6 +73,7 @@ pub const ACCOUNTS_DB_CONFIG_FOR_TESTING: AccountsDbConfig = AccountsDbConfig {
     num_foreground_threads: None,
     use_registered_io_uring_buffers: true,
     snapshots_use_direct_io: true,
+    accounts_file_provider: AccountsFileProvider::AppendVec,
 };
 
 pub const ACCOUNTS_DB_CONFIG_FOR_BENCHMARKS: AccountsDbConfig = AccountsDbConfig {
@@ -93,4 +97,5 @@ pub const ACCOUNTS_DB_CONFIG_FOR_BENCHMARKS: AccountsDbConfig = AccountsDbConfig
     num_foreground_threads: None,
     use_registered_io_uring_buffers: true,
     snapshots_use_direct_io: true,
+    accounts_file_provider: AccountsFileProvider::AppendVec,
 };

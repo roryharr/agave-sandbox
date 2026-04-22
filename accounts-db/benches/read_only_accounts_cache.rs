@@ -2,7 +2,7 @@ use {
     criterion::{BenchmarkId, Criterion, criterion_group, criterion_main},
     rand::{SeedableRng, rngs::SmallRng, seq::IndexedRandom as _},
     solana_accounts_db::{
-        accounts_db::AccountsDb, read_only_accounts_cache::ReadOnlyAccountsCache,
+        accounts_db::AppendVecBackend, read_only_accounts_cache::ReadOnlyAccountsCache,
     },
     std::{
         hint::black_box,
@@ -52,7 +52,7 @@ fn bench_read_only_accounts_cache(c: &mut Criterion) {
         255,
         DATA_SIZES,
         WEIGHTS,
-        AccountsDb::DEFAULT_MAX_READ_ONLY_CACHE_DATA_SIZE_LO / 2,
+        AppendVecBackend::DEFAULT_MAX_READ_ONLY_CACHE_DATA_SIZE_LO / 2,
     )
     .collect();
     let pubkeys: Vec<_> = accounts
@@ -62,9 +62,9 @@ fn bench_read_only_accounts_cache(c: &mut Criterion) {
 
     for num_readers_writers in NUM_READERS_WRITERS {
         let cache = Arc::new(ReadOnlyAccountsCache::new(
-            AccountsDb::DEFAULT_MAX_READ_ONLY_CACHE_DATA_SIZE_LO,
-            AccountsDb::DEFAULT_MAX_READ_ONLY_CACHE_DATA_SIZE_HI,
-            AccountsDb::DEFAULT_READ_ONLY_CACHE_EVICT_SAMPLE_SIZE,
+            AppendVecBackend::DEFAULT_MAX_READ_ONLY_CACHE_DATA_SIZE_LO,
+            AppendVecBackend::DEFAULT_MAX_READ_ONLY_CACHE_DATA_SIZE_HI,
+            AppendVecBackend::DEFAULT_READ_ONLY_CACHE_EVICT_SAMPLE_SIZE,
         ));
 
         for (pubkey, account) in accounts.iter() {
@@ -170,7 +170,7 @@ fn bench_read_only_accounts_cache_eviction(
         255,
         DATA_SIZES,
         WEIGHTS,
-        AccountsDb::DEFAULT_MAX_READ_ONLY_CACHE_DATA_SIZE_HI * 2,
+        AppendVecBackend::DEFAULT_MAX_READ_ONLY_CACHE_DATA_SIZE_HI * 2,
     )
     .collect();
     let pubkeys: Vec<_> = accounts
@@ -184,7 +184,7 @@ fn bench_read_only_accounts_cache_eviction(
         let cache = Arc::new(ReadOnlyAccountsCache::new(
             max_data_size_lo,
             max_data_size_hi,
-            AccountsDb::DEFAULT_READ_ONLY_CACHE_EVICT_SAMPLE_SIZE,
+            AppendVecBackend::DEFAULT_READ_ONLY_CACHE_EVICT_SAMPLE_SIZE,
         ));
 
         // Fill up the cache.
@@ -302,8 +302,8 @@ fn bench_read_only_accounts_cache_eviction_lo_hi(c: &mut Criterion) {
     bench_read_only_accounts_cache_eviction(
         c,
         "read_only_accounts_cache_eviction_lo_hi",
-        AccountsDb::DEFAULT_MAX_READ_ONLY_CACHE_DATA_SIZE_LO,
-        AccountsDb::DEFAULT_MAX_READ_ONLY_CACHE_DATA_SIZE_HI,
+        AppendVecBackend::DEFAULT_MAX_READ_ONLY_CACHE_DATA_SIZE_LO,
+        AppendVecBackend::DEFAULT_MAX_READ_ONLY_CACHE_DATA_SIZE_HI,
     )
 }
 
@@ -316,8 +316,8 @@ fn bench_read_only_accounts_cache_eviction_hi(c: &mut Criterion) {
     bench_read_only_accounts_cache_eviction(
         c,
         "read_only_accounts_cache_eviction_hi",
-        AccountsDb::DEFAULT_MAX_READ_ONLY_CACHE_DATA_SIZE_HI,
-        AccountsDb::DEFAULT_MAX_READ_ONLY_CACHE_DATA_SIZE_HI,
+        AppendVecBackend::DEFAULT_MAX_READ_ONLY_CACHE_DATA_SIZE_HI,
+        AppendVecBackend::DEFAULT_MAX_READ_ONLY_CACHE_DATA_SIZE_HI,
     )
 }
 

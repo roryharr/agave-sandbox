@@ -327,6 +327,19 @@ impl AppendVec {
         Self::calculate_stored_size(0) * count
     }
 
+    /// Truncates the file on disk to the current written length.
+    ///
+    /// After writing accounts and flushing, the on-disk file may be larger than
+    /// the amount actually written (pre-allocated capacity). Truncating ensures
+    /// file_size == current_len, so snapshots can derive length from file size alone.
+    pub fn truncate_to_len(&self) -> std::io::Result<()> {
+        let len = self.len() as u64;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&self.path)?
+            .set_len(len)
+    }
+
     /// Flushes contents to disk
     pub fn flush(&self) -> Result<()> {
         // Check to see if we're actually dirty before flushing.
@@ -343,6 +356,11 @@ impl AppendVec {
             APPEND_VEC_STATS.files_dirty.fetch_sub(1, Ordering::Relaxed);
         }
         Ok(())
+    }
+
+    /// Prevent this AppendVec from deleting its file when dropped.
+    pub(crate) fn keep_file_on_drop(&self) {
+        self.remove_file_on_drop.store(false, Ordering::Release);
     }
 
     /// Return AppendVec opened in read-only file-io mode or `None` if it already is such

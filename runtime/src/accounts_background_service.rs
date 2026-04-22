@@ -17,9 +17,8 @@ use {
     agave_snapshots::{SnapshotArchiveKind, SnapshotKind, error::SnapshotError},
     crossbeam_channel::{Receiver, SendError, Sender},
     log::*,
-    rayon::iter::{IntoParallelIterator, ParallelIterator},
     solana_clock::{BankId, Slot},
-    solana_measure::{measure::Measure, measure_us},
+    solana_measure::measure::Measure,
     stats::StatsManager,
     std::{
         boxed::Box,
@@ -266,20 +265,14 @@ impl SnapshotRequestHandler {
         snapshot_root_bank.clean_accounts();
         clean_time.stop();
 
-        let (_, shrink_ancient_time_us) = measure_us!(snapshot_root_bank.shrink_ancient_slots());
-
         let mut shrink_time = Measure::start("shrink_time");
-        snapshot_root_bank.shrink_candidate_slots();
+        snapshot_root_bank.shrink(/*include_ancient*/ true);
         shrink_time.stop();
 
         // Snapshot the bank and send over a snapshot package
         let mut snapshot_time = Measure::start("snapshot_time");
-        let snapshot_package = SnapshotPackage::new(
-            snapshot_kind,
-            &snapshot_root_bank,
-            snapshot_root_bank.get_snapshot_storages(None),
-            status_cache_slot_deltas,
-        );
+        let snapshot_package =
+            SnapshotPackage::new(snapshot_kind, &snapshot_root_bank, status_cache_slot_deltas);
         self.pending_snapshot_packages
             .lock()
             .unwrap()
@@ -306,7 +299,6 @@ impl SnapshotRequestHandler {
             ("snapshot_time", snapshot_time.as_us(), i64),
             ("total_us", total_time.as_us(), i64),
             ("non_snapshot_time_us", non_snapshot_time_us, i64),
-            ("shrink_ancient_time_us", shrink_ancient_time_us, i64),
         );
         Ok(snapshot_root_bank.slot())
     }
@@ -359,16 +351,14 @@ impl PrunedBanksRequestHandler {
             );
         }
 
-        // Purge all the slots in parallel
-        // Banks for the same slot are purged sequentially
+        // Purge each bank sequentially. The per-bank work is dominated by
+        // lock-free DashMap operations, so parallel overhead isn't worth it.
         let accounts_db = bank.rc.accounts.accounts_db.as_ref();
-        accounts_db.thread_pool_background.install(|| {
-            grouped_banks_to_purge.into_par_iter().for_each(|group| {
-                group.iter().for_each(|(slot, bank_id)| {
-                    accounts_db.purge_slot(*slot, *bank_id, true);
-                })
-            });
-        });
+        for group in &grouped_banks_to_purge {
+            for (slot, bank_id) in group.iter() {
+                accounts_db.purge_slot(*slot, *bank_id, true);
+            }
+        }
 
         num_banks_to_purge
     }
@@ -556,12 +546,8 @@ impl AccountsBackgroundService {
                             // To avoid pathological interactions between the clean and shrink
                             // timers, call shrink for either should_shrink or should_clean.
                             if should_shrink || should_clean {
-                                if should_clean {
-                                    // We used to only squash (aka shrink ancients) when we also
-                                    // cleaned, so keep that same behavior here for now.
-                                    bank.shrink_ancient_slots();
-                                }
-                                bank.shrink_candidate_slots();
+                                // Only squash ancients when we also cleaned (legacy pairing).
+                                bank.shrink(/*include_ancient*/ should_clean);
                                 previous_shrink_time = Instant::now();
                             }
                         }
@@ -746,7 +732,15 @@ mod test {
 
         pruned_banks_request_handler.remove_dead_slots(&bank0, &mut 0, &mut 0);
 
-        assert!(bank0.rc.accounts.scan_slot(0, |_| Some(())).is_empty());
+        assert!(
+            bank0
+                .rc
+                .accounts
+                .accounts_db
+                .accounts_cache
+                .slot_cache(0)
+                .is_none()
+        );
     }
 
     /// Ensure that unhandled snapshot requests are properly re-enqueued or dropped

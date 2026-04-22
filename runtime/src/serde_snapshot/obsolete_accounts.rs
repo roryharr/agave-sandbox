@@ -43,7 +43,7 @@ impl SerdeObsoleteAccounts {
         }
     }
 
-    pub(crate) fn into_tuple(self) -> (ObsoleteAccounts, AccountsFileId, usize) {
+    pub(crate) fn into_id_and_accounts(self) -> (ObsoleteAccounts, AccountsFileId) {
         let accounts = self
             .accounts
             .into_iter()
@@ -54,11 +54,7 @@ impl SerdeObsoleteAccounts {
             })
             .collect();
 
-        (
-            ObsoleteAccounts { accounts },
-            self.id as AccountsFileId,
-            self.bytes as usize,
-        )
+        (ObsoleteAccounts { accounts }, self.id as AccountsFileId)
     }
 }
 
@@ -167,7 +163,7 @@ mod test {
             let deserialized_obsolete_accounts = map.remove(&slot).unwrap();
             assert_eq!(
                 obsolete_accounts,
-                deserialized_obsolete_accounts.1.into_tuple().0
+                deserialized_obsolete_accounts.1.into_id_and_accounts().0
             );
         }
     }

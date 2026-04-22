@@ -642,6 +642,10 @@ mod tests {
 
         // manually freeze the bank to trigger update_accounts_lt_hash() to run
         bank.freeze();
+        bank.rc
+            .accounts
+            .accounts_db
+            .add_root_and_flush_write_cache(0);
         let actual_accounts_lt_hash = bank.accounts_lt_hash.lock().unwrap().clone();
 
         // ensure the actual accounts lt hash matches the value calculated from the index

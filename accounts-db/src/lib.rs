@@ -17,7 +17,6 @@ pub mod accounts_scan;
 pub mod accounts_update_notifier_interface;
 mod active_stats;
 pub mod ancestors;
-mod ancient_append_vecs;
 #[cfg(feature = "dev-context-only-utils")]
 pub mod append_vec;
 #[cfg(not(feature = "dev-context-only-utils"))]
@@ -34,13 +33,21 @@ pub mod read_only_accounts_cache;
 #[cfg(not(feature = "dev-context-only-utils"))]
 mod read_only_accounts_cache;
 mod rolling_bit_field;
+pub mod snapshot_storage;
 pub mod sorted_storages;
 pub mod stake_rewards;
 pub mod storable_accounts;
+pub mod storage_roots;
 pub mod utils;
 pub mod waitable_condvar;
 
-pub use obsolete_accounts::{ObsoleteAccountItem, ObsoleteAccounts};
+pub use {
+    obsolete_accounts::{ObsoleteAccountItem, ObsoleteAccounts},
+    snapshot_storage::{
+        SNAPSHOT_ACCOUNTS_HARDLINKS, SerdeObsoleteAccounts, SerdeObsoleteAccountsMap,
+        StorageRestoreError, parse_append_vec_filename, reconstruct_single_storage,
+    },
+};
 
 #[macro_use]
 extern crate solana_metrics;

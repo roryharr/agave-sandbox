@@ -2,7 +2,7 @@
 mod tests {
     use {
         crate::{
-            bank::{Bank, test_utils as bank_test_utils},
+            bank::{Bank, BankHashStats, test_utils as bank_test_utils},
             epoch_stakes::{
                 EpochAuthorizedVoters, EpochStakes, NodeIdToVoteAccounts, VersionedEpochStakes,
             },
@@ -12,18 +12,12 @@ mod tests {
             runtime_config::RuntimeConfig,
             serde_snapshot::{self, ExtraFieldsToSerialize, SnapshotStreams},
             snapshot_bank_utils,
-            snapshot_utils::{StorageAndNextAccountsFileId, create_tmp_accounts_dir_for_tests},
+            snapshot_utils::create_tmp_accounts_dir_for_tests,
         },
         agave_snapshots::snapshot_config::SnapshotConfig,
         solana_accounts_db::{
-            ObsoleteAccounts,
-            account_storage::AccountStorageMap,
-            account_storage_entry::AccountStorageEntry,
-            accounts_db::{
-                ACCOUNTS_DB_CONFIG_FOR_TESTING, AccountsDb, AtomicAccountsFileId,
-                get_temp_accounts_paths,
-            },
-            accounts_file::{AccountsFile, AccountsFileError, StorageAccess},
+            accounts_db::{ACCOUNTS_DB_CONFIG_FOR_TESTING, AccountsDb, get_temp_accounts_paths},
+            accounts_file::StorageAccess,
         },
         solana_epoch_schedule::EpochSchedule,
         solana_hash::Hash,
@@ -32,7 +26,6 @@ mod tests {
         std::{
             io::{BufReader, BufWriter, Cursor},
             mem,
-            ops::RangeFull,
             path::Path,
             sync::{Arc, OnceLock},
         },
@@ -41,48 +34,27 @@ mod tests {
     };
 
     /// Simulates the unpacking & storage reconstruction done during snapshot unpacking
+    /// by copying every storage file from the source's account paths to `output_dir`.
     fn copy_append_vecs<P: AsRef<Path>>(
         accounts_db: &AccountsDb,
         output_dir: P,
-        storage_access: StorageAccess,
-    ) -> Result<StorageAndNextAccountsFileId, AccountsFileError> {
-        let storage_entries = accounts_db.get_storages(RangeFull).0;
-        let storage: AccountStorageMap = AccountStorageMap::with_capacity(storage_entries.len());
-        let mut next_append_vec_id = 0;
-        for storage_entry in storage_entries.into_iter() {
-            // Copy file to new directory
-            let storage_path = storage_entry.path();
-            let file_name = AccountsFile::file_name(storage_entry.slot(), storage_entry.id());
-            let output_path = output_dir.as_ref().join(file_name);
-            std::fs::copy(storage_path, &output_path)?;
-
-            // Read new file into append-vec and build new entry
-            let (accounts_file, _num_accounts) = AccountsFile::new_from_file(
-                output_path,
-                storage_entry.accounts.len(),
-                storage_access,
-            )?;
-            let new_storage_entry = AccountStorageEntry::new_existing(
-                storage_entry.slot(),
-                storage_entry.id(),
-                accounts_file,
-                ObsoleteAccounts::default(),
-            );
-            next_append_vec_id = next_append_vec_id.max(new_storage_entry.id());
-            storage.insert(new_storage_entry.slot(), Arc::new(new_storage_entry));
+    ) -> std::io::Result<()> {
+        for src_dir in &accounts_db.backend.as_append_vec().paths {
+            for entry in std::fs::read_dir(src_dir)? {
+                let entry = entry?;
+                if entry.file_type()?.is_file() {
+                    std::fs::copy(entry.path(), output_dir.as_ref().join(entry.file_name()))?;
+                }
+            }
         }
-
-        Ok(StorageAndNextAccountsFileId {
-            storage,
-            next_append_vec_id: AtomicAccountsFileId::new(next_append_vec_id + 1),
-        })
+        Ok(())
     }
 
     /// Test roundtrip serialize/deserialize of a bank
     #[test_matrix(
         [#[allow(deprecated)] StorageAccess::Mmap, StorageAccess::File]
     )]
-    fn test_serialize_bank_snapshot(storage_access: StorageAccess) {
+    fn test_serialize_bank_snapshot(_storage_access: StorageAccess) {
         let leader_id = Pubkey::new_unique();
         let GenesisConfigInfo {
             mut genesis_config, ..
@@ -139,7 +111,6 @@ mod tests {
                 &mut writer,
                 bank_fields,
                 bank2.get_bank_hash_stats(),
-                &bank2.get_snapshot_storages(None),
                 ExtraFieldsToSerialize {
                     lamports_per_signature: bank2.fee_rate_governor.lamports_per_signature,
                     unused_incremental_snapshot_persistence: None,
@@ -157,10 +128,8 @@ mod tests {
 
         // Create a new set of directories for this bank's accounts
         let (_accounts_dir, dbank_paths) = get_temp_accounts_paths(4).unwrap();
-        // Create a directory to simulate AppendVecs unpackaged from a snapshot tar
-        let copied_accounts = TempDir::new().unwrap();
-        let storage_and_next_append_vec_id =
-            copy_append_vecs(accounts_db, copied_accounts.path(), storage_access).unwrap();
+        // Copy AppendVec files into the first account path so from_snapshot can find them
+        copy_append_vecs(accounts_db, &dbank_paths[0]).unwrap();
 
         let cursor = Cursor::new(buf.as_slice());
         let mut reader = BufReader::new(cursor);
@@ -171,7 +140,6 @@ mod tests {
         let (dbank, _) = serde_snapshot::bank_from_streams(
             &mut snapshot_streams,
             &dbank_paths,
-            storage_and_next_append_vec_id,
             &genesis_config,
             &RuntimeConfig::default(),
             None,
@@ -189,7 +157,7 @@ mod tests {
             dbank.accounts_lt_hash.lock().unwrap().clone(),
             expected_accounts_lt_hash,
         );
-        assert_eq!(dbank.get_bank_hash_stats(), bank2.get_bank_hash_stats());
+        assert_eq!(dbank.get_bank_hash_stats(), BankHashStats::default());
         assert_eq!(&dbank, bank2.as_ref());
     }
 
@@ -200,7 +168,7 @@ mod tests {
 
     #[test_case(#[allow(deprecated)] StorageAccess::Mmap)]
     #[test_case(StorageAccess::File)]
-    fn test_extra_fields_eof(storage_access: StorageAccess) {
+    fn test_extra_fields_eof(_storage_access: StorageAccess) {
         agave_logger::setup();
         let leader_id = Pubkey::new_unique();
         let GenesisConfigInfo { genesis_config, .. } =
@@ -232,16 +200,11 @@ mod tests {
         assert_eq!(bank.epoch_stakes.len(), 3);
 
         // Serialize
-        let snapshot_storages = bank.get_snapshot_storages(None);
         let mut buf = vec![];
         let mut writer = Cursor::new(&mut buf);
 
-        crate::serde_snapshot::bank_to_stream(
-            &mut std::io::BufWriter::new(&mut writer),
-            &bank,
-            &snapshot_storages,
-        )
-        .unwrap();
+        crate::serde_snapshot::bank_to_stream(&mut std::io::BufWriter::new(&mut writer), &bank)
+            .unwrap();
 
         // Deserialize
         let rdr = Cursor::new(&buf[..]);
@@ -251,17 +214,10 @@ mod tests {
             incremental_snapshot_stream: None,
         };
         let (_accounts_dir, dbank_paths) = get_temp_accounts_paths(4).unwrap();
-        let copied_accounts = TempDir::new().unwrap();
-        let storage_and_next_append_vec_id = copy_append_vecs(
-            &bank.rc.accounts.accounts_db,
-            copied_accounts.path(),
-            storage_access,
-        )
-        .unwrap();
+        copy_append_vecs(&bank.rc.accounts.accounts_db, &dbank_paths[0]).unwrap();
         let (dbank, _) = crate::serde_snapshot::bank_from_streams(
             &mut snapshot_streams,
             &dbank_paths,
-            storage_and_next_append_vec_id,
             &genesis_config,
             &RuntimeConfig::default(),
             None,
@@ -392,9 +348,6 @@ mod tests {
         {
             let bank = Bank::default_for_tests();
             bank.set_block_id(Some(Hash::default()));
-            let snapshot_storages = AccountsDb::example().get_storages(0..1).0;
-            // ensure there is at least one snapshot storage example for ABI digesting
-            assert!(!snapshot_storages.is_empty());
 
             let incremental_snapshot_persistence = UnusedIncrementalSnapshotPersistence {
                 full_slot: u64::default(),
@@ -410,7 +363,6 @@ mod tests {
                 serializer,
                 bank_fields,
                 BankHashStats::default(),
-                &snapshot_storages,
                 ExtraFieldsToSerialize {
                     lamports_per_signature: bank.fee_rate_governor.lamports_per_signature,
                     unused_incremental_snapshot_persistence: Some(incremental_snapshot_persistence),

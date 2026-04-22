@@ -9,7 +9,7 @@ use {
         fmt::Debug,
         sync::{
             Arc,
-            atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+            atomic::{AtomicU64, AtomicUsize, Ordering},
         },
     },
 };
@@ -61,7 +61,6 @@ pub struct Stats {
     pub flush_update_us: AtomicU64,
     pub flush_evict_us: AtomicU64,
     pub flush_grow_us: AtomicU64,
-    last_was_startup: AtomicBool,
     last_time: AtomicInterval,
     bins: u64,
     pub flush_should_evict_us: AtomicU64,
@@ -212,49 +211,12 @@ impl Stats {
 
         const US_PER_MS: u64 = 1_000;
 
-        // all metrics during startup are written to a different data point
-        let startup = storage.get_startup();
-        let was_startup = self.last_was_startup.swap(startup, Ordering::Relaxed);
-
         let count_in_mem = self.count_in_mem.load(Ordering::Relaxed);
         let capacity_in_mem = self.capacity_in_mem.load(Ordering::Relaxed);
 
         // sum of elapsed time in each thread
         let thread_time_elapsed_ms = elapsed_ms * storage.threads as u64;
-        let datapoint_name = if startup || was_startup {
-            "accounts_index_startup"
-        } else {
-            "accounts_index"
-        };
         if storage.is_disk_index_enabled() {
-            if was_startup {
-                // these stats only apply at startup
-                datapoint_info!(
-                    "accounts_index_startup",
-                    (
-                        "entries_created",
-                        disk.map(|disk| disk
-                            .stats
-                            .index
-                            .startup
-                            .entries_created
-                            .swap(0, Ordering::Relaxed))
-                            .unwrap_or_default(),
-                        i64
-                    ),
-                    (
-                        "entries_reused",
-                        disk.map(|disk| disk
-                            .stats
-                            .index
-                            .startup
-                            .entries_reused
-                            .swap(0, Ordering::Relaxed))
-                            .unwrap_or_default(),
-                        i64
-                    ),
-                );
-            }
             let held_in_mem_clean = self.held_in_mem.clean.swap(0, Ordering::Relaxed);
             let held_in_mem_age = self.held_in_mem.age.swap(0, Ordering::Relaxed);
             let held_in_mem_ref_count = self.held_in_mem.ref_count.swap(0, Ordering::Relaxed);
@@ -280,7 +242,7 @@ impl Stats {
                     * size_of::<SlotListItem<T>>() // <-- size of one slot list entry
                     * 2; // <-- and assume there are two entries
             datapoint_info!(
-                datapoint_name,
+                "accounts_index",
                 ("estimate_mem_bytes", estimate_mem_bytes, i64),
                 (
                     "flush_should_evict_us",
@@ -567,7 +529,7 @@ impl Stats {
             );
         } else {
             datapoint_info!(
-                datapoint_name,
+                "accounts_index",
                 (
                     "estimate_mem_bytes",
                     (

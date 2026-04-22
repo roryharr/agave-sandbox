@@ -4,13 +4,9 @@ extern crate test;
 
 use {
     rand::{Rng, rng},
-    solana_account::AccountSharedData,
     solana_accounts_db::{
         account_info::AccountInfo,
-        accounts_index::{
-            ACCOUNTS_INDEX_CONFIG_FOR_BENCHMARKS, AccountSecondaryIndexes, AccountsIndex,
-            ReclaimsSlotList, UpsertReclaim,
-        },
+        accounts_index::{ACCOUNTS_INDEX_CONFIG_FOR_BENCHMARKS, AccountsIndex},
     },
     std::sync::Arc,
     test::Bencher,
@@ -29,23 +25,13 @@ fn bench_accounts_index(bencher: &mut Bencher) {
 
     const NUM_FORKS: u64 = 16;
 
-    let mut reclaims = ReclaimsSlotList::new();
     let index = AccountsIndex::<AccountInfo, AccountInfo>::new(
         &ACCOUNTS_INDEX_CONFIG_FOR_BENCHMARKS,
         Arc::default(),
     );
     for f in 0..NUM_FORKS {
         for pubkey in pubkeys.iter().take(NUM_PUBKEYS) {
-            index.upsert(
-                f,
-                f,
-                pubkey,
-                &AccountSharedData::default(),
-                &AccountSecondaryIndexes::default(),
-                AccountInfo::default(),
-                &mut reclaims,
-                UpsertReclaim::PopulateReclaims,
-            );
+            index.insert(f, pubkey, AccountInfo::default());
         }
     }
 
@@ -54,19 +40,8 @@ fn bench_accounts_index(bencher: &mut Bencher) {
     bencher.iter(|| {
         for _p in 0..NUM_PUBKEYS {
             let pubkey = rng().random_range(0..NUM_PUBKEYS);
-            index.upsert(
-                fork,
-                fork,
-                &pubkeys[pubkey],
-                &AccountSharedData::default(),
-                &AccountSecondaryIndexes::default(),
-                AccountInfo::default(),
-                &mut reclaims,
-                UpsertReclaim::PopulateReclaims,
-            );
-            reclaims.clear();
+            index.insert(fork, &pubkeys[pubkey], AccountInfo::default());
         }
-        index.add_root(root);
         root += 1;
         fork += 1;
     });

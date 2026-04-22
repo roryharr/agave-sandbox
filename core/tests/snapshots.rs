@@ -633,6 +633,14 @@ fn test_snapshots_with_background_services() {
     };
 
     let exit = Arc::new(AtomicBool::new(false));
+    let accounts_db = bank_forks
+        .read()
+        .unwrap()
+        .root_bank()
+        .rc
+        .accounts
+        .accounts_db
+        .clone();
     let snapshot_packager_service = SnapshotPackagerService::new(
         pending_snapshot_packages,
         None,
@@ -640,6 +648,7 @@ fn test_snapshots_with_background_services() {
         None,
         cluster_info,
         snapshot_controller.clone(),
+        accounts_db,
         false,
         0,
     );
@@ -796,6 +805,14 @@ fn test_fastboot_snapshots_teardown(exit_backpressure: bool) {
     let exit_backpressure = exit_backpressure.then(|| Arc::new(AtomicBool::new(false)));
 
     let exit = Arc::new(AtomicBool::new(false));
+    let accounts_db = bank_forks
+        .read()
+        .unwrap()
+        .root_bank()
+        .rc
+        .accounts
+        .accounts_db
+        .clone();
     let snapshot_packager_service = SnapshotPackagerService::new(
         pending_snapshot_packages.clone(),
         None,
@@ -803,6 +820,7 @@ fn test_fastboot_snapshots_teardown(exit_backpressure: bool) {
         exit_backpressure.clone(),
         cluster_info,
         snapshot_controller.clone(),
+        accounts_db,
         false,
         0,
     );
@@ -837,7 +855,6 @@ fn test_fastboot_snapshots_teardown(exit_backpressure: bool) {
             let snapshot_package = SnapshotPackage::new(
                 SnapshotKind::Fastboot,
                 &bank,
-                bank.get_snapshot_storages(None),
                 bank.status_cache.read().unwrap().root_slot_deltas(),
             );
             pending_snapshot_packages

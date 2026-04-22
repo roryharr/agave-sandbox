@@ -1,8 +1,7 @@
 use {
-    crate::{accounts_index::AccountsIndexRootsStats, append_vec::APPEND_VEC_STATS},
+    crate::{append_vec::APPEND_VEC_STATS, storage_roots::StorageRootsStats},
     solana_time_utils::AtomicInterval,
     std::{
-        iter::Sum,
         num::Saturating,
         sync::atomic::{AtomicU64, AtomicUsize, Ordering},
         time::Duration,
@@ -13,6 +12,11 @@ use {
 pub struct AccountsStats {
     pub last_store_report: AtomicInterval,
     pub stakes_cache_check_and_store_us: AtomicU64,
+}
+
+/// AppendVec-specific storage and purge stats, kept on `AppendVecBackend`.
+#[derive(Debug, Default)]
+pub struct AppendVecStats {
     pub create_store_count: AtomicU64,
     pub dropped_stores: AtomicU64,
     pub handle_dead_keys_us: AtomicU64,
@@ -297,7 +301,6 @@ pub struct FlushStats {
     pub num_accounts_flushed: Saturating<usize>,
     pub num_bytes_flushed: Saturating<u64>,
     pub num_accounts_purged: Saturating<usize>,
-    pub num_bytes_purged: Saturating<u64>,
     pub store_accounts_timing: StoreAccountsTiming,
     pub store_accounts_total_us: Saturating<u64>,
 }
@@ -307,7 +310,6 @@ impl FlushStats {
         self.num_accounts_flushed += other.num_accounts_flushed;
         self.num_bytes_flushed += other.num_bytes_flushed;
         self.num_accounts_purged += other.num_accounts_purged;
-        self.num_bytes_purged += other.num_bytes_purged;
         self.store_accounts_timing
             .accumulate(&other.store_accounts_timing);
         self.store_accounts_total_us += other.store_accounts_total_us;
@@ -315,7 +317,7 @@ impl FlushStats {
 }
 
 #[derive(Debug, Default)]
-pub struct LatestAccountsIndexRootsStats {
+pub struct LatestStorageRootsStats {
     pub roots_len: AtomicUsize,
     pub uncleaned_roots_len: AtomicUsize,
     pub roots_range: AtomicU64,
@@ -325,33 +327,29 @@ pub struct LatestAccountsIndexRootsStats {
     pub clean_dead_slot_us: AtomicU64,
 }
 
-impl LatestAccountsIndexRootsStats {
-    pub fn update(&self, accounts_index_roots_stats: &AccountsIndexRootsStats) {
-        if let Some(value) = accounts_index_roots_stats.roots_len {
+impl LatestStorageRootsStats {
+    pub fn update(&self, storage_roots_stats: &StorageRootsStats) {
+        if let Some(value) = storage_roots_stats.roots_len {
             self.roots_len.store(value, Ordering::Relaxed);
         }
-        if let Some(value) = accounts_index_roots_stats.uncleaned_roots_len {
+        if let Some(value) = storage_roots_stats.uncleaned_roots_len {
             self.uncleaned_roots_len.store(value, Ordering::Relaxed);
         }
-        if let Some(value) = accounts_index_roots_stats.roots_range {
+        if let Some(value) = storage_roots_stats.roots_range {
             self.roots_range.store(value, Ordering::Relaxed);
         }
-        self.rooted_cleaned_count.fetch_add(
-            accounts_index_roots_stats.rooted_cleaned_count,
-            Ordering::Relaxed,
-        );
+        self.rooted_cleaned_count
+            .fetch_add(storage_roots_stats.rooted_cleaned_count, Ordering::Relaxed);
         self.unrooted_cleaned_count.fetch_add(
-            accounts_index_roots_stats.unrooted_cleaned_count,
+            storage_roots_stats.unrooted_cleaned_count,
             Ordering::Relaxed,
         );
         self.clean_unref_from_storage_us.fetch_add(
-            accounts_index_roots_stats.clean_unref_from_storage_us,
+            storage_roots_stats.clean_unref_from_storage_us,
             Ordering::Relaxed,
         );
-        self.clean_dead_slot_us.fetch_add(
-            accounts_index_roots_stats.clean_dead_slot_us,
-            Ordering::Relaxed,
-        );
+        self.clean_dead_slot_us
+            .fetch_add(storage_roots_stats.clean_dead_slot_us, Ordering::Relaxed);
     }
 
     pub fn report(&self) {
@@ -417,11 +415,9 @@ impl LatestAccountsIndexRootsStats {
 #[derive(Debug, Default)]
 pub struct CleanAccountsStats {
     pub purge_stats: PurgeStats,
-    pub latest_accounts_index_roots_stats: LatestAccountsIndexRootsStats,
+    pub latest_storage_roots_stats: LatestStorageRootsStats,
 
     // stats held here and reported by clean_accounts
-    pub clean_old_root_us: AtomicU64,
-    pub clean_old_root_reclaim_us: AtomicU64,
     pub remove_dead_accounts_remove_us: AtomicU64,
     pub remove_dead_accounts_shrink_us: AtomicU64,
     pub clean_stored_dead_slots_us: AtomicU64,
@@ -432,7 +428,7 @@ pub struct CleanAccountsStats {
 impl CleanAccountsStats {
     pub fn report(&self) {
         self.purge_stats.report("clean_purge_slots_stats", None);
-        self.latest_accounts_index_roots_stats.report();
+        self.latest_storage_roots_stats.report();
     }
 }
 
@@ -901,25 +897,6 @@ impl ShrinkAncientStats {
                 i64
             ),
         );
-    }
-}
-
-#[derive(Debug, Default)]
-pub struct ObsoleteAccountsStats {
-    pub accounts_marked_obsolete: u64,
-    pub slots_removed: u64,
-}
-
-impl Sum<Self> for ObsoleteAccountsStats {
-    fn sum<I>(iter: I) -> Self
-    where
-        I: Iterator<Item = Self>,
-    {
-        iter.fold(Self::default(), |mut accumulated_stats, item| {
-            accumulated_stats.accounts_marked_obsolete += item.accounts_marked_obsolete;
-            accumulated_stats.slots_removed += item.slots_removed;
-            accumulated_stats
-        })
     }
 }
 

@@ -1170,15 +1170,6 @@ fn main() {
                         ),
                 )
                 .arg(
-                    Arg::with_name("print_accounts_stats")
-                        .long("print-accounts-stats")
-                        .takes_value(false)
-                        .help(
-                            "After verifying the ledger, print some information about the account \
-                             stores",
-                        ),
-                )
-                .arg(
                     Arg::with_name("print_bank_hash")
                         .long("print-bank-hash")
                         .takes_value(false)
@@ -1872,7 +1863,6 @@ fn main() {
 
                     let output_format =
                         OutputFormat::from_matches(arg_matches, "output_format", false);
-                    let print_accounts_stats = arg_matches.is_present("print_accounts_stats");
                     let print_bank_hash = arg_matches.is_present("print_bank_hash");
                     let write_bank_file = arg_matches.is_present("write_bank_file");
 
@@ -1894,9 +1884,6 @@ fn main() {
                         );
 
                     let working_bank = bank_forks.read().unwrap().working_bank();
-                    if print_accounts_stats {
-                        working_bank.print_accounts_stats();
-                    }
                     if print_bank_hash {
                         let slot_bank_hash = SlotBankHash {
                             slot: working_bank.slot(),

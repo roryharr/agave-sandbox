@@ -5,7 +5,7 @@ use {
         snapshot_hash::StartingSnapshotHashes,
     },
     snapshot_gossip_manager::SnapshotGossipManager,
-    solana_accounts_db::account_storage_entry::AccountStorageEntry,
+    solana_accounts_db::accounts_db::AccountsDb,
     solana_clock::Slot,
     solana_gossip::cluster_info::ClusterInfo,
     solana_measure::{meas_dur, measure::Measure, measure_us},
@@ -43,6 +43,7 @@ impl SnapshotPackagerService {
         exit_backpressure: Option<Arc<AtomicBool>>,
         cluster_info: Arc<ClusterInfo>,
         snapshot_controller: Arc<SnapshotController>,
+        accounts_db: Arc<AccountsDb>,
         enable_gossip_push: bool,
         niceness_adj: i8,
     ) -> Self {
@@ -91,13 +92,12 @@ impl SnapshotPackagerService {
                     if exit_backpressure.is_some() {
                         // With exit backpressure, we will delay flushing snapshot storages
                         // until we receive a graceful exit request.
-                        // Save the snapshot storages here, so we can flush later (as needed).
                         // For fastboot snapshot packages, the bank snapshot is saved and
                         // the rest of the snapshotting process is skipped
                         if snapshot_kind == SnapshotKind::Fastboot {
                             teardown_state = Some(TeardownState {
                                 snapshot_slot: snapshot_package.slot,
-                                snapshot_storages: snapshot_package.snapshot_storages.clone(),
+                                accounts_db: accounts_db.clone(),
                                 bank_snapshot_package: Some(snapshot_package.bank_snapshot_package),
                             });
 
@@ -112,7 +112,7 @@ impl SnapshotPackagerService {
                         } else {
                             teardown_state = Some(TeardownState {
                                 snapshot_slot: snapshot_package.slot,
-                                snapshot_storages: snapshot_package.snapshot_storages.clone(),
+                                accounts_db: accounts_db.clone(),
                                 bank_snapshot_package: None,
                             });
                         }
@@ -125,8 +125,6 @@ impl SnapshotPackagerService {
                         &snapshot_config.bank_snapshots_dir,
                         snapshot_config.snapshot_version,
                         snapshot_package.bank_snapshot_package,
-                        snapshot_package.snapshot_storages.as_slice(),
-                        exit_backpressure.is_none(),
                     );
 
                     let Ok(bank_snapshot_info) = bank_snapshot_info else {
@@ -149,7 +147,7 @@ impl SnapshotPackagerService {
                             snapshot_slot,
                             snapshot_hash,
                             &bank_snapshot_info.snapshot_dir,
-                            snapshot_package.snapshot_storages,
+                            &accounts_db,
                             snapshot_config,
                         ) {
                             error!(
@@ -226,7 +224,7 @@ impl SnapshotPackagerService {
     fn teardown(state: TeardownState, snapshot_config: &SnapshotConfig) {
         let TeardownState {
             snapshot_slot,
-            snapshot_storages,
+            accounts_db,
             bank_snapshot_package,
         } = state;
 
@@ -237,8 +235,6 @@ impl SnapshotPackagerService {
                 &snapshot_config.bank_snapshots_dir,
                 snapshot_config.snapshot_version,
                 bank_snapshot_package,
-                snapshot_storages.as_slice(),
-                false,
             );
             if let Err(err) = result {
                 warn!(
@@ -252,59 +248,24 @@ impl SnapshotPackagerService {
             info!("Serializing bank snapshot... Done in {:?}", start.elapsed());
         }
 
-        info!("Flushing account storages...");
-        let start = Instant::now();
-        for storage in &snapshot_storages {
-            let result = storage.flush();
-            if let Err(err) = result {
-                warn!(
-                    "Failed to flush account storage '{}': {err}",
-                    storage.path().display(),
-                );
-                // If flushing a storage failed, we do *NOT* want to write
-                // the "storages flushed" file, so return early.
-                return;
-            }
-        }
-        info!("Flushing account storages... Done in {:?}", start.elapsed());
-
         let bank_snapshot_dir = snapshot_paths::get_bank_snapshot_dir(
             &snapshot_config.bank_snapshots_dir,
             snapshot_slot,
         );
 
-        info!("Hard linking account storages...");
+        info!("Saving account storages to snapshot...");
         let start = Instant::now();
-        let result = snapshot_utils::hard_link_storages_to_snapshot(
-            &bank_snapshot_dir,
-            snapshot_slot,
-            &snapshot_storages,
-        );
+        let result = accounts_db.save_to_snapshot_dir(&bank_snapshot_dir, snapshot_slot);
         if let Err(err) = result {
-            warn!("Failed to hard link account storages: {err}");
-            // If hard linking the storages failed, we do *NOT* want to mark the bank snapshot as
+            warn!("Failed to save account storages to snapshot: {err}");
+            // If saving storages failed, we do *NOT* want to mark the bank snapshot as
             // loadable so return early.
             return;
         }
         info!(
-            "Hard linking account storages... Done in {:?}",
+            "Saving account storages to snapshot... Done in {:?}",
             start.elapsed(),
         );
-
-        info!("Saving obsolete accounts...");
-        let start = Instant::now();
-        let result = snapshot_utils::write_obsolete_accounts_to_snapshot(
-            &bank_snapshot_dir,
-            &snapshot_storages,
-            snapshot_slot,
-        );
-        if let Err(err) = result {
-            warn!("Failed to serialize obsolete accounts: {err}");
-            // If serializing the obsolete accounts failed, we do *NOT* want to mark the bank snapshot
-            // as loadable so return early.
-            return;
-        }
-        info!("Saving obsolete accounts... Done in {:?}", start.elapsed());
 
         let result = snapshot_utils::mark_bank_snapshot_as_loadable(&bank_snapshot_dir);
         if let Err(err) = result {
@@ -314,12 +275,11 @@ impl SnapshotPackagerService {
 }
 
 /// The state required to run `teardown()`
-// Note, don't derive Debug, because we don't want to print out 432k+ `AccountStorageEntry`s...
 struct TeardownState {
     /// The slot of the latest snapshot
     snapshot_slot: Slot,
-    /// The storages of the latest snapshot
-    snapshot_storages: Vec<Arc<AccountStorageEntry>>,
+    /// AccountsDb handle for flushing and hard-linking storages during teardown
+    accounts_db: Arc<AccountsDb>,
     /// For fastboot snapshots archiving is not required so serialization of the bank snapshot
     /// can be deferred until teardown. In this case `bank_snapshot_package` will be `Some` and
     /// during teardown the bank snapshot will be serialized to storage. For other snapshot types

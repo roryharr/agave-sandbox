@@ -331,7 +331,7 @@ startBootstrapLeader() {
          $nodeIndex \
          ${#clientIpList[@]} \"$benchTpsExtraArgs\" \
          \"$genesisOptions\" \
-         \"$maybeNoSnapshot $maybeSkipLedgerVerify $maybeLimitLedgerSize $maybeWaitForSupermajority $maybeAccountsDbSkipShrink $maybeSkipRequireTower\" \
+         \"$maybeNoSnapshot $maybeSkipLedgerVerify $maybeLimitLedgerSize $maybeWaitForSupermajority $maybeAccountsDbSkipInitialClean $maybeSkipRequireTower\" \
          \"$maybeWarpSlot\" \
          \"$maybeFullRpc\" \
          \"$waitForNodeInit\" \
@@ -404,7 +404,7 @@ startNode() {
          $nodeIndex \
          ${#clientIpList[@]} \"$benchTpsExtraArgs\" \
          \"$genesisOptions\" \
-         \"$maybeNoSnapshot $maybeSkipLedgerVerify $maybeLimitLedgerSize $maybeWaitForSupermajority $maybeAccountsDbSkipShrink $maybeSkipRequireTower\" \
+         \"$maybeNoSnapshot $maybeSkipLedgerVerify $maybeLimitLedgerSize $maybeWaitForSupermajority $maybeAccountsDbSkipInitialClean $maybeSkipRequireTower\" \
          \"$maybeWarpSlot\" \
          \"$maybeFullRpc\" \
          \"$waitForNodeInit\" \
@@ -813,7 +813,7 @@ maybeLimitLedgerSize=""
 maybeSkipLedgerVerify=""
 maybeDisableAirdrops=""
 maybeWaitForSupermajority=""
-maybeAccountsDbSkipShrink=""
+maybeAccountsDbSkipInitialClean=""
 maybeSkipRequireTower=""
 debugBuild=false
 profileBuild=false
@@ -939,8 +939,8 @@ while [[ -n $1 ]]; do
     elif [[ $1 = --allow-private-addr ]]; then
       echo "--allow-private-addr is a default value"
       shift 1
-    elif [[ $1 = --accounts-db-skip-shrink ]]; then
-      maybeAccountsDbSkipShrink="$1"
+    elif [[ $1 = --accounts-db-skip-initial-clean ]]; then
+      maybeAccountsDbSkipInitialClean="$1"
       shift 1
     elif [[ $1 = --skip-require-tower ]]; then
       maybeSkipRequireTower="$1"

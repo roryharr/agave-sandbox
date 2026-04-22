@@ -87,7 +87,6 @@ use {
     },
     solana_accounts_db::{
         account_locks::validate_account_locks,
-        account_storage_entry::AccountStorageEntry,
         accounts::{AccountAddressFilter, Accounts, PubkeyAccountSlot},
         accounts_db::{AccountsDb, AccountsDbConfig},
         accounts_hash::AccountsLtHash,
@@ -216,11 +215,6 @@ pub use {
     partitioned_epoch_rewards::KeyedRewardsAndNumPartitions, solana_leader_schedule::SlotLeader,
     solana_reward_info::RewardType,
 };
-
-/// params to `verify_accounts_hash`
-struct VerifyAccountsHashConfig {
-    require_rooted_bank: bool,
-}
 
 mod accounts_lt_hash;
 mod address_lookup_table;
@@ -489,7 +483,6 @@ pub struct BankFieldsToDeserialize {
     pub(crate) is_delta: bool,
     pub(crate) accounts_data_len: u64,
     pub(crate) accounts_lt_hash: AccountsLtHash,
-    pub(crate) bank_hash_stats: BankHashStats,
     pub(crate) block_id: Option<Hash>, // Option wrapper can be removed in version after v4.1
 }
 
@@ -2013,7 +2006,7 @@ impl Bank {
             cache_for_accounts_lt_hash: DashMap::default(),
             stats_for_accounts_lt_hash: AccountsLtHashStats::default(),
             block_id: RwLock::new(fields.block_id),
-            bank_hash_stats: AtomicBankHashStats::new(&fields.bank_hash_stats),
+            bank_hash_stats: AtomicBankHashStats::default(),
             epoch_rewards_calculation_cache: Arc::new(Mutex::new(HashMap::default())),
             expected_bank_hash: RwLock::new(None),
             block_component_processor: RwLock::new(BlockComponentProcessor::default()),
@@ -4849,12 +4842,7 @@ impl Bank {
     pub fn run_final_hash_calc(&self) {
         self.force_flush_accounts_cache();
         // note that this slot may not be a root
-        _ = self.verify_accounts(
-            VerifyAccountsHashConfig {
-                require_rooted_bank: false,
-            },
-            None,
-        );
+        _ = self.verify_accounts(None);
     }
 
     /// Verify the account state as part of startup, typically from a snapshot.
@@ -4870,30 +4858,8 @@ impl Bank {
     ///
     /// Only intended to be called at startup, or from tests/ledger-tool.
     #[must_use]
-    fn verify_accounts(
-        &self,
-        config: VerifyAccountsHashConfig,
-        calculated_accounts_lt_hash: Option<&AccountsLtHash>,
-    ) -> bool {
+    fn verify_accounts(&self, calculated_accounts_lt_hash: Option<&AccountsLtHash>) -> bool {
         let accounts_db = &self.rc.accounts.accounts_db;
-
-        let slot = self.slot();
-
-        if config.require_rooted_bank && !accounts_db.accounts_index.is_alive_root(slot) {
-            if let Some(parent) = self.parent() {
-                info!(
-                    "slot {slot} is not a root, so verify accounts hash on parent bank at slot {}",
-                    parent.slot(),
-                );
-                // The calculated_accounts_lt_hash parameter is only valid for the current slot, so
-                // we must fall back to calculating the accounts lt hash with the index.
-                return parent.verify_accounts(config, None);
-            } else {
-                // this will result in mismatch errors
-                // accounts hash calc doesn't include unrooted slots
-                panic!("cannot verify accounts hash because slot {slot} is not a root");
-            }
-        }
 
         fn check_lt_hash(
             expected_accounts_lt_hash: &AccountsLtHash,
@@ -4923,18 +4889,6 @@ impl Bank {
         };
         info!("Verifying accounts... Done in {:?}", start.elapsed());
         is_ok
-    }
-
-    /// Get this bank's storages to use for snapshots.
-    ///
-    /// If a base slot is provided, return only the storages that are *higher* than this slot.
-    pub fn get_snapshot_storages(&self, base_slot: Option<Slot>) -> Vec<Arc<AccountStorageEntry>> {
-        // if a base slot is provided, request storages starting at the slot *after*
-        let start_slot = base_slot.map_or(0, |slot| slot.saturating_add(1));
-        // we want to *include* the storage at our slot
-        let requested_slots = start_slot..=self.slot();
-
-        self.rc.accounts.accounts_db.get_storages(requested_slots).0
     }
 
     #[must_use]
@@ -5078,20 +5032,15 @@ impl Bank {
     /// calculation and could shield other real accounts.
     pub fn verify_snapshot_bank(
         &self,
-        skip_shrink: bool,
+        skip_initial_clean: bool,
         force_clean: bool,
         latest_full_snapshot_slot: Slot,
         calculated_accounts_lt_hash: Option<&AccountsLtHash>,
     ) -> bool {
         let (verified_accounts, verify_accounts_time_us) = measure_us!({
-            let should_verify_accounts = !self.rc.accounts.accounts_db.skip_initial_hash_calc;
+            let should_verify_accounts = !self.rc.accounts.accounts_db.skip_initial_hash_calc();
             if should_verify_accounts {
-                self.verify_accounts(
-                    VerifyAccountsHashConfig {
-                        require_rooted_bank: false,
-                    },
-                    calculated_accounts_lt_hash,
-                )
+                self.verify_accounts(calculated_accounts_lt_hash)
             } else {
                 info!("Verifying accounts... Skipped.");
                 true
@@ -5099,7 +5048,7 @@ impl Bank {
         });
 
         let (_, clean_time_us) = measure_us!({
-            let should_clean = force_clean || (!skip_shrink && self.slot() > 0);
+            let should_clean = force_clean || (!skip_initial_clean && self.slot() > 0);
             if should_clean {
                 info!("Cleaning...");
                 // We cannot clean past the latest full snapshot's slot because we are about to
@@ -5116,21 +5065,6 @@ impl Bank {
             }
         });
 
-        let (_, shrink_time_us) = measure_us!({
-            let should_shrink = !skip_shrink && self.slot() > 0;
-            if should_shrink {
-                info!("Shrinking...");
-                self.rc.accounts.accounts_db.shrink_all_slots(
-                    true,
-                    // we cannot allow the snapshot slot to be shrunk
-                    Some(self.slot()),
-                );
-                info!("Shrinking... Done.");
-            } else {
-                info!("Shrinking... Skipped.");
-            }
-        });
-
         info!("Verifying bank...");
         let (verified_bank, verify_bank_time_us) = measure_us!(self.verify_hash());
         info!("Verifying bank... Done.");
@@ -5138,7 +5072,6 @@ impl Bank {
         datapoint_info!(
             "verify_snapshot_bank",
             ("clean_us", clean_time_us, i64),
-            ("shrink_us", shrink_time_us, i64),
             ("verify_accounts_us", verify_accounts_time_us, i64),
             ("verify_bank_us", verify_bank_time_us, i64),
         );
@@ -5441,22 +5374,16 @@ impl Bank {
             .clean_accounts(Some(highest_slot_to_clean), false);
     }
 
-    pub fn print_accounts_stats(&self) {
-        self.rc.accounts.accounts_db.print_accounts_stats("");
-    }
-
-    pub fn shrink_candidate_slots(&self) -> usize {
+    /// Run a periodic shrink pass.
+    ///
+    /// When `include_ancient` is true, ancient slots are squashed first
+    /// (callers typically pair this with `clean_accounts`). Returns the
+    /// number of candidate slots selected for shrinking.
+    pub fn shrink(&self, include_ancient: bool) -> usize {
         self.rc
             .accounts
             .accounts_db
-            .shrink_candidate_slots(self.epoch_schedule())
-    }
-
-    pub(crate) fn shrink_ancient_slots(&self) {
-        self.rc
-            .accounts
-            .accounts_db
-            .shrink_ancient_slots(self.epoch_schedule())
+            .shrink(self.epoch_schedule(), include_ancient)
     }
 
     pub fn read_cost_tracker(&self) -> LockResult<RwLockReadGuard<'_, CostTracker>> {

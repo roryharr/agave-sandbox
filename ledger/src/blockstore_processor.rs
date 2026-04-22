@@ -878,7 +878,7 @@ pub struct ProcessOptions {
     pub debug_keys: Option<Arc<HashSet<Pubkey>>>,
     pub limit_load_slot_count_from_snapshot: Option<usize>,
     pub allow_dead_slots: bool,
-    pub accounts_db_skip_shrink: bool,
+    pub accounts_db_skip_initial_clean: bool,
     pub accounts_db_force_initial_clean: bool,
     pub accounts_db_config: AccountsDbConfig,
     pub verify_index: bool,

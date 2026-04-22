@@ -79,6 +79,10 @@ impl AccountStorageEntry {
     }
 
     /// open a new instance of the storage that is readonly
+    pub fn keep_file_on_drop(&self) {
+        self.accounts.keep_file_on_drop();
+    }
+
     pub(crate) fn reopen_as_readonly(&self, storage_access: StorageAccess) -> Option<Self> {
         if storage_access != StorageAccess::File {
             // if we are only using mmap, then no reason to re-open

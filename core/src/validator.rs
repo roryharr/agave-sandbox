@@ -349,7 +349,7 @@ pub struct ValidatorConfig {
     pub process_ledger_before_services: bool,
     pub accounts_db_config: AccountsDbConfig,
     pub warp_slot: Option<Slot>,
-    pub accounts_db_skip_shrink: bool,
+    pub accounts_db_skip_initial_clean: bool,
     pub accounts_db_force_initial_clean: bool,
     pub staked_nodes_overrides: Arc<RwLock<HashMap<Pubkey, u64>>>,
     pub validator_exit: Arc<RwLock<Exit>>,
@@ -427,7 +427,7 @@ impl ValidatorConfig {
             poh_hashes_per_batch: poh_service::DEFAULT_HASHES_PER_BATCH,
             process_ledger_before_services: false,
             warp_slot: None,
-            accounts_db_skip_shrink: false,
+            accounts_db_skip_initial_clean: false,
             accounts_db_force_initial_clean: false,
             staked_nodes_overrides: Arc::new(RwLock::new(HashMap::new())),
             validator_exit: Arc::new(RwLock::new(Exit::default())),
@@ -991,6 +991,14 @@ impl Validator {
             .get(SnapshotPackagerService::NAME)
             .cloned();
         let enable_gossip_push = true;
+        let accounts_db = bank_forks
+            .read()
+            .unwrap()
+            .root_bank()
+            .rc
+            .accounts
+            .accounts_db
+            .clone();
         let snapshot_packager_service = SnapshotPackagerService::new(
             pending_snapshot_packages.clone(),
             starting_snapshot_hashes,
@@ -998,6 +1006,7 @@ impl Validator {
             exit_backpressure,
             cluster_info.clone(),
             snapshot_controller.clone(),
+            accounts_db,
             enable_gossip_push,
             config.snapshot_packager_niceness_adj,
         );
@@ -2129,7 +2138,7 @@ fn load_blockstore(
         new_hard_forks: config.new_hard_forks.clone(),
         debug_keys: config.debug_keys.clone(),
         accounts_db_config: config.accounts_db_config.clone(),
-        accounts_db_skip_shrink: config.accounts_db_skip_shrink,
+        accounts_db_skip_initial_clean: config.accounts_db_skip_initial_clean,
         accounts_db_force_initial_clean: config.accounts_db_force_initial_clean,
         runtime_config: config.runtime_config.clone(),
         use_snapshot_archives_at_startup: config.use_snapshot_archives_at_startup,

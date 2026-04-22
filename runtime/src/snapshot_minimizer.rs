@@ -13,8 +13,9 @@ use {
     solana_account::{ReadableAccount, state_traits::StateMut},
     solana_accounts_db::{
         account_storage_entry::AccountStorageEntry,
-        accounts_db::{AccountsDb, GetUniqueAccountsResult, UpdateIndexThreadSelection},
-        storable_accounts::StorableAccountsBySlot,
+        accounts_db::{
+            AccountsDb, GetUniqueAccountsResult, StorableAccountsBySlot, UpdateIndexThreadSelection,
+        },
     },
     solana_clock::Slot,
     solana_loader_v3_interface::state::UpgradeableLoaderState,
@@ -212,22 +213,16 @@ impl<'a> SnapshotMinimizer<'a> {
     /// Determines minimum set of slots that accounts in `minimized_account_set` are in
     fn get_minimized_slot_set(&self) -> DashSet<Slot> {
         let minimized_slot_set = DashSet::new();
+        let ancestors = &self.bank.ancestors;
         self.minimized_account_set.par_iter().for_each(|pubkey| {
-            self.accounts_db()
-                .accounts_index
-                .get_and_then(&pubkey, |entry| {
-                    if let Some(entry) = entry {
-                        let max_slot = entry
-                            .slot_list_read_lock()
-                            .iter()
-                            .map(|(slot, _)| *slot)
-                            .max();
-                        if let Some(max_slot) = max_slot {
-                            minimized_slot_set.insert(max_slot);
-                        }
-                    }
-                    (false, ())
-                });
+            if let Some((_account_info, slot)) = self.accounts_db().load(
+                ancestors,
+                &pubkey,
+                solana_accounts_db::accounts_db::LoadHint::FixedMaxRoot,
+                solana_accounts_db::accounts_db::PopulateReadCache::False,
+            ) {
+                minimized_slot_set.insert(slot);
+            }
         });
         minimized_slot_set
     }
@@ -237,7 +232,12 @@ impl<'a> SnapshotMinimizer<'a> {
         &self,
         minimized_slot_set: DashSet<Slot>,
     ) -> (Vec<Slot>, Vec<Arc<AccountStorageEntry>>) {
-        let snapshot_storages = self.accounts_db().get_storages(..=self.starting_slot).0;
+        let snapshot_storages = self
+            .accounts_db()
+            .backend
+            .as_append_vec()
+            .get_storages(..=self.starting_slot)
+            .0;
 
         let dead_slots = Mutex::new(Vec::new());
         let dead_storages = Mutex::new(Vec::new());
@@ -267,7 +267,11 @@ impl<'a> SnapshotMinimizer<'a> {
         let slot = storage.slot();
         let GetUniqueAccountsResult {
             stored_accounts, ..
-        } = self.accounts_db().get_unique_accounts_from_storage(storage);
+        } = self
+            .accounts_db()
+            .backend
+            .as_append_vec()
+            .get_unique_accounts_from_storage(storage);
 
         let keep_accounts_collect = Mutex::new(Vec::with_capacity(stored_accounts.len()));
         let purge_pubkeys_collect = Mutex::new(Vec::with_capacity(stored_accounts.len()));
@@ -302,35 +306,55 @@ impl<'a> SnapshotMinimizer<'a> {
         let total_bytes = total_bytes_collect.load(Ordering::Relaxed);
 
         let purge_pubkeys = remove_pubkeys.into_iter().map(|pubkey| (*pubkey, slot));
-        let _ = self.accounts_db().purge_keys_exact(purge_pubkeys);
+        let _ = self
+            .accounts_db()
+            .backend
+            .as_append_vec()
+            .purge_keys_exact(purge_pubkeys);
 
         let mut shrink_in_progress = None;
         if total_bytes > 0 {
             shrink_in_progress = Some(
                 self.accounts_db()
+                    .backend
+                    .as_append_vec()
                     .get_store_for_shrink(slot, total_bytes as u64),
             );
             let new_storage = shrink_in_progress.as_ref().unwrap().new_storage();
 
             let accounts = [(slot, &keep_accounts[..])];
-            let storable_accounts =
-                StorableAccountsBySlot::new(slot, &accounts, self.accounts_db());
-
-            self.accounts_db().store_accounts_frozen(
-                storable_accounts,
-                new_storage,
-                UpdateIndexThreadSelection::Inline,
+            let storable_accounts = StorableAccountsBySlot::new(
+                slot,
+                &accounts,
+                &self.accounts_db().backend.as_append_vec().storage,
             );
 
+            self.accounts_db()
+                .backend
+                .as_append_vec()
+                .store_accounts_frozen(
+                    storable_accounts,
+                    new_storage,
+                    UpdateIndexThreadSelection::Inline,
+                );
+
             new_storage.flush().unwrap();
+            new_storage
+                .accounts
+                .truncate_to_len()
+                .expect("truncate minimized storage");
         }
 
-        let mut dead_storages_this_time = self.accounts_db().mark_dirty_dead_stores(
-            slot,
-            true, // add_dirty_stores
-            shrink_in_progress,
-            false,
-        );
+        let mut dead_storages_this_time = self
+            .accounts_db()
+            .backend
+            .as_append_vec()
+            .mark_dirty_dead_stores(
+                slot,
+                true, // add_dirty_stores
+                shrink_in_progress,
+                false,
+            );
         dead_storages
             .lock()
             .unwrap()
@@ -340,7 +364,9 @@ impl<'a> SnapshotMinimizer<'a> {
     /// Purge dead slots from storage and cache
     fn purge_dead_slots(&self, dead_slots: Vec<Slot>) {
         self.accounts_db()
-            .purge_slots_for_snapshot_minimizer(dead_slots.iter());
+            .backend
+            .as_append_vec()
+            .remove_dead_slot_storages_for_snapshot_minimizer(&dead_slots);
     }
 
     /// Convenience function for getting accounts_db
@@ -523,15 +549,23 @@ mod tests {
         agave_logger::setup();
 
         let (genesis_config, _) = create_genesis_config(1_000_000);
-        let bank = Arc::new(Bank::new_for_tests(&genesis_config));
-        let accounts = &bank.accounts().accounts_db;
-
         let num_slots = 5;
         let num_accounts_per_slot = 300;
 
-        let mut current_slot = 0;
+        // Use new_with_bank_forks_for_tests so child banks have a fork graph,
+        // and advance through each slot so bank.ancestors covers all test slots.
+        let (genesis_bank, bank_forks) = Bank::new_with_bank_forks_for_tests(&genesis_config);
+        let mut bank = genesis_bank;
         let minimized_account_set = DashSet::new();
-        for _ in 0..num_slots {
+        for i in 0..num_slots {
+            let current_slot = bank.slot() + 1;
+            let child = Bank::new_from_parent(bank.clone(), *bank.leader(), current_slot);
+            bank = bank_forks
+                .write()
+                .unwrap()
+                .insert(child)
+                .clone_without_scheduler();
+
             let pubkeys: Vec<_> = (0..num_accounts_per_slot)
                 .map(|_| solana_pubkey::new_rand())
                 .collect();
@@ -541,19 +575,34 @@ mod tests {
             let owner = *AccountSharedData::default().owner();
             let account = AccountSharedData::new(some_lamport, no_data, &owner);
 
-            current_slot += 1;
-
+            let accounts = &bank.accounts().accounts_db;
             for (index, pubkey) in pubkeys.iter().enumerate() {
                 accounts.store_for_tests((current_slot, [(pubkey, &account)].as_slice()));
 
-                if current_slot % 2 == 0 && index % 100 == 0 {
+                if i % 2 == 1 && index % 100 == 0 {
                     minimized_account_set.insert(*pubkey);
                 }
             }
             accounts.add_root_and_flush_write_cache(current_slot);
         }
+        let current_slot = bank.slot();
+        let accounts = &bank.accounts().accounts_db;
 
         assert_eq!(minimized_account_set.len(), 6);
+        // Count starting-slot accounts before minimization (may include sysvars).
+        let starting_slot_count = accounts
+            .backend
+            .as_append_vec()
+            .get_storages(current_slot..=current_slot)
+            .0
+            .iter()
+            .map(|s| {
+                let mut n = 0;
+                s.accounts.scan_pubkeys(|_| n += 1).unwrap();
+                n
+            })
+            .sum::<usize>();
+
         let minimizer = SnapshotMinimizer {
             bank: &bank,
             starting_slot: current_slot,
@@ -561,7 +610,7 @@ mod tests {
         };
         minimizer.minimize_accounts_db();
 
-        let snapshot_storages = accounts.get_storages(..=current_slot).0;
+        let snapshot_storages = accounts.backend.as_append_vec().get_storages(..=current_slot).0;
         assert_eq!(snapshot_storages.len(), 3);
 
         let mut account_count = 0;
@@ -574,10 +623,11 @@ mod tests {
                 .expect("must scan accounts storage");
         });
 
+        // Starting slot is untouched; other kept slots have minimized_account_set accounts.
         assert_eq!(
             account_count,
-            minimizer.minimized_account_set.len() + num_accounts_per_slot
-        ); // snapshot slot is untouched, so still has all 300 accounts
+            minimizer.minimized_account_set.len() + starting_slot_count
+        );
     }
 
     /// Ensure that minimized snapshots are loadable with and without

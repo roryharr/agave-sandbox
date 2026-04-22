@@ -1,10 +1,9 @@
 use {
     crate::{
         account_locks::{AccountLocks, validate_account_locks},
-        account_storage::stored_account_info::StoredAccountInfo,
         accounts_db::{
             AccountsAddRootTiming, AccountsDb, LoadHint, LoadedAccount, PopulateReadCache,
-            ScanAccountStorageData, ScanStorageResult, UpdateIndexThreadSelection,
+            UpdateIndexThreadSelection,
         },
         accounts_index::IndexKey,
         accounts_scan::{ScanConfig, ScanError, ScanResult},
@@ -29,7 +28,7 @@ use {
     solana_transaction_error::TransactionResult as Result,
     std::{
         cmp::Reverse,
-        collections::{BinaryHeap, HashMap, HashSet},
+        collections::{BinaryHeap, HashSet},
         sync::{
             Arc, Mutex,
             atomic::{AtomicUsize, Ordering},
@@ -77,6 +76,7 @@ pub enum AccountAddressFilter {
 
 impl Accounts {
     pub fn new(accounts_db: Arc<AccountsDb>) -> Self {
+        accounts_db.init_eviction_callback();
         Self {
             accounts_db,
             account_locks: Mutex::new(AccountLocks::default()),
@@ -208,32 +208,9 @@ impl Accounts {
     pub fn scan_slot<F, B>(&self, slot: Slot, func: F) -> Vec<B>
     where
         F: Fn(&LoadedAccount) -> Option<B> + Send + Sync,
-        B: Sync + Send + Default + std::cmp::Eq,
+        B: Sync + Send,
     {
-        let scan_result = self.accounts_db.scan_account_storage(
-            slot,
-            |loaded_account: &LoadedAccount| {
-                // Cache only has one version per key, don't need to worry about versioning
-                func(loaded_account)
-            },
-            |accum: &mut HashMap<Pubkey, B>, stored_account, data| {
-                // SAFETY: We called scan_account_storage() with
-                // ScanAccountStorageData::DataRefForStorage, so `data` must be Some.
-                let data = data.unwrap();
-                let loaded_account =
-                    LoadedAccount::Stored(StoredAccountInfo::new_from(stored_account, data));
-                let loaded_account_pubkey = *loaded_account.pubkey();
-                if let Some(val) = func(&loaded_account) {
-                    accum.insert(loaded_account_pubkey, val);
-                }
-            },
-            ScanAccountStorageData::DataRefForStorage,
-        );
-
-        match scan_result {
-            ScanStorageResult::Cached(cached_result) => cached_result,
-            ScanStorageResult::Stored(stored_result) => stored_result.into_values().collect(),
-        }
+        self.accounts_db.scan_slot_cache(slot, func)
     }
 
     /// Returns all the accounts from `slot`
@@ -788,7 +765,6 @@ mod tests {
         let pubkey2 = solana_pubkey::new_rand();
         let account2 = AccountSharedData::new(1, 0, &Pubkey::from([3; 32]));
         accounts.store_for_tests(0, &pubkey2, &account2);
-        accounts.add_root_and_flush_write_cache(0);
 
         let loaded = accounts.load_by_program_slot(0, Some(&Pubkey::from([2; 32])));
         assert_eq!(loaded.len(), 2);
@@ -796,6 +772,8 @@ mod tests {
         assert_eq!(loaded, vec![(pubkey2, account2)]);
         let loaded = accounts.load_by_program_slot(0, Some(&Pubkey::from([4; 32])));
         assert_eq!(loaded, vec![]);
+
+        accounts.add_root_and_flush_write_cache(0);
     }
 
     #[test]

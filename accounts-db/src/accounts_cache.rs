@@ -9,11 +9,13 @@ use {
         collections::BTreeSet,
         ops::Deref,
         sync::{
-            Arc, RwLock,
+            Arc, OnceLock, RwLock,
             atomic::{AtomicBool, AtomicU64, Ordering},
         },
     },
 };
+
+type PubkeyEvictedCallback = Box<dyn Fn(&Pubkey) + Send + Sync>;
 
 /// Tracks the maximum flushed root slot.
 ///
@@ -200,12 +202,22 @@ impl CachedAccount {
 /// pubkey has been written into the cache, and ref_count is the number of SlotCache entries that
 /// currently hold the pubkey. max_slot may be stale after a removal; callers must handle a
 /// look-up miss on max_slot by falling back to scanning all slots in the cache (see load_latest)
-#[derive(Debug, Default)]
+#[derive(Default)]
 struct AccountsCacheIndex {
     entries: DashMap<Pubkey, (Slot, u32), PubkeyHasherBuilder>,
     // The number of unique pubkeys in the index, for reporting purposes. This is to avoid having to
     // lock each shard of the entries dashmap to count unique keys on demand
     num_unique_pubkeys: AtomicU64,
+    /// Called for each pubkey fully evicted from the index (ref_count reaches zero).
+    on_pubkey_evicted: OnceLock<PubkeyEvictedCallback>,
+}
+
+impl std::fmt::Debug for AccountsCacheIndex {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AccountsCacheIndex")
+            .field("entries", &self.entries)
+            .finish_non_exhaustive()
+    }
 }
 
 impl AccountsCacheIndex {
@@ -223,9 +235,13 @@ impl AccountsCacheIndex {
             });
     }
 
+    fn set_on_pubkey_evicted(&self, f: impl Fn(&Pubkey) + Send + Sync + 'static) {
+        let _ = self.on_pubkey_evicted.set(Box::new(f));
+    }
+
     /// Decrement the reference count for each pubkey in `pubkeys`. Removes an entry entirely if
     /// the count reaches zero. `max_slot` is not updated; it will become stale if the removed slot
-    /// is the highest slot
+    /// is the highest slot.
     fn remove(&self, pubkeys: impl IntoIterator<Item = Pubkey>) {
         for pubkey in pubkeys {
             let Entry::Occupied(mut occupied_entry) = self.entries.entry(pubkey) else {
@@ -237,6 +253,9 @@ impl AccountsCacheIndex {
             if *ref_count == 0 {
                 occupied_entry.remove_entry();
                 self.num_unique_pubkeys.fetch_sub(1, Ordering::Relaxed);
+                if let Some(cb) = self.on_pubkey_evicted.get() {
+                    cb(&pubkey);
+                }
             }
         }
     }
@@ -337,6 +356,12 @@ impl AccountsCache {
     pub fn load(&self, slot: Slot, pubkey: &Pubkey) -> Option<Arc<CachedAccount>> {
         self.slot_cache(slot)
             .and_then(|slot_cache| slot_cache.get_cloned(pubkey))
+    }
+
+    /// Register a callback invoked for each pubkey fully evicted from the cache.
+    /// May only be called once; subsequent calls are silently ignored.
+    pub fn set_on_pubkey_evicted(&self, f: impl Fn(&Pubkey) + Send + Sync + 'static) {
+        self.index.set_on_pubkey_evicted(f);
     }
 
     pub fn remove_slot(&self, slot: Slot) -> Option<Arc<SlotCache>> {

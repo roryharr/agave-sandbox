@@ -6956,10 +6956,12 @@ dependencies = [
  "static_assertions",
  "strum",
  "strum_macros",
+ "symlink",
  "tempfile",
  "test-case",
  "thiserror 2.0.18",
  "tikv-jemallocator",
+ "wincode",
 ]
 
 [[package]]

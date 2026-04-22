@@ -42,15 +42,7 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> Iterator
 
 #[cfg(test)]
 mod tests {
-    use {
-        super::{
-            super::{UpsertReclaim, secondary::AccountSecondaryIndexes},
-            *,
-        },
-        crate::accounts_index::ReclaimsSlotList,
-        solana_account::AccountSharedData,
-        std::iter,
-    };
+    use {super::super::*, std::iter};
 
     /// Ensure iterator visits all bins.
     #[test]
@@ -72,17 +64,7 @@ mod tests {
         assert!(iter.next().is_none());
 
         // add a new entry to the index
-        let mut gc = ReclaimsSlotList::new();
-        index.upsert(
-            0,
-            0,
-            &solana_pubkey::new_rand(),
-            &AccountSharedData::default(),
-            &AccountSecondaryIndexes::default(),
-            true,
-            &mut gc,
-            UpsertReclaim::PopulateReclaims,
-        );
+        let _ = index.insert(0, &solana_pubkey::new_rand(), true);
 
         // ensure the iterator remains exhausted
         assert!(iter.next().is_none());
@@ -104,19 +86,7 @@ mod tests {
         pubkeys.sort_unstable();
 
         for pubkey in &pubkeys {
-            let slot = 0;
-            let value = true;
-            let mut gc = ReclaimsSlotList::new();
-            index.upsert(
-                slot,
-                slot,
-                pubkey,
-                &AccountSharedData::default(),
-                &AccountSecondaryIndexes::default(),
-                value,
-                &mut gc,
-                UpsertReclaim::PopulateReclaims,
-            );
+            let _ = index.insert(0, pubkey, true);
         }
 
         let mut num_empty_bins = 0;
@@ -147,19 +117,7 @@ mod tests {
         pubkeys.sort_unstable();
 
         for pubkey in &pubkeys {
-            let slot = 0;
-            let value = true;
-            let mut gc = ReclaimsSlotList::new();
-            index.upsert(
-                slot,
-                slot,
-                pubkey,
-                &AccountSharedData::default(),
-                &AccountSecondaryIndexes::default(),
-                value,
-                &mut gc,
-                UpsertReclaim::PopulateReclaims,
-            );
+            let _ = index.insert(0, pubkey, true);
         }
 
         let mut num_empty_bins = 0;
