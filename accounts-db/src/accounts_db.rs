@@ -4051,13 +4051,30 @@ impl AccountsDb {
         // since the cache could be flushed in between the 2 calls.
         let in_write_cache = matches!(account_accessor, LoadedAccountAccessor::Cached(_));
         if in_write_cache {
+            let cached_entry = cache_result
+                .as_ref()
+                .map(|(_, cached_slot, slot_status)| (*cached_slot, *slot_status));
+
             // While the account wasn't loaded directly from the write cache, the write cache
             // provided the correct slot, so count this as a load from the write cache
-            if cache_result.is_some_and(|(_, cached_slot, _)| cached_slot == slot) {
+            // With an unspecified loadhint, concurrent transactions can occur that update the account
+            // after the accounts cache read but before the storage read. This is an accepted race
+            // with an unspecified load hint, but it still would have been correct to return the account
+            // found in the write cache
+            if load_hint == LoadHint::Unspecified || cached_entry.map(|(s, _)| s) == Some(slot) {
                 self.load_account_stats
                     .num_loaded_from_write_cache
                     .fetch_add(1, Ordering::Relaxed);
             } else {
+                // Under FixedMaxRoot (transaction loading), writes to this account are
+                // serialized with the load, so the write-cache slot observed at entry
+                // should still match the slot the index resolves to.
+                let ending_max_root = self.accounts_index.max_root_inclusive();
+                warn!(
+                    "do_load: index resolved to slot {slot} but write-cache entry at entry was \
+                     {cached_entry:?} (pubkey={pubkey}, load_hint={load_hint:?}, max_root \
+                     {starting_max_root}->{ending_max_root})"
+                );
                 self.load_account_stats
                     .num_loaded_from_index_cache
                     .fetch_add(1, Ordering::Relaxed);
