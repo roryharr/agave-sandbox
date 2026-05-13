@@ -368,10 +368,12 @@ impl AccountsCache {
             for slot in (ancestors_min_slot..=index_max_slot).rev() {
                 if ancestors.contains_key(&slot) {
                     if let Some(account) = self.load(slot, pubkey) {
-                        // Need to check flush status of the slot even for ancestors, because
-                        // there could be newer version of the account that has already been
-                        // flushed
-                        let slot_status = if r_roots_being_flushed.contains(&slot) {
+                        // When the found slot is the cache's max for this pubkey, no newer
+                        // version exists in cache or storage, so the cache copy is authoritative
+                        // even if the slot is currently being flushed.
+                        let slot_status = if slot == index_max_slot {
+                            SlotStatus::Ancestor
+                        } else if r_roots_being_flushed.contains(&slot) {
                             SlotStatus::AncestorBeingFlushed
                         } else {
                             SlotStatus::Ancestor
@@ -404,7 +406,15 @@ impl AccountsCache {
         let r_roots_being_flushed = self.roots_being_flushed.read().unwrap();
         for &slot in r_roots_being_flushed.range(..=max_root_slot).rev() {
             if let Some(account) = self.load(slot, pubkey) {
-                return Some((account, slot, SlotStatus::RootBeingFlushed));
+                // When the found slot is the cache's max for this pubkey, no newer
+                // version exists in cache or storage, so the cache copy is authoritative
+                // even if the slot is currently being flushed.
+                let slot_status = if slot == index_max_slot {
+                    SlotStatus::UnflushedRoot
+                } else {
+                    SlotStatus::RootBeingFlushed
+                };
+                return Some((account, slot, slot_status));
             }
         }
         drop(r_roots_being_flushed);
@@ -704,8 +714,10 @@ mod tests {
     #[test_case(&[10], &[], &[], &[], Some((10, SlotStatus::Ancestor)); "ancestor only")]
     #[test_case(&[5, 10, 15], &[], &[], &[], Some((15, SlotStatus::Ancestor)); "highest ancestor returned")]
     #[test_case(&[], &[10, 20], &[], &[], Some((20, SlotStatus::UnflushedRoot)); "rooted, with no ancestors")]
-    #[test_case(&[], &[], &[10], &[], Some((10, SlotStatus::RootBeingFlushed)); "root being flushed")]
-    #[test_case(&[10], &[], &[10], &[], Some((10, SlotStatus::AncestorBeingFlushed)); "ancestor being flushed")]
+    #[test_case(&[], &[], &[10], &[], Some((10, SlotStatus::UnflushedRoot)); "root being flushed at max slot")]
+    #[test_case(&[10], &[], &[10], &[], Some((10, SlotStatus::Ancestor)); "ancestor being flushed at max slot")]
+    #[test_case(&[10], &[20], &[10], &[], Some((10, SlotStatus::AncestorBeingFlushed)); "ancestor being flushed not at max")]
+    #[test_case(&[], &[20], &[10], &[15], Some((10, SlotStatus::RootBeingFlushed)); "root being flushed not at max")]
     #[test_case(&[5], &[20], &[], &[], Some((5, SlotStatus::Ancestor)); "ancestor wins over higher root")]
     #[test_case(&[], &[20], &[10], &[], Some((20, SlotStatus::UnflushedRoot));"unflushed root over flushing root")]
     #[test_case(&[5], &[20], &[10], &[], Some((5, SlotStatus::Ancestor));"ancestor over unflushed and flushing roots")]
@@ -879,9 +891,10 @@ mod tests {
         let ancestors = Ancestors::from(vec![5, 10]);
         let (account, slot, status) = cache.load_latest(&pk, &ancestors).unwrap();
 
-        // Slot 10 is highest ancestor but is being flushed, so should return AncestorBeingFlushed
+        // Slot 10 is highest ancestor and matches the cache's max for this pubkey,
+        // so the status promotes from AncestorBeingFlushed to Ancestor.
         assert_eq!(slot, 10);
-        assert_eq!(status, SlotStatus::AncestorBeingFlushed);
+        assert_eq!(status, SlotStatus::Ancestor);
         assert_eq!(account.account.lamports(), 10);
 
         cache.end_flush_roots();
