@@ -481,6 +481,26 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
         });
     }
 
+    /// If the in-mem entry for `pubkey` is single-slot with `ref_count == 1` and currently dirty,
+    /// write it through to disk
+    pub fn try_write_through(&self, pubkey: &Pubkey) {
+        if !self.should_write_through {
+            return;
+        }
+        let to_write = self.get_only_in_mem(pubkey, false, |entry| {
+            entry.and_then(|entry| {
+                if !entry.dirty() {
+                    return None;
+                }
+                let slot_list = entry.slot_list_read_lock();
+                (slot_list.len() == 1 && entry.ref_count() == 1).then(|| slot_list[0])
+            })
+        });
+        if let Some((slot, info)) = to_write {
+            self.write_through(pubkey, slot, info);
+        }
+    }
+
     /// Clean the slot list by removing all slot_list items older than the max_slot.
     /// Decrease the reference count of the entry by the number of removed accounts.
     /// Note: This must only be called on startup, and reclaims must be reclaimed.
@@ -548,7 +568,6 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
     ) {
         let (slot, account_info) = new_value.into();
         let is_cached = account_info.is_cached();
-        let mut should_write_through = false;
 
         self.get_or_create_index_entry_for_pubkey(pubkey, |entry| {
             if is_cached {
@@ -562,14 +581,9 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
                     reclaims,
                     reclaim,
                 );
-                should_write_through =
-                    self.should_write_through && slot_list_length == 1 && entry.ref_count() == 1;
                 self.set_age_to_future(entry, slot_list_length > 1);
             }
         });
-        if should_write_through {
-            self.write_through(pubkey, slot, account_info);
-        }
     }
 
     /// Replaces the slot list entry at `old_slot` with `new_item`.
@@ -3061,6 +3075,7 @@ mod tests {
             &mut ReclaimsSlotList::new(),
             UpsertReclaim::IgnoreReclaims,
         );
+        index.try_write_through(&pubkey);
 
         index.get_only_in_mem(&pubkey, false, |entry| {
             let entry = entry.expect("entry should be in memory");
@@ -3072,6 +3087,66 @@ mod tests {
             .expect("upsert should have written entry to disk");
         assert_eq!(slot_list, SlotList::from([(slot, info)]));
         assert_eq!(ref_count, 1);
+    }
+
+    /// `try_write_through` must leave a multi-version entry alone: if the pubkey still has more
+    /// than one slot-list entry (ref_count > 1), persisting just one of them to disk would let a
+    /// later eviction drop the fresher in-mem entry in favor of an incomplete disk entry. The
+    /// entry must stay dirty and nothing must be written to disk.
+    #[test]
+    fn test_try_write_through_skips_multi_version_entry() {
+        let index = new_should_write_through_for_test(None);
+        let pubkey = solana_pubkey::new_rand();
+        let info = 10;
+
+        assert!(index.load_from_disk(&pubkey).is_none(), "not on disk yet");
+
+        // Upsert the same pubkey at two different (uncached) slots so its slot list has two
+        // entries and ref_count == 2
+        for slot in [1, 2] {
+            let new_value = PreAllocatedAccountMapEntry::new(slot, info, &index.storage, true);
+            index.upsert(
+                &pubkey,
+                new_value,
+                None,
+                &mut ReclaimsSlotList::new(),
+                UpsertReclaim::IgnoreReclaims,
+            );
+        }
+        index.get_only_in_mem(&pubkey, false, |entry| {
+            let entry = entry.expect("entry should be in memory");
+            assert_eq!(
+                entry.slot_list_read_lock().len(),
+                2,
+                "two-version slot list"
+            );
+            assert_eq!(entry.ref_count(), 2);
+            assert!(entry.dirty(), "dirty before write-through attempt");
+        });
+
+        let immediate_writes_before = index
+            .stats()
+            .flush_entries_updated_on_disk_immediate
+            .load(Ordering::Relaxed);
+
+        index.try_write_through(&pubkey);
+
+        index.get_only_in_mem(&pubkey, false, |entry| {
+            let entry = entry.expect("entry should still be in memory");
+            assert!(entry.dirty(), "multi-version entry must stay dirty");
+        });
+        assert!(
+            index.load_from_disk(&pubkey).is_none(),
+            "multi-version entry must not be written through to disk"
+        );
+        assert_eq!(
+            index
+                .stats()
+                .flush_entries_updated_on_disk_immediate
+                .load(Ordering::Relaxed),
+            immediate_writes_before,
+            "no immediate disk write should have fired"
+        );
     }
 
     /// When the bin exceeds the threshold and a new pubkey is inserted in `should_write_through`
@@ -3094,6 +3169,7 @@ mod tests {
                 &mut ReclaimsSlotList::new(),
                 UpsertReclaim::IgnoreReclaims,
             );
+            index.try_write_through(pubkey);
         }
         assert_eq!(index.map_internal.read().unwrap().len(), 3);
 
