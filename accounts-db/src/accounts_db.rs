@@ -4055,7 +4055,7 @@ impl AccountsDb {
         if in_write_cache {
             // While the account wasn't loaded directly from the write cache, the write cache
             // provided the correct slot, so count this as a load from the write cache
-            if cache_result.is_some_and(|(_, cached_slot, _)| cached_slot == slot) {
+            if cache_result.is_some_and(|(_, cached_slot, _)| cached_slot >= slot) {
                 self.load_account_stats
                     .num_loaded_from_write_cache
                     .fetch_add(1, Ordering::Relaxed);
@@ -4229,7 +4229,7 @@ impl AccountsDb {
                 // the slot and from the Accounts Index
                 num_cached_slots_removed += 1;
                 total_removed_cached_bytes += slot_cache.total_bytes();
-                self.purge_slot_cache(*remove_slot, &slot_cache);
+                self.remove_dead_slots_metadata(std::iter::once(remove_slot));
                 remove_cache_elapsed.stop();
                 remove_cache_elapsed_across_slots += remove_cache_elapsed.as_us();
                 // Nobody else should have removed the slot cache entry yet
@@ -4328,34 +4328,6 @@ impl AccountsDb {
         self.stats
             .dropped_stores
             .fetch_add(num_stored_slots_removed as u64, Ordering::Relaxed);
-    }
-
-    fn purge_slot_cache(&self, purged_slot: Slot, slot_cache: &SlotCache) {
-        let pubkeys = slot_cache.iter().map(|account| *account.key());
-        self.purge_slot_cache_pubkeys(purged_slot, pubkeys, true);
-    }
-
-    fn purge_slot_cache_pubkeys(
-        &self,
-        purged_slot: Slot,
-        pubkeys: impl IntoIterator<Item = Pubkey>,
-        is_dead: bool,
-    ) {
-        // Slot purged from cache should not exist in the backing store
-        assert!(
-            self.storage
-                .get_slot_storage_entry_shrinking_in_progress_ok(purged_slot)
-                .is_none()
-        );
-        let mut num_purged_keys = 0;
-        let (reclaims, _) = self.purge_keys_exact(pubkeys.into_iter().map(|key| {
-            num_purged_keys += 1;
-            (key, purged_slot)
-        }));
-        assert_eq!(reclaims.len(), num_purged_keys);
-        if is_dead {
-            self.remove_dead_slots_metadata(std::iter::once(&purged_slot));
-        }
     }
 
     fn purge_slot_storage(&self, remove_slot: Slot, purge_stats: &PurgeStats) {
@@ -4733,11 +4705,6 @@ impl AccountsDb {
             })
             .collect();
 
-        let is_dead_slot = accounts.is_empty();
-        // Remove the account index entries from earlier roots that are outdated by later roots.
-        // Safe because queries to the index will be reading updates from later roots.
-        self.purge_slot_cache_pubkeys(slot, pubkeys, is_dead_slot);
-
         // Use ReclaimOldSlots to reclaim old slots if marking obsolete accounts and cleaning
         // Cleaning is enabled if `should_flush_f` is Some.
         // should_flush_f is set to None when
@@ -4749,7 +4716,7 @@ impl AccountsDb {
             UpsertReclaim::IgnoreReclaims
         };
 
-        if !is_dead_slot {
+        if !accounts.is_empty() {
             // This ensures that all updates are written to an AppendVec, before any
             // updates to the index happen, so anybody that sees a real entry in the index,
             // will be able to find the account in storage
@@ -4773,13 +4740,30 @@ impl AccountsDb {
             // all the data for the slot
             assert!(self.storage.get_slot_storage_entry(slot).is_some());
             self.reopen_storage_as_readonly_shrinking_in_progress_ok(slot);
+        } else {
+            self.remove_dead_slots_metadata(std::iter::once(&slot));
         }
 
         // Remove this slot from the cache, which will to AccountsDb's new readers should look like an
         // atomic switch from the cache to storage.
         // There is some racy condition for existing readers who just has read exactly while
         // flushing. That case is handled by retry_to_get_account_accessor()
-        assert!(self.accounts_cache.remove_slot(slot).is_some());
+        let dropped_slot_cache = self
+            .accounts_cache
+            .remove_slot(slot)
+            .expect("slot must be in the cache when flushing");
+
+        // Cache-drop write-through: flush upserts skip inline write-through to avoid
+        // writing hot pubkeys to disk every slot. Now that this slot has left the
+        // cache, any pubkey that no longer appears in any cached slot is eligible to
+        // be written through so its in-mem entry becomes clean and can be evicted.
+        for entry in dropped_slot_cache.iter() {
+            let pubkey = *entry.key();
+            if !self.accounts_cache.contains_pubkey(&pubkey) {
+                self.accounts_index.write_through_cache_dropped(&pubkey);
+            }
+        }
+        drop(dropped_slot_cache);
 
         // Add `accounts` to uncleaned_pubkeys since they were written to storage
         // and should be visited by `clean`.
@@ -4947,7 +4931,7 @@ impl AccountsDb {
     ///
     /// Only intended to be called at startup by ledger-tool or tests.
     pub fn calculate_capitalization_at_startup_from_index(&self, ancestors: &Ancestors) -> u64 {
-        self.accounts_index
+        let storage_capitialization = self.accounts_index
             .account_maps
             .par_iter()
             .map(|accounts_index_bin| {
@@ -4975,6 +4959,36 @@ impl AccountsDb {
                     .try_fold(0, u64::checked_add)
             })
             .try_reduce(|| 0, u64::checked_add)
+            .expect("capitalization cannot overflow");
+
+        let cached_update = self
+            .accounts_cache
+            .cached_pubkeys()
+            .iter()
+            .map(|pubkey| {
+                // mix out whatever older version the index walk produced (if any)
+                let stored_lamports = self
+                    .accounts_index
+                    .get_with_and_then(pubkey, ancestors, false, |(slot, account_info)| {
+                        self.get_account_accessor(slot, pubkey, &account_info.storage_location())
+                            .get_loaded_account(|loaded_account| loaded_account.lamports())
+                    })
+                    .flatten()
+                    .unwrap_or(0);
+
+                // mix in the cache version
+                let cached_lamports = self
+                    .load(ancestors, pubkey, LoadHint::FixedMaxRoot, PopulateReadCache::False)
+                    .map(|(account, _slot)| account.lamports())
+                    .unwrap_or(0);
+
+                cached_lamports as i128 - stored_lamports as i128
+            })
+            .sum::<i128>();
+
+        i128::from(storage_capitialization)
+            .checked_add(cached_update)
+            .and_then(|net| u64::try_from(net).ok())
             .expect("capitalization cannot overflow")
     }
 
@@ -5041,7 +5055,6 @@ impl AccountsDb {
         store_account: &BitVec,
         update_index_thread_selection: UpdateIndexThreadSelection,
     ) {
-        let target_slot = accounts.target_slot();
         let len = accounts.len();
         assert_eq!(accounts.len() as u64, store_account.len());
 
@@ -5049,16 +5062,6 @@ impl AccountsDb {
             (start..end).for_each(|i| {
                 if store_account[i as u64] {
                     accounts.account(i, |account| {
-                        let info =
-                            AccountInfo::new(StorageLocation::Cached, account.is_zero_lamport());
-                        self.accounts_index.upsert(
-                            target_slot,
-                            target_slot,
-                            account.pubkey(),
-                            info,
-                            ReclaimsSlotList::default().as_mut(),
-                            UpsertReclaim::PreviousSlotEntryWasCached,
-                        );
                         self.accounts_index.update_secondary_indexes(
                             account.pubkey(),
                             &account,

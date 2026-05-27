@@ -1006,7 +1006,9 @@ fn test_remove_zero_lamport_single_ref_accounts_after_shrink() {
         accounts.accounts_index.get_and_then(&pubkey_zero, |entry| {
             let expected_ref_count = if pass < 2 { 1 } else { 2 };
             assert_eq!(entry.unwrap().ref_count(), expected_ref_count, "{pass}");
-            let expected_slot_list = if pass < 1 { 1 } else { 2 };
+            // Only flushed slots appear in the index slot list; the cached write at slot+1
+            // in pass 1 doesn't bump it because cache writes don't upsert the index.
+            let expected_slot_list = if pass < 2 { 1 } else { 2 };
             assert_eq!(entry.unwrap().slot_list_lock_read_len(), expected_slot_list);
             (false, ())
         });
@@ -1030,24 +1032,9 @@ fn test_remove_zero_lamport_single_ref_accounts_after_shrink() {
                     assert!(entry.is_none(), "{pass}");
                 }
                 1 => {
-                    // alive only in slot + 1
-                    assert_eq!(entry.unwrap().slot_list_lock_read_len(), 1);
-                    assert_eq!(
-                        entry
-                            .unwrap()
-                            .slot_list_read_lock()
-                            .first()
-                            .map(|(s, _)| s)
-                            .cloned()
-                            .unwrap(),
-                        slot + 1
-                    );
-                    let expected_ref_count = 0;
-                    assert_eq!(
-                        entry.map(|e| e.ref_count()),
-                        Some(expected_ref_count),
-                        "{pass}"
-                    );
+                    // The single index entry (slot 1) was removed; the cached write at
+                    // slot + 1 is untouched but still doesn't appear in the index.
+                    assert!(entry.is_none(), "{pass}");
                 }
                 2 => {
                     // alive in both slot, slot + 1
@@ -6079,26 +6066,29 @@ fn test_clean_old_storages_with_reclaims_unrooted() {
     assert!(!accounts_db.uncleaned_pubkeys.contains_key(&new_slot));
     assert!(!accounts_db.dirty_stores.contains_key(&new_slot));
 
-    // ensure the slot list for `pubkey` has both the old and new slots
+    // The index slot list for `pubkey` only contains the flushed (rooted) `old_slot`;
+    // the unrooted `new_slot` write lives in the write cache until it is flushed.
     let slot_list = accounts_db
         .accounts_index
         .get_bin(&pubkey)
         .slot_list_mut(&pubkey, |slot_list| slot_list.clone_list())
         .unwrap();
-    assert_eq!(slot_list.len(), slots.len());
-    assert!(slot_list.iter().map(|(slot, _)| slot).eq(slots.iter()));
+    assert_eq!(slot_list.len(), 1);
+    assert_eq!(slot_list[0].0, old_slot);
+    assert!(accounts_db.accounts_cache.load(new_slot, &pubkey).is_some());
 
     // `clean` should *not* reclaim the account in `old_slot` because `new_slot` is not a root
     accounts_db.clean_accounts_for_tests();
 
-    // ensure we have NOT reclaimed the account in `old_slot`
+    // ensure we have NOT reclaimed the account in `old_slot` or `new_slot`
     let slot_list = accounts_db
         .accounts_index
         .get_bin(&pubkey)
         .slot_list_mut(&pubkey, |slot_list| slot_list.clone_list())
         .unwrap();
-    assert_eq!(slot_list.len(), slots.len());
-    assert!(slot_list.iter().map(|(slot, _)| slot).eq(slots.iter()));
+    assert_eq!(slot_list.len(), 1);
+    assert_eq!(slot_list[0].0, old_slot);
+    assert!(accounts_db.accounts_cache.load(new_slot, &pubkey).is_some());
 }
 
 /// Ensure the calculating capitalization produces the correct value
@@ -6333,7 +6323,7 @@ fn test_new_zero_lamport_accounts_skipped() {
             .unwrap()
             .contains_key(&pubkey1)
     );
-    assert!(accounts_db.accounts_index.contains(&pubkey2));
+    assert!(accounts_db.accounts_cache.contains_pubkey(&pubkey2));
     assert!(
         accounts_db
             .accounts_cache
@@ -6341,7 +6331,7 @@ fn test_new_zero_lamport_accounts_skipped() {
             .unwrap()
             .contains_key(&pubkey2)
     );
-    assert!(accounts_db.accounts_index.contains(&pubkey3));
+    assert!(accounts_db.accounts_cache.contains_pubkey(&pubkey3));
     assert!(
         accounts_db
             .accounts_cache
@@ -6350,14 +6340,14 @@ fn test_new_zero_lamport_accounts_skipped() {
             .contains_key(&pubkey3)
     );
 
-    // 3. Insert a zero-lamport update for an already-indexed pubkey (pubkey2).
-    //    Verify pubkey2 remains in the index and gets added to the slot cache.
+    // 3. Insert a zero-lamport update for a pubkey already present in the write cache
+    //    (pubkey2). Verify pubkey2 remains in the cache (the update is not skipped because
+    //    is_latest_account_zero_lamport finds the prior cache entry).
     accounts_db.store_accounts_unfrozen(
         (slot, [(&pubkey2, &zero_account)].as_slice()),
         UpdateIndexThreadSelection::Inline,
         &ancestors,
     );
-    assert!(accounts_db.accounts_index.contains(&pubkey2));
     assert!(accounts_db.accounts_cache.contains_pubkey(&pubkey2));
 
     // 4. Flush the slot to simulate write-cache -> storage transition and verify
@@ -6374,7 +6364,7 @@ fn test_new_zero_lamport_accounts_skipped() {
     }));
 
     // 5. Add a non-zero lamport account for a pubkey that was previously only written as zero
-    //    (pubkey1) and verify the pubkey is added to the index.
+    //    (pubkey1) and verify the pubkey is added to the write cache.
     let slot = slot + 1;
     ancestors.insert(slot);
     accounts_db.store_accounts_unfrozen(
@@ -6382,7 +6372,7 @@ fn test_new_zero_lamport_accounts_skipped() {
         UpdateIndexThreadSelection::Inline,
         &ancestors,
     );
-    assert!(accounts_db.accounts_index.contains(&pubkey1));
+    assert!(accounts_db.accounts_cache.contains_pubkey(&pubkey1));
 
     // 6. Set pubkey3 to zero lamports and flush. Verify pubkey3 is present in the index with
     // a zero-lamport AccountInfo after flushing.

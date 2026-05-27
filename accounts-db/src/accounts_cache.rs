@@ -886,4 +886,30 @@ mod tests {
 
         cache.end_flush_roots();
     }
+
+    #[test]
+    fn test_load_latest_ancestor_being_flushed_when_higher_non_ancestor_exists() {
+        let cache = AccountsCache::default();
+        let pk = Pubkey::new_unique();
+
+        // Slot 10 is the reader's ancestor and is being flushed.
+        cache.store(10, &pk, AccountSharedData::new(10, 0, &Pubkey::default()));
+        cache.add_root(10);
+
+        // Slot 20 holds a newer cache entry for the same pubkey but is *not* in the
+        // reader's ancestors (different fork). It bumps max_slot_for_pubkey above 10.
+        cache.store(20, &pk, AccountSharedData::new(20, 0, &Pubkey::default()));
+
+        cache.begin_flush_roots(Some(10));
+
+        let ancestors = Ancestors::from(vec![10]);
+        let (_, slot, status) = cache.load_latest(&pk, &ancestors).unwrap();
+
+        // Found at slot 10, but max_slot_for_pubkey is 20 — so the cache copy at 10 is
+        // not provably newest, and the BeingFlushed status must be preserved.
+        assert_eq!(slot, 10);
+        assert_eq!(status, SlotStatus::AncestorBeingFlushed);
+
+        cache.end_flush_roots();
+    }
 }

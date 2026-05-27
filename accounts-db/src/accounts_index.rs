@@ -797,6 +797,15 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> AccountsIndex<T, U> {
         self.account_maps.len()
     }
 
+    /// Write the in-mem index entry for `pubkey` through to disk if it is currently
+    /// dirty and single-slot with `ref_count == 1`. Invoked by the cache-drop path
+    /// after F4 removes a slot from the write cache: pubkeys that no longer appear
+    /// in any cached slot have been deferred from inline write-through (see
+    /// `upsert_for_flush`), and this hook is the point at which they reach disk.
+    pub fn write_through_cache_dropped(&self, pubkey: &Pubkey) {
+        self.get_bin(pubkey).write_through_cache_dropped(pubkey);
+    }
+
     /// Same functionally to upsert, but:
     /// 1. operates on a batch of items in reusable Vec, draining all elements
     /// 2. holds the write lock for the duration of adding the items

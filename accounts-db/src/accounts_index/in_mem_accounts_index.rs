@@ -481,6 +481,30 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
         });
     }
 
+    /// Cache-drop write-through: if the in-mem entry for `pubkey` is single-slot with
+    /// `ref_count == 1` and currently dirty, write it through to disk and clear the
+    /// dirty flag. Called from the F4 cache-removal path for pubkeys that are no
+    /// longer present in any cached slot, so that upserts from cache flush (which
+    /// skip inline write-through via `upsert_for_flush`) eventually reach disk and
+    /// become evict-able.
+    pub fn write_through_cache_dropped(&self, pubkey: &Pubkey) {
+        if !self.should_write_through {
+            return;
+        }
+        let to_write = self.get_only_in_mem(pubkey, false, |entry| {
+            entry.and_then(|entry| {
+                if !entry.dirty() {
+                    return None;
+                }
+                let slot_list = entry.slot_list_read_lock();
+                (slot_list.len() == 1 && entry.ref_count() == 1).then(|| slot_list[0])
+            })
+        });
+        if let Some((slot, info)) = to_write {
+            self.write_through(pubkey, slot, info);
+        }
+    }
+
     /// Clean the slot list by removing all slot_list items older than the max_slot.
     /// Decrease the reference count of the entry by the number of removed accounts.
     /// Note: This must only be called on startup, and reclaims must be reclaimed.
@@ -548,7 +572,6 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
     ) {
         let (slot, account_info) = new_value.into();
         let is_cached = account_info.is_cached();
-        let mut should_write_through = false;
 
         self.get_or_create_index_entry_for_pubkey(pubkey, |entry| {
             if is_cached {
@@ -562,14 +585,9 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
                     reclaims,
                     reclaim,
                 );
-                should_write_through =
-                    self.should_write_through && slot_list_length == 1 && entry.ref_count() == 1;
                 self.set_age_to_future(entry, slot_list_length > 1);
             }
         });
-        if should_write_through {
-            self.write_through(pubkey, slot, account_info);
-        }
     }
 
     /// Replaces the slot list entry at `old_slot` with `new_item`.
@@ -3043,37 +3061,6 @@ mod tests {
         );
     }
 
-    /// `upsert` with `should_write_through=true` writes through to disk and clears the dirty flag.
-    #[test]
-    fn test_upsert_write_through_clears_dirty() {
-        let index = new_should_write_through_for_test(None);
-        let pubkey = solana_pubkey::new_rand();
-        let slot = 1;
-        let info = 10;
-
-        assert!(index.load_from_disk(&pubkey).is_none(), "not on disk yet");
-
-        let new_value = PreAllocatedAccountMapEntry::new(slot, info, &index.storage, true);
-        index.upsert(
-            &pubkey,
-            new_value,
-            None,
-            &mut ReclaimsSlotList::new(),
-            UpsertReclaim::IgnoreReclaims,
-        );
-
-        index.get_only_in_mem(&pubkey, false, |entry| {
-            let entry = entry.expect("entry should be in memory");
-            assert!(!entry.dirty()); // write-through clears dirty
-        });
-
-        let (slot_list, ref_count) = index
-            .load_from_disk(&pubkey)
-            .expect("upsert should have written entry to disk");
-        assert_eq!(slot_list, SlotList::from([(slot, info)]));
-        assert_eq!(ref_count, 1);
-    }
-
     /// When the bin exceeds the threshold and a new pubkey is inserted in `should_write_through`
     /// mode, one clean entry should be evicted inline to make room.
     #[test]
@@ -3094,6 +3081,8 @@ mod tests {
                 &mut ReclaimsSlotList::new(),
                 UpsertReclaim::IgnoreReclaims,
             );
+            let new_value = PreAllocatedAccountMapEntry::new(slot, info, &index.storage, true);
+            index.replace(pubkey, (slot, info), slot);
         }
         assert_eq!(index.map_internal.read().unwrap().len(), 3);
 
