@@ -4015,9 +4015,19 @@ impl AccountsDb {
             }
         }
 
-        let (slot, storage_location, _maybe_account_accessor) =
-            self.read_index_for_accessor_or_load_slow(ancestors, pubkey, false)?;
-        // Notice the subtle `?` at previous line, we bail out pretty early if missing.
+        let Some((slot, storage_location, _maybe_account_accessor)) =
+            self.read_index_for_accessor_or_load_slow(ancestors, pubkey, false)
+        else {
+            // Cache writes don't upsert the accounts index, so a pubkey present only
+            // in the cache reaches here — e.g. during the F1→F3 flush window, where
+            // the slot is in `roots_being_flushed` but its storage location has not
+            // yet been upserted. Fall back to the cache value.
+            let (cached_account, cached_slot, _) = cache_result?;
+            self.load_account_stats
+                .num_loaded_from_write_cache
+                .fetch_add(1, Ordering::Relaxed);
+            return Some((cached_account.account.clone(), cached_slot));
+        };
 
         if let Some((cached_account, cached_slot, _)) = &cache_result {
             if *cached_slot >= slot {
@@ -4055,7 +4065,7 @@ impl AccountsDb {
         if in_write_cache {
             // While the account wasn't loaded directly from the write cache, the write cache
             // provided the correct slot, so count this as a load from the write cache
-            if cache_result.is_some_and(|(_, cached_slot, _)| cached_slot >= slot) {
+            if cache_result.is_some_and(|(_, cached_slot, _)| cached_slot == slot) {
                 self.load_account_stats
                     .num_loaded_from_write_cache
                     .fetch_add(1, Ordering::Relaxed);
@@ -4233,7 +4243,14 @@ impl AccountsDb {
                 remove_cache_elapsed.stop();
                 remove_cache_elapsed_across_slots += remove_cache_elapsed.as_us();
                 // Nobody else should have removed the slot cache entry yet
-                assert!(self.accounts_cache.remove_slot(*remove_slot).is_some());
+                let pubkeys_removed = self.accounts_cache.remove_slot(*remove_slot).unwrap();
+                if self.accounts_index.write_through_enabled()
+                {
+                    for entry in pubkeys_removed.into_iter() {
+                            self.accounts_index.try_write_through(&entry);
+                    }
+                }
+
             } else {
                 self.purge_slot_storage(*remove_slot, purge_stats);
             }
@@ -4748,7 +4765,7 @@ impl AccountsDb {
         // atomic switch from the cache to storage.
         // There is some racy condition for existing readers who just has read exactly while
         // flushing. That case is handled by retry_to_get_account_accessor()
-        let dropped_slot_cache = self
+        let pubkeys_removed = self
             .accounts_cache
             .remove_slot(slot)
             .expect("slot must be in the cache when flushing");
@@ -4757,14 +4774,12 @@ impl AccountsDb {
         // writing hot pubkeys to disk every slot. Now that this slot has left the
         // cache, any pubkey that no longer appears in any cached slot is eligible to
         // be written through so its in-mem entry becomes clean and can be evicted.
-        for entry in dropped_slot_cache.iter() {
-            let pubkey = *entry.key();
-            if !self.accounts_cache.contains_pubkey(&pubkey) {
-                self.accounts_index.write_through_cache_dropped(&pubkey);
+        if self.accounts_index.write_through_enabled()
+        {
+            for entry in pubkeys_removed.into_iter() {
+                    self.accounts_index.try_write_through(&entry);
             }
         }
-        drop(dropped_slot_cache);
-
         // Add `accounts` to uncleaned_pubkeys since they were written to storage
         // and should be visited by `clean`.
         // If old slots were reclaimed, accounts were already cleaned,

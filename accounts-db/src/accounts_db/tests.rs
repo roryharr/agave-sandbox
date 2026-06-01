@@ -3643,7 +3643,7 @@ fn setup_accounts_db_cache_clean(
         }
     }
 
-    accounts_db.accounts_cache.remove_slot(stall_slot);
+    let _ = accounts_db.accounts_cache.remove_slot(stall_slot);
 
     // If there's <= max_cache_slots(), no slots should be flushed
     if accounts_db.accounts_cache.num_slots() <= max_cache_slots() {
@@ -6618,6 +6618,34 @@ fn test_is_ancestor_zero_lamport_being_flushed_picks_higher_slot(
     assert_eq!(
         db.is_ancestor_zero_lamport(&pubkey, &ancestors),
         Some(expected)
+    );
+
+    db.accounts_cache.end_flush_roots();
+}
+
+/// Reproduces the F1→F3 flush-window race: a cache-only pubkey (no prior storage
+/// version, so no accounts-index entry) must still be returned by `do_load` while
+/// its slot is in `roots_being_flushed`. Before the fallback, `read_index_for_accessor_or_load_slow`
+/// returned `None`, the `?` short-circuited, and `do_load` reported the pubkey as
+/// missing even though the cache still held its value.
+#[test]
+fn test_do_load_returns_cache_value_for_cache_only_pubkey_being_flushed() {
+    let db = AccountsDb::new_single_for_tests();
+    let pubkey = Pubkey::new_unique();
+    let slot = 5;
+
+    let account = AccountSharedData::new(100, 0, &Pubkey::default());
+    db.accounts_cache.store(slot, &pubkey, account.clone());
+    db.accounts_cache.add_root(slot);
+    assert!(!db.accounts_index.contains(&pubkey));
+
+    db.accounts_cache.begin_flush_roots(Some(slot));
+
+    let ancestors = Ancestors::from(vec![slot]);
+    let loaded = db.do_load_for_tests(&ancestors, &pubkey);
+    assert_eq!(
+        loaded.map(|(a, s)| (a.lamports(), s)),
+        Some((account.lamports(), slot))
     );
 
     db.accounts_cache.end_flush_roots();

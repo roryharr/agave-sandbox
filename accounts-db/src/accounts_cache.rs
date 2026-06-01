@@ -225,8 +225,9 @@ impl AccountsCacheIndex {
 
     /// Decrement the reference count for each pubkey in `pubkeys`. Removes an entry entirely if
     /// the count reaches zero. `max_slot` is not updated; it will become stale if the removed slot
-    /// is the highest slot
-    fn remove(&self, pubkeys: impl IntoIterator<Item = Pubkey>) {
+    /// is the highest slot. Return a Vec of pubkeys removed from the index
+    fn remove(&self, pubkeys: impl IntoIterator<Item = Pubkey>) -> Vec<Pubkey>{
+        let mut removed_pubkeys = Vec::new();
         for pubkey in pubkeys {
             let Entry::Occupied(mut occupied_entry) = self.entries.entry(pubkey) else {
                 // If this has happened the index is corrupted
@@ -237,8 +238,10 @@ impl AccountsCacheIndex {
             if *ref_count == 0 {
                 occupied_entry.remove_entry();
                 self.num_unique_pubkeys.fetch_sub(1, Ordering::Relaxed);
+                removed_pubkeys.push(pubkey)
             }
         }
+        removed_pubkeys
     }
 
     /// Returns the recorded max slot for `pubkey`, or `None` if the pubkey is not present in the
@@ -339,12 +342,16 @@ impl AccountsCache {
             .and_then(|slot_cache| slot_cache.get_cloned(pubkey))
     }
 
-    pub fn remove_slot(&self, slot: Slot) -> Option<Arc<SlotCache>> {
+    // Removes a slot from the accounts cache and returns the set of pubkeys removed from the index
+    #[must_use]
+    pub fn remove_slot(&self, slot: Slot) -> Option<Vec<Pubkey>> {
         let result = self.cache.remove(&slot).map(|(_, slot_cache)| slot_cache);
         if let Some(slot_cache) = &result {
-            self.index.remove(slot_cache.iter().map(|item| *item.key()));
+            Some(self.index.remove(slot_cache.iter().map(|item| *item.key())))
         }
-        result
+        else {
+            None
+        }
     }
 
     /// Finds the best write-cache entry for `pubkey` visible from `ancestors`. Searches
@@ -683,12 +690,14 @@ mod tests {
         assert!(cache.index.max_slot_for_pubkey(&pk2).is_some());
 
         // Remove slot 1 — pk2 should disappear, pk1 still present (in slot 3)
-        cache.remove_slot(1);
+        let pubkeys_removed = cache.remove_slot(1);
+        assert_eq!(pubkeys_removed, Some(vec![pk2]));
         assert!(cache.index.max_slot_for_pubkey(&pk1).is_some());
         assert!(cache.index.max_slot_for_pubkey(&pk2).is_none());
 
         // Remove slot 3 — pk1 should also disappear
-        cache.remove_slot(3);
+        let pubkeys_removed = cache.remove_slot(3);
+        assert_eq!(pubkeys_removed, Some(vec![pk1]));
         assert!(cache.index.max_slot_for_pubkey(&pk1).is_none());
     }
 

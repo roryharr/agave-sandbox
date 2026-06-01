@@ -304,6 +304,10 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> AccountsIndex<T, U> {
         self.storage.storage.is_disk_index_enabled()
     }
 
+    pub fn write_through_enabled(&self) -> bool {
+        self.storage.storage.threshold_entries_per_bin.is_some()
+    }
+
     /// Gets the index's entry for `pubkey` and applies `callback` to it
     ///
     /// If `callback`'s boolean return value is true, add this entry to the in-mem cache.
@@ -798,12 +802,9 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> AccountsIndex<T, U> {
     }
 
     /// Write the in-mem index entry for `pubkey` through to disk if it is currently
-    /// dirty and single-slot with `ref_count == 1`. Invoked by the cache-drop path
-    /// after F4 removes a slot from the write cache: pubkeys that no longer appear
-    /// in any cached slot have been deferred from inline write-through (see
-    /// `upsert_for_flush`), and this hook is the point at which they reach disk.
-    pub fn write_through_cache_dropped(&self, pubkey: &Pubkey) {
-        self.get_bin(pubkey).write_through_cache_dropped(pubkey);
+    /// dirty and single-slot with `ref_count == 1`
+    pub fn try_write_through(&self, pubkey: &Pubkey) {
+        self.get_bin(pubkey).try_write_through(pubkey);
     }
 
     /// Same functionally to upsert, but:
