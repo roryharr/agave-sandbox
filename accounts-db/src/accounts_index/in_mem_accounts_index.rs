@@ -369,6 +369,77 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
         }
     }
 
+    /// Removes slot list entries at or below `target_slot` for `pubkey`. Uncached entries are
+    /// pushed to `reclaims` (the caller will reclaim their backing storages); cached entries
+    /// at `target_slot` are dropped (the cache is being flushed and no replacement index entry
+    /// is being written); cached entries at slots below `target_slot` are left alone (matching
+    /// the `UpsertReclaim::ReclaimOldSlots` invariant). Slot list entries above `target_slot`
+    /// are left untouched. If the slot list ends up empty, the pubkey is removed from the
+    /// index entirely.
+    ///
+    /// Used by the flush path for zero-lamport accounts. The cache-write upsert that preceded
+    /// this flush installed a `(target_slot, cached)` item in the index, which pins the entry
+    /// in memory (entries with cached slot_list items can't be flushed to disk). So the entry
+    /// is always in-mem when this runs, and there are no uncached entries above `target_slot`
+    /// in the typical flush-in-root-order case — both are asserted.
+    pub fn drain_and_remove(
+        &self,
+        pubkey: &Pubkey,
+        target_slot: Slot,
+        reclaims: &mut ReclaimsSlotList<T>,
+    ) {
+        let mut m = Measure::start("entry");
+        let mut map = self.map_internal.write().unwrap();
+        let capacity_pre = map.capacity();
+        let entry = map.entry(*pubkey);
+        m.stop();
+
+        let Entry::Occupied(occupied) = entry else {
+            panic!(
+                "drain_and_remove({pubkey}, target_slot={target_slot}): pubkey not in-mem. The \
+                 cache-write upsert at target_slot should have installed a cached item that pins \
+                 the entry in memory."
+            );
+        };
+        let value = occupied.get();
+
+        let mut drained_uncached = 0;
+        let remaining = {
+            let mut slot_list = value.slot_list_write_lock();
+            slot_list.retain_and_count(|item| {
+                let (cur_slot, account_info) = item;
+                let is_cached = account_info.is_cached();
+                if *cur_slot == target_slot {
+                    assert!(is_cached);
+                    false
+                } else if *cur_slot < target_slot && !is_cached {
+                    reclaims.push((*cur_slot, *account_info));
+                    drained_uncached += 1;
+                    false
+                } else {
+                    assert!(is_cached);
+                    true
+                }
+            })
+        };
+        let ref_count = value.unref_by_count(drained_uncached);
+        assert_eq!(ref_count, drained_uncached);
+
+        if remaining == 0 {
+            self.delete_disk_key(occupied.key());
+            self.stats().dec_mem_count();
+            self.stats().inc_delete();
+            occupied.remove();
+        } else {
+            value.mark_dirty();
+        }
+        let capacity_post = map.capacity();
+        drop(map);
+        self.stats()
+            .update_in_mem_capacity(capacity_pre, capacity_post);
+        self.update_entry_stats(m, /* found_in_mem = */ true);
+    }
+
     // If the slot list for pubkey exists in the index and is empty, remove the index entry for pubkey and return true.
     // Return false otherwise.
     pub fn remove_if_slot_list_empty(&self, pubkey: Pubkey) -> bool {
@@ -575,7 +646,7 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
     /// Replaces the slot list entry at `old_slot` with `new_item`.
     ///
     /// Panics if `old_slot` is not present in the slot list, or if more than one entry at
-    /// `old_slot` is found (which would indicate prior corruption).
+    /// `old_slot` is found.
     pub fn replace(&self, pubkey: &Pubkey, new_item: SlotListItem<T>, old_slot: Slot) {
         debug_assert!(
             !new_item.1.is_cached(),
@@ -3349,4 +3420,178 @@ mod tests {
             0
         );
     }
+
+    // ---------------------------------------------------------------------
+    // drain_and_remove tests
+    //
+    // Index value type with controllable is_cached(). is_cached() returns true if the value
+    // is odd (LSB set). This lets a single u64 carry both "offset-like" identity and the
+    // cached flag for tests.
+    #[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
+    struct DrainTestValue(u64);
+    impl IndexValue for DrainTestValue {}
+    impl DiskIndexValue for DrainTestValue {}
+    impl crate::accounts_index::IsCached for DrainTestValue {
+        fn is_cached(&self) -> bool {
+            self.0 & 1 == 1
+        }
+    }
+    impl crate::is_zero_lamport::IsZeroLamport for DrainTestValue {
+        fn is_zero_lamport(&self) -> bool {
+            false
+        }
+    }
+
+    fn new_drain_test_index() -> InMemAccountsIndex<DrainTestValue, DrainTestValue> {
+        let holder = Arc::new(BucketMapHolder::new(
+            BINS_FOR_TESTING,
+            &AccountsIndexConfig::default(),
+            1,
+        ));
+        InMemAccountsIndex::new(&holder, 0, None)
+    }
+
+    fn uncached(value: u64) -> DrainTestValue {
+        // ensure LSB = 0
+        DrainTestValue(value & !1)
+    }
+    fn cached(value: u64) -> DrainTestValue {
+        // ensure LSB = 1
+        DrainTestValue(value | 1)
+    }
+
+    /// Insert an entry directly with the given slot_list and ref_count.
+    fn insert_entry(
+        index: &InMemAccountsIndex<DrainTestValue, DrainTestValue>,
+        pubkey: Pubkey,
+        slot_list: Vec<(Slot, DrainTestValue)>,
+        ref_count: RefCount,
+    ) {
+        let entry = Box::new(AccountMapEntry::new(
+            SlotList::from(slot_list),
+            ref_count,
+            AccountMapEntryMeta::new_dirty(&index.storage, true),
+        ));
+        index.map_internal.write().unwrap().insert(pubkey, entry);
+    }
+
+    /// Read out (slot_list, ref_count) for assertions.
+    fn read_entry(
+        index: &InMemAccountsIndex<DrainTestValue, DrainTestValue>,
+        pubkey: &Pubkey,
+    ) -> Option<(Vec<(Slot, DrainTestValue)>, RefCount)> {
+        let map = index.map_internal.read().unwrap();
+        map.get(pubkey).map(|entry| {
+            (
+                entry.slot_list_read_lock().iter().copied().collect(),
+                entry.ref_count(),
+            )
+        })
+    }
+
+    #[test]
+    #[should_panic(expected = "pubkey not in-mem")]
+    fn test_drain_and_remove_pubkey_absent_panics() {
+        let index = new_drain_test_index();
+        let pubkey = Pubkey::new_unique();
+        let mut reclaims = ReclaimsSlotList::new();
+        index.drain_and_remove(&pubkey, 10, &mut reclaims);
+    }
+
+    #[test]
+    fn test_drain_and_remove_single_cached_at_target_drops_entry() {
+        let index = new_drain_test_index();
+        let pubkey = Pubkey::new_unique();
+        insert_entry(&index, pubkey, vec![(10, cached(100))], 0);
+
+        let mut reclaims = ReclaimsSlotList::new();
+        index.drain_and_remove(&pubkey, 10, &mut reclaims);
+
+        assert!(reclaims.is_empty(), "cached entries are not reclaimed");
+        assert!(
+            read_entry(&index, &pubkey).is_none(),
+            "entry should be removed since slot_list is empty"
+        );
+    }
+
+    #[test]
+    fn test_drain_and_remove_cached_below_target_kept() {
+        let index = new_drain_test_index();
+        let pubkey = Pubkey::new_unique();
+        let info = cached(300);
+        insert_entry(&index, pubkey, vec![(5, info)], 0);
+
+        let mut reclaims = ReclaimsSlotList::new();
+        index.drain_and_remove(&pubkey, 10, &mut reclaims);
+
+        assert!(reclaims.is_empty());
+        let (slot_list, ref_count) =
+            read_entry(&index, &pubkey).expect("entry should still be in index");
+        assert_eq!(slot_list, vec![(5, info)]);
+        assert_eq!(ref_count, 0);
+    }
+
+    #[test]
+    fn test_drain_and_remove_uncached_below_target_drained() {
+        let index = new_drain_test_index();
+        let pubkey = Pubkey::new_unique();
+        let info = uncached(400);
+        insert_entry(&index, pubkey, vec![(5, info)], 1);
+
+        let mut reclaims = ReclaimsSlotList::new();
+        index.drain_and_remove(&pubkey, 10, &mut reclaims);
+
+        assert_eq!(reclaims.as_slice(), &[(5, info)]);
+        assert!(read_entry(&index, &pubkey).is_none());
+    }
+
+    #[test]
+    fn test_drain_and_remove_cached_above_target_kept() {
+        let index = new_drain_test_index();
+        let pubkey = Pubkey::new_unique();
+        let info = cached(500);
+        insert_entry(&index, pubkey, vec![(20, info)], 0);
+
+        let mut reclaims = ReclaimsSlotList::new();
+        index.drain_and_remove(&pubkey, 10, &mut reclaims);
+
+        assert!(reclaims.is_empty());
+        let (slot_list, ref_count) =
+            read_entry(&index, &pubkey).expect("entry should still be in index");
+        assert_eq!(slot_list, vec![(20, info)]);
+        assert_eq!(ref_count, 0);
+    }
+
+    #[test]
+    fn test_drain_and_remove_mix_uncached_below_and_cached_at_target() {
+        let index = new_drain_test_index();
+        let pubkey = Pubkey::new_unique();
+        let drained = uncached(900);
+        insert_entry(&index, pubkey, vec![(5, drained), (10, cached(1000))], 1);
+
+        let mut reclaims = ReclaimsSlotList::new();
+        index.drain_and_remove(&pubkey, 10, &mut reclaims);
+
+        assert_eq!(reclaims.as_slice(), &[(5, drained)]);
+        assert!(read_entry(&index, &pubkey).is_none());
+    }
+
+    #[test]
+    fn test_drain_and_remove_keeps_cached_below_and_cached_above() {
+        let index = new_drain_test_index();
+        let pubkey = Pubkey::new_unique();
+        let below = cached(1100);
+        let above = cached(1200);
+        insert_entry(&index, pubkey, vec![(5, below), (20, above)], 0);
+
+        let mut reclaims = ReclaimsSlotList::new();
+        index.drain_and_remove(&pubkey, 10, &mut reclaims);
+
+        assert!(reclaims.is_empty());
+        let (slot_list, ref_count) =
+            read_entry(&index, &pubkey).expect("entry should still be in index");
+        assert_eq!(slot_list, vec![(5, below), (20, above)]);
+        assert_eq!(ref_count, 0);
+    }
+
 }

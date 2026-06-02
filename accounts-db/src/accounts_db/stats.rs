@@ -166,10 +166,9 @@ pub struct StoreAccountsForFlushStats {
     pub last_report: AtomicInterval,
     pub write_to_storage_us: AtomicU64,
     pub update_index_us: AtomicU64,
-    pub mark_zero_lamport_single_ref_accounts_us: AtomicU64,
     pub handle_reclaims_us: AtomicU64,
     pub num_accounts_stored: AtomicU64,
-    pub num_zero_lamport_single_ref_accounts_marked: AtomicU64,
+    pub num_zero_lamport_single_ref_accounts_recorded: AtomicU64,
     pub num_reclaims: AtomicU64,
     pub num_obsolete_slots_removed: AtomicUsize,
     pub num_obsolete_bytes_removed: AtomicU64,
@@ -197,12 +196,6 @@ impl StoreAccountsForFlushStats {
                 i64
             ),
             (
-                "mark_zero_lamport_single_ref_accounts_us",
-                self.mark_zero_lamport_single_ref_accounts_us
-                    .swap(0, Ordering::Relaxed),
-                i64
-            ),
-            (
                 "handle_reclaims_us",
                 self.handle_reclaims_us.swap(0, Ordering::Relaxed),
                 i64
@@ -213,8 +206,8 @@ impl StoreAccountsForFlushStats {
                 i64
             ),
             (
-                "num_zero_lamport_single_ref_accounts_marked",
-                self.num_zero_lamport_single_ref_accounts_marked
+                "num_zero_lamport_single_ref_accounts_recorded",
+                self.num_zero_lamport_single_ref_accounts_recorded
                     .swap(0, Ordering::Relaxed),
                 i64
             ),

@@ -961,6 +961,23 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> AccountsIndex<T, U> {
         map.replace(pubkey, (new_slot, account_info), old_slot);
     }
 
+    /// Removes slot list entries at or below `target_slot` for `pubkey`. Uncached entries
+    /// are pushed to `reclaims`; cached entries at `target_slot` are dropped; cached entries
+    /// at slots below `target_slot` are left alone. The pubkey is removed from the index if
+    /// no entries remain. No-op if the pubkey isn't in the index.
+    ///
+    /// Used by the flush path for zero-lamport accounts: the new value is *not* added to
+    /// the index, but pre-existing entries for the same pubkey still need cleanup.
+    pub fn drain_and_remove(
+        &self,
+        pubkey: &Pubkey,
+        target_slot: Slot,
+        reclaims: &mut ReclaimsSlotList<T>,
+    ) {
+        let map = self.get_bin(pubkey);
+        map.drain_and_remove(pubkey, target_slot, reclaims);
+    }
+
     pub fn ref_count_from_storage(&self, pubkey: &Pubkey) -> RefCount {
         let map = self.get_bin(pubkey);
         map.get_internal_inner(pubkey, |entry| {

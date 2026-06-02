@@ -424,7 +424,11 @@ mod serde_snapshot_tests {
 
         accounts.add_root_and_flush_write_cache(current_slot);
 
-        accounts.assert_load_account(current_slot, pubkey, zero_lamport);
+        // pubkey is zero-lamport at the latest slot — Type-A under the new flush path,
+        // so it isn't in the index. After snapshot serialization + reconstruction,
+        // generate_index_for_slot scans storages and re-adds it as a single-ref entry,
+        // making it loadable again.
+        accounts.assert_not_load_account(current_slot, pubkey);
 
         accounts.print_accounts_stats("accounts");
 
@@ -690,8 +694,9 @@ mod serde_snapshot_tests {
             .alive_roots
             .insert(current_slot);
 
-        // Ref count is 1 as the older versions were marked obsolete
-        assert_eq!(accounts.accounts_index.ref_count_from_storage(&pubkey1), 1);
+        // Step D made pubkey1 zero-lamport; under the new flush path that drains pubkey1
+        // from the index instead of inserting a new zero-lamport entry. Ref count is 0.
+        assert_eq!(accounts.accounts_index.ref_count_from_storage(&pubkey1), 0);
         accounts.add_root(current_slot);
 
         // E: Avoid missing bank hash error
@@ -699,7 +704,8 @@ mod serde_snapshot_tests {
         accounts.store_for_tests((current_slot, [(&dummy_pubkey, &dummy_account)].as_slice()));
         accounts.add_root(current_slot);
 
-        accounts.assert_load_account(current_slot, pubkey1, zero_lamport);
+        // pubkey1 is no longer indexed (Type-A); only the tombstone remains in storage.
+        accounts.assert_not_load_account(current_slot, pubkey1);
         accounts.assert_load_account(current_slot, pubkey2, old_lamport);
         accounts.assert_load_account(current_slot, dummy_pubkey, dummy_lamport);
 
@@ -721,6 +727,8 @@ mod serde_snapshot_tests {
 
         info!("pubkey: {pubkey1}");
         accounts.print_accounts_stats("pre_clean");
+        // After reconstruction, generate_index re-adds pubkey1 to the index as a
+        // zero-lamport single-ref entry, so it is loadable again.
         accounts.assert_load_account(current_slot, pubkey1, zero_lamport);
         accounts.assert_load_account(current_slot, pubkey2, old_lamport);
         accounts.assert_load_account(current_slot, dummy_pubkey, dummy_lamport);
