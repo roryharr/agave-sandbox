@@ -259,6 +259,14 @@ pub(crate) struct ShrinkCollect<'a, T: ShrinkCollectRefs<'a>> {
     pub(crate) pubkeys_to_unref: Vec<&'a Pubkey>,
     pub(crate) zero_lamport_single_ref_pubkeys: Vec<&'a Pubkey>,
     pub(crate) alive_accounts: T,
+    /// Zero-lamport accounts whose offsets are on `store`'s ZLSR list AND whose index entry
+    /// at this slot has been removed (Type-A — set by the new flush path's `drain_and_remove`).
+    /// They are *not* in the index at this slot, so the synthesis path in shrink would
+    /// mis-route them. They must still be carried forward to the new storage so the
+    /// account's contribution to `lt_hash` (which is computed from storage iteration) stays
+    /// consistent with mainline behavior, where the same zero-lamport entries are carried
+    /// forward via the indexed `alive_accounts` path.
+    pub(crate) zlsr_removed_from_index: Vec<AccountFromStorage>,
     /// total size in storage of all alive accounts
     pub(crate) alive_total_bytes: usize,
     pub(crate) total_starting_accounts: usize,
@@ -1201,6 +1209,28 @@ impl AccountsDb {
         )
     }
 
+    /// Debug-only: assert that no entry in the given slot_list points at an offset on its
+    /// storage's `zero_lamport_unreffed_offsets` (Type-A) list. Type-A entries are removed
+    /// from the index by construction, so any code path that reads slot_list entries must
+    /// never observe one. Skips cached entries (no storage offset). Fetching the storage
+    /// is a DashMap read; the assert is gated behind `debug_assertions`.
+    #[cfg(debug_assertions)]
+    fn debug_assert_slot_list_offsets_not_unreffed(
+        &self,
+        slot_list: &[(Slot, AccountInfo)],
+        caller: &str,
+    ) {
+        for (slot, account_info) in slot_list {
+            if account_info.is_cached() {
+                continue;
+            }
+            if let Some(store) = self.storage.get_slot_storage_entry(*slot) {
+                store
+                    .assert_offsets_not_on_unreffed_list(&[account_info.offset()], caller);
+            }
+        }
+    }
+
     /// While scanning cleaning candidates obtain slots that can be
     /// reclaimed for each pubkey. In addition, if the pubkey is
     /// removed from the index, insert in pubkeys_removed_from_accounts_index.
@@ -1854,6 +1884,11 @@ impl AccountsDb {
                         |_candidate_pubkey, slot_list_and_ref_count| {
                             let mut useless = true;
                             if let Some((slot_list, ref_count)) = slot_list_and_ref_count {
+                                #[cfg(debug_assertions)]
+                                self.debug_assert_slot_list_offsets_not_unreffed(
+                                    slot_list,
+                                    "clean scan",
+                                );
                                 // find the highest rooted slot in the slot list
                                 let index_in_slot_list = self.accounts_index.latest_slot(
                                     None,
@@ -1983,6 +2018,11 @@ impl AccountsDb {
                 if purged_account_slots.contains_key(pubkey) {
                     *ref_count = self.accounts_index.ref_count_from_storage(pubkey);
                 }
+                #[cfg(debug_assertions)]
+                self.debug_assert_slot_list_offsets_not_unreffed(
+                    slot_list.as_slice(),
+                    "clean store_counts",
+                );
                 slot_list.retain(|(slot, account_info)| {
                     let was_slot_purged = purged_account_slots
                         .get(pubkey)
@@ -2614,6 +2654,28 @@ impl AccountsDb {
         let total_starting_accounts = stored_accounts.len();
         stored_accounts.retain(|account| !obsolete_offsets.contains(&account.index_info.offset()));
 
+        // Filter Type-A entries (offsets on the storage's `zero_lamport_unreffed_offsets`
+        // list — written by the new flush path's `drain_and_remove`). They have no
+        // slot_list entry at this slot, so the generic shrink synthesis would mis-route
+        // them. Drop them from the rewrite when we can purge; otherwise carry the data
+        // forward to the new storage so `lt_hash` / snapshot iteration stays consistent.
+        let can_purge_zero_lamport_single_ref =
+            self.can_purge_zero_lamport_single_ref_after_shrink(slot);
+        let mut zlsr_carry_forward: Vec<AccountFromStorage> = Vec::new();
+        let unreffed_offsets = store.snapshot_zero_lamport_unreffed_offsets();
+        if !unreffed_offsets.is_empty() {
+            stored_accounts.retain(|account| {
+                if unreffed_offsets.contains(&account.index_info.offset()) {
+                    if !can_purge_zero_lamport_single_ref {
+                        zlsr_carry_forward.push(*account);
+                    }
+                    false
+                } else {
+                    true
+                }
+            });
+        }
+
         let len = stored_accounts.len();
         let shrink_collect = Mutex::new(ShrinkCollect {
             slot,
@@ -2621,6 +2683,7 @@ impl AccountsDb {
             pubkeys_to_unref: Vec::with_capacity(len),
             zero_lamport_single_ref_pubkeys: Vec::new(),
             alive_accounts: T::with_capacity(len, slot),
+            zlsr_removed_from_index: zlsr_carry_forward,
             total_starting_accounts,
             all_are_zero_lamports: true,
             alive_total_bytes: 0, // will be updated after `alive_accounts` is populated
@@ -2900,13 +2963,18 @@ impl AccountsDb {
         );
 
         // This shouldn't happen if alive_bytes is accurate.
+        let zlsr_carry_forward_bytes: usize = shrink_collect
+            .zlsr_removed_from_index
+            .iter()
+            .map(|a| a.stored_size())
+            .sum();
+        let total_rewrite_bytes = shrink_collect.alive_total_bytes + zlsr_carry_forward_bytes;
+
         // However, it is possible that the remaining alive bytes could be 0. In that case, the whole slot should be marked dead by clean.
-        if Self::should_not_shrink(
-            shrink_collect.alive_total_bytes as u64,
-            shrink_collect.capacity,
-        ) || shrink_collect.alive_total_bytes == 0
+        if Self::should_not_shrink(total_rewrite_bytes as u64, shrink_collect.capacity)
+            || total_rewrite_bytes == 0
         {
-            if shrink_collect.alive_total_bytes == 0 {
+            if total_rewrite_bytes == 0 {
                 // clean needs to take care of this dead slot
                 self.dirty_stores.insert(slot, store.clone());
             }
@@ -2943,7 +3011,7 @@ impl AccountsDb {
         let (shrink_in_progress, time_us) = measure_us!(self.get_store_for_shrink(
             slot,
             Arc::clone(&store),
-            shrink_collect.alive_total_bytes as u64
+            total_rewrite_bytes as u64
         ));
         stats_sub.create_and_insert_store_elapsed_us = Saturating(time_us);
 
@@ -2957,6 +3025,26 @@ impl AccountsDb {
             shrink_in_progress.new_storage(),
             UpdateIndexThreadSelection::PoolWithThreshold,
         );
+
+        // Carry forward Type-A entries: write their data to the new storage and register
+        // the new offsets on the new storage's `zero_lamport_unreffed_offsets` list. No
+        // index update -- by construction (they were removed from the index at flush via
+        // drain_and_remove) the index has no slot_list entry pointing at these.
+        if !shrink_collect.zlsr_removed_from_index.is_empty() {
+            let zlsr_refs: Vec<&AccountFromStorage> =
+                shrink_collect.zlsr_removed_from_index.iter().collect();
+            let zlsr_accounts = [(slot, &zlsr_refs[..])];
+            let storable_zlsr = StorableAccountsBySlot::new(slot, &zlsr_accounts, self);
+            let zlsr_infos = self.write_accounts_to_storage(
+                slot,
+                shrink_in_progress.new_storage(),
+                &storable_zlsr,
+            );
+            let zlsr_offsets: Vec<Offset> = zlsr_infos.iter().map(|info| info.offset()).collect();
+            shrink_in_progress
+                .new_storage()
+                .batch_insert_zero_lamport_unreffed_offsets(&zlsr_offsets);
+        }
 
         rewrite_elapsed.stop();
         stats_sub.rewrite_elapsed_us = Saturating(rewrite_elapsed.as_us());
@@ -5178,16 +5266,26 @@ impl AccountsDb {
 
     /// Updates the accounts index with the given `infos` and `accounts`.
     /// Used when storing accounts to storage.
-    /// Returns a vector of `SlotList<AccountInfo>` containing the reclaims for each batch processed.
-    /// The element of the returned vector is guaranteed to be non-empty.
+    ///
+    /// Under `UpsertReclaim::ReclaimOldSlots`, zero-lamport accounts are *not* inserted into
+    /// the index. Their offset is recorded on `storage`'s zero-lamport-single-ref list so
+    /// shrink/clean can reclaim the bytes after the next full snapshot. Any pre-existing index
+    /// entries for those pubkeys are still drained into reclaims so the older storages get
+    /// cleaned up.
+    ///
+    /// Returns a vector of `SlotList<AccountInfo>` containing the reclaims for each batch
+    /// processed (each element is guaranteed non-empty), the count of zero-lamport accounts that
+    /// were fully removed from the index (Type-A), and the count that fell back to keeping a
+    /// shadowing zero entry because a lower entry survived.
     fn update_index_stored_accounts<'a>(
         &self,
         infos: Vec<AccountInfo>,
         accounts: &impl StorableAccounts<'a>,
+        storage: &AccountStorageEntry,
         reclaim: UpsertReclaim,
         update_index_thread_selection: UpdateIndexThreadSelection,
         thread_pool: &ThreadPool,
-    ) -> Vec<ReclaimsSlotList<AccountInfo>> {
+    ) -> (Vec<ReclaimsSlotList<AccountInfo>>, u64, u64) {
         let target_slot = accounts.target_slot();
         let len = std::cmp::min(accounts.len(), infos.len());
 
@@ -5199,30 +5297,79 @@ impl AccountsDb {
             assert!(target_slot <= self.accounts_index.max_root_inclusive());
         }
 
+        let skip_index_for_zero_lamport = reclaim == UpsertReclaim::ReclaimOldSlots;
+
         let update = |start, end| {
             let mut reclaims = ReclaimsSlotList::with_capacity((end - start) / 2);
+            // Count zero-lamport accounts that were fully removed from the index (Type-A) vs
+            // those that had to keep a shadowing zero entry because a lower entry survived
+            // (the fallback). The ratio shows how much of the remove-from-index optimization
+            // is actually being realized.
+            let mut zero_lamport_recorded: u64 = 0;
+            let mut zero_lamport_fallback: u64 = 0;
 
             (start..end).for_each(|i| {
                 let info: AccountInfo = infos[i];
                 debug_assert!(!info.is_cached());
                 accounts.account(i, |account| {
-                    let old_slot = accounts.slot(i);
-                    self.accounts_index.upsert(
-                        target_slot,
-                        old_slot,
-                        account.pubkey(),
-                        info,
-                        &mut reclaims,
-                        reclaim,
-                    );
-                    self.accounts_index.update_secondary_indexes(
-                        account.pubkey(),
-                        &account,
-                        &self.account_indexes,
-                    );
+                    if skip_index_for_zero_lamport && account.is_zero_lamport() {
+                        // Type-A: try to drop the pubkey from the index entirely. drain_and_remove
+                        // removes this slot's cached item and reclaims older uncached versions,
+                        // returning whether the pubkey ended up fully removed.
+                        let removed = self.accounts_index.drain_and_remove(
+                            account.pubkey(),
+                            target_slot,
+                            &mut reclaims,
+                        );
+                        if removed {
+                            // The account is fully gone from the index, so record the offset on
+                            // the storage's "unreffed" list for shrink to recognize the tombstone
+                            // later without scanning the index.
+                            storage.insert_zero_lamport_unreffed_offset(info.offset());
+                            zero_lamport_recorded += 1;
+                        } else {
+                            // An entry survived -- a cached entry at a lower, not-yet-flushed root.
+                            // We must NOT remove the account from the index here: with no
+                            // (target_slot, zero) entry to shadow it, a concurrent `do_load` in the
+                            // window before that lower slot is flushed would resolve to the lower
+                            // cached (stale, non-zero) value. Keep the zero-lamport entry in the
+                            // index, exactly as the mainline upsert path does; clean will purge it
+                            // later. (Do not record an unreffed offset -- the account is still
+                            // index-referenced.)
+                            self.accounts_index.upsert(
+                                target_slot,
+                                target_slot,
+                                account.pubkey(),
+                                info,
+                                &mut reclaims,
+                                reclaim,
+                            );
+                            self.accounts_index.update_secondary_indexes(
+                                account.pubkey(),
+                                &account,
+                                &self.account_indexes,
+                            );
+                            zero_lamport_fallback += 1;
+                        }
+                    } else {
+                        let old_slot = accounts.slot(i);
+                        self.accounts_index.upsert(
+                            target_slot,
+                            old_slot,
+                            account.pubkey(),
+                            info,
+                            &mut reclaims,
+                            reclaim,
+                        );
+                        self.accounts_index.update_secondary_indexes(
+                            account.pubkey(),
+                            &account,
+                            &self.account_indexes,
+                        );
+                    }
                 });
             });
-            reclaims
+            (reclaims, zero_lamport_recorded, zero_lamport_fallback)
         };
 
         let threshold = 1;
@@ -5234,24 +5381,34 @@ impl AccountsDb {
             let chunk_size = len.div_ceil(thread_pool.current_num_threads());
             let batches = 1 + len / chunk_size;
             thread_pool.install(|| {
-                (0..batches)
+                let results: Vec<(ReclaimsSlotList<AccountInfo>, u64, u64)> = (0..batches)
                     .into_par_iter()
                     .map(|batch| {
                         let start = batch * chunk_size;
                         let end = std::cmp::min(start + chunk_size, len);
                         update(start, end)
                     })
-                    .filter(|reclaims| !reclaims.is_empty())
-                    .collect()
+                    .collect();
+                let mut total_recorded = 0;
+                let mut total_fallback = 0;
+                let reclaims = results
+                    .into_iter()
+                    .filter_map(|(reclaims, recorded, fallback)| {
+                        total_recorded += recorded;
+                        total_fallback += fallback;
+                        (!reclaims.is_empty()).then_some(reclaims)
+                    })
+                    .collect();
+                (reclaims, total_recorded, total_fallback)
             })
         } else {
-            let reclaims = update(0, len);
-            if reclaims.is_empty() {
-                // If no reclaims, return an empty vector
+            let (reclaims, recorded, fallback) = update(0, len);
+            let reclaims_vec = if reclaims.is_empty() {
                 vec![]
             } else {
                 vec![reclaims]
-            }
+            };
+            (reclaims_vec, recorded, fallback)
         }
     }
 
@@ -5395,6 +5552,10 @@ impl AccountsDb {
             .slots_cleaned
             .fetch_add(reclaimed_offsets.len() as u64, Ordering::Relaxed);
 
+        let assert_caller = match mark_accounts_obsolete {
+            MarkAccountsObsolete::No => "clean reclaim",
+            MarkAccountsObsolete::Yes(_) => "flush/shrink reclaim",
+        };
         reclaimed_offsets.iter().for_each(|(slot, offsets)| {
             if let Some(store) = self.storage.get_slot_storage_entry(*slot) {
                 assert_eq!(
@@ -5405,6 +5566,9 @@ impl AccountsDb {
                     store.slot(),
                     *slot
                 );
+
+                let offsets_vec: Vec<Offset> = offsets.iter().copied().collect();
+                store.assert_offsets_not_on_unreffed_list(&offsets_vec, assert_caller);
 
                 let remaining_accounts = if offsets.len() == store.count() {
                     // all remaining alive accounts in the storage are being removed, so the entire storage/slot is dead
@@ -5789,20 +5953,29 @@ impl AccountsDb {
         let infos = self.write_accounts_to_storage(slot, storage, &accounts);
         let write_accounts_us = write_accounts_time.end_as_us();
 
-        let mark_zero_lamport_time = Measure::start("mark_zero_lamport");
-        let num_zero_lamport_single_ref_accounts_marked =
-            self.mark_zero_lamport_single_ref_accounts_for_flush(&infos, storage, reclaim_handling);
-        let mark_zero_lamport_us = mark_zero_lamport_time.end_as_us();
-
         let update_index_time = Measure::start("update_index");
-        let reclaims = self.update_index_stored_accounts(
+        let (
+            reclaims,
+            num_zero_lamport_single_ref_accounts_recorded,
+            num_zero_lamport_shadow_fallbacks,
+        ) = self.update_index_stored_accounts(
             infos,
             &accounts,
+            storage,
             reclaim_handling,
             update_index_thread_selection,
             &self.thread_pool_background,
         );
         let update_index_us = update_index_time.end_as_us();
+
+        // Zero-lamport accounts recorded above were appended to storage's
+        // zero-lamport-single-ref list; the storage may now be shrinkable.
+        if num_zero_lamport_single_ref_accounts_recorded > 0
+            && self.is_candidate_for_shrink(storage)
+            && self.is_shrinking_productive(storage)
+        {
+            self.shrink_candidate_slots.lock().unwrap().insert(slot);
+        }
 
         // If there are any reclaims then they should be handled. Reclaims affect
         // all storages, and may result in the removal of dead storages.
@@ -5843,18 +6016,20 @@ impl AccountsDb {
             .update_index_us
             .fetch_add(update_index_us, Ordering::Relaxed);
         stats
-            .mark_zero_lamport_single_ref_accounts_us
-            .fetch_add(mark_zero_lamport_us, Ordering::Relaxed);
-        stats
             .handle_reclaims_us
             .fetch_add(handle_reclaims_us, Ordering::Relaxed);
         stats
             .num_accounts_stored
             .fetch_add(num_accounts_stored as u64, Ordering::Relaxed);
-        stats.num_zero_lamport_single_ref_accounts_marked.fetch_add(
-            num_zero_lamport_single_ref_accounts_marked,
-            Ordering::Relaxed,
-        );
+        stats
+            .num_zero_lamport_single_ref_accounts_recorded
+            .fetch_add(
+                num_zero_lamport_single_ref_accounts_recorded,
+                Ordering::Relaxed,
+            );
+        stats
+            .num_zero_lamport_shadow_fallbacks
+            .fetch_add(num_zero_lamport_shadow_fallbacks, Ordering::Relaxed);
         stats.report();
 
         StoreAccountsTiming {
@@ -5979,44 +6154,6 @@ impl AccountsDb {
         }
 
         infos
-    }
-
-    /// Marks zero lamport single reference accounts in the storage during store_accounts_for_flush
-    ///
-    /// Returns the number of accounts marked.
-    fn mark_zero_lamport_single_ref_accounts_for_flush(
-        &self,
-        account_infos: &[AccountInfo],
-        storage: &AccountStorageEntry,
-        reclaim_handling: UpsertReclaim,
-    ) -> u64 {
-        let mut num_marked = 0;
-        // If the reclaim handling is `ReclaimOldSlots`, then all zero lamport accounts are single
-        // ref accounts and they need to be inserted into the storages zero lamport single ref
-        // accounts list
-        // For other values of reclaim handling, there are no zero lamport single ref accounts
-        // so nothing needs to be done in this function
-        if reclaim_handling == UpsertReclaim::ReclaimOldSlots {
-            for account_info in account_infos {
-                if account_info.is_zero_lamport() {
-                    storage.insert_zero_lamport_single_ref_account_offset(account_info.offset());
-                    num_marked += 1;
-                }
-            }
-
-            // If any zero lamport accounts were marked, the storage may be valid for shrinking
-            if num_marked > 0
-                && self.is_candidate_for_shrink(storage)
-                && self.is_shrinking_productive(storage)
-            {
-                self.shrink_candidate_slots
-                    .lock()
-                    .unwrap()
-                    .insert(storage.slot);
-            }
-        }
-
-        num_marked
     }
 
     /// Marks zero lamport single reference accounts in the storage during store_accounts_for_shrink

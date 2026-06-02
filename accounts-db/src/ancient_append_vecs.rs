@@ -3809,6 +3809,7 @@ mod tests {
                     many_refs_this_is_newest_alive: AliveAccounts::default(),
                     many_refs_old_alive: AliveAccounts::default(),
                 },
+                zlsr_removed_from_index: Vec::new(),
                 alive_total_bytes: 0,
                 total_starting_accounts: 0,
                 all_are_zero_lamports: false,
