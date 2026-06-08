@@ -5313,17 +5313,43 @@ impl AccountsDb {
                 debug_assert!(!info.is_cached());
                 accounts.account(i, |account| {
                     if skip_index_for_zero_lamport && account.is_zero_lamport() {
-                        // Type-A: the new flush path drops the pubkey from the index entirely
-                        // via drain_and_remove and records the offset on the storage's
-                        // "unreffed" list so shrink can recognize it later without scanning
-                        // the index.
-                        storage.insert_zero_lamport_unreffed_offset(info.offset());
-                        self.accounts_index.drain_and_remove(
+                        // Type-A: try to drop the pubkey from the index entirely. drain_and_remove
+                        // removes this slot's cached item and reclaims older uncached versions,
+                        // returning whether the pubkey ended up fully removed.
+                        let removed = self.accounts_index.drain_and_remove(
                             account.pubkey(),
                             target_slot,
                             &mut reclaims,
                         );
-                        zero_lamport_recorded += 1;
+                        if removed {
+                            // The account is fully gone from the index, so record the offset on
+                            // the storage's "unreffed" list for shrink to recognize the tombstone
+                            // later without scanning the index.
+                            storage.insert_zero_lamport_unreffed_offset(info.offset());
+                            zero_lamport_recorded += 1;
+                        } else {
+                            // An entry survived -- a cached entry at a lower, not-yet-flushed root.
+                            // We must NOT remove the account from the index here: with no
+                            // (target_slot, zero) entry to shadow it, a concurrent `do_load` in the
+                            // window before that lower slot is flushed would resolve to the lower
+                            // cached (stale, non-zero) value. Keep the zero-lamport entry in the
+                            // index, exactly as the mainline upsert path does; clean will purge it
+                            // later. (Do not record an unreffed offset -- the account is still
+                            // index-referenced.)
+                            self.accounts_index.upsert(
+                                target_slot,
+                                target_slot,
+                                account.pubkey(),
+                                info,
+                                &mut reclaims,
+                                reclaim,
+                            );
+                            self.accounts_index.update_secondary_indexes(
+                                account.pubkey(),
+                                &account,
+                                &self.account_indexes,
+                            );
+                        }
                     } else {
                         let old_slot = accounts.slot(i);
                         self.accounts_index.upsert(

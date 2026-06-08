@@ -967,15 +967,17 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> AccountsIndex<T, U> {
     /// no entries remain. No-op if the pubkey isn't in the index.
     ///
     /// Used by the flush path for zero-lamport accounts: the new value is *not* added to
-    /// the index, but pre-existing entries for the same pubkey still need cleanup.
+    /// the index, but pre-existing entries for the same pubkey still need cleanup. Returns
+    /// `true` iff the pubkey was fully removed from the index; the caller must only treat the
+    /// account as a removed Type-A tombstone in that case (see the in-mem impl for why).
     pub fn drain_and_remove(
         &self,
         pubkey: &Pubkey,
         target_slot: Slot,
         reclaims: &mut ReclaimsSlotList<T>,
-    ) {
+    ) -> bool {
         let map = self.get_bin(pubkey);
-        map.drain_and_remove(pubkey, target_slot, reclaims);
+        map.drain_and_remove(pubkey, target_slot, reclaims)
     }
 
     pub fn ref_count_from_storage(&self, pubkey: &Pubkey) -> RefCount {

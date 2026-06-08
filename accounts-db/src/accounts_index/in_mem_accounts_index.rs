@@ -382,12 +382,19 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
     /// in memory (entries with cached slot_list items can't be flushed to disk). So the entry
     /// is always in-mem when this runs, and there are no uncached entries above `target_slot`
     /// in the typical flush-in-root-order case — both are asserted.
+    ///
+    /// Returns `true` if the pubkey was removed from the index (the slot list ended up empty).
+    /// Returns `false` if entries survived — most importantly a *cached* entry at a lower,
+    /// not-yet-flushed root. In that case the caller must NOT treat this as a removed Type-A
+    /// account: with no `(target_slot, zero)` entry left to shadow it, a concurrent `do_load` in
+    /// the window before the lower slot is flushed would resolve to that lower cached (stale,
+    /// non-zero) value. The caller must instead keep a zero-lamport entry, as mainline upsert does.
     pub fn drain_and_remove(
         &self,
         pubkey: &Pubkey,
         target_slot: Slot,
         reclaims: &mut ReclaimsSlotList<T>,
-    ) {
+    ) -> bool {
         let mut m = Measure::start("entry");
         let mut map = self.map_internal.write().unwrap();
         let capacity_pre = map.capacity();
@@ -425,7 +432,8 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
         let ref_count = value.unref_by_count(drained_uncached);
         assert_eq!(ref_count, drained_uncached);
 
-        if remaining == 0 {
+        let removed = remaining == 0;
+        if removed {
             self.delete_disk_key(occupied.key());
             self.stats().dec_mem_count();
             self.stats().inc_delete();
@@ -438,6 +446,7 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
         self.stats()
             .update_in_mem_capacity(capacity_pre, capacity_post);
         self.update_entry_stats(m, /* found_in_mem = */ true);
+        removed
     }
 
     // If the slot list for pubkey exists in the index and is empty, remove the index entry for pubkey and return true.
