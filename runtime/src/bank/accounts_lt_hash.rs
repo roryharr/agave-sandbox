@@ -1,7 +1,7 @@
 use {
     super::Bank,
     rayon::prelude::*,
-    solana_account::{AccountSharedData, accounts_equal},
+    solana_account::{AccountSharedData, ReadableAccount, accounts_equal},
     solana_accounts_db::accounts_db::AccountsDb,
     solana_hash::Hash,
     solana_lattice_hash::lt_hash::LtHash,
@@ -14,6 +14,33 @@ use {
         time::Duration,
     },
 };
+
+/// Page size used to classify how much of an account's data was modified by a write.
+///
+/// 4 KiB is the smallest a real page size is likely to be, and matches the granularity at
+/// which the kernel would copy-on-write account data pages.
+const DATA_PAGE_SIZE: usize = 4096;
+
+/// Counts how many `DATA_PAGE_SIZE`-byte pages differ between `prev_data` and `curr_data`.
+///
+/// Pages are compared over the union of the two slices; bytes past the end of the shorter
+/// slice count as differing (so growing or shrinking the data marks those pages modified).
+/// Returns `(num_pages_modified, num_pages_total)`.
+fn count_modified_data_pages(prev_data: &[u8], curr_data: &[u8]) -> (usize, usize) {
+    let max_len = prev_data.len().max(curr_data.len());
+    let num_pages_total = max_len.div_ceil(DATA_PAGE_SIZE);
+    let mut num_pages_modified = 0;
+    for page_index in 0..num_pages_total {
+        let start = page_index * DATA_PAGE_SIZE;
+        let end = start + DATA_PAGE_SIZE;
+        let prev_page = &prev_data[start.min(prev_data.len())..end.min(prev_data.len())];
+        let curr_page = &curr_data[start.min(curr_data.len())..end.min(curr_data.len())];
+        if prev_page != curr_page {
+            num_pages_modified += 1;
+        }
+    }
+    (num_pages_modified, num_pages_total)
+}
 
 impl Bank {
     /// Updates the accounts lt hash
@@ -83,8 +110,25 @@ impl Bank {
         struct Stats {
             num_cache_misses: usize,
             num_accounts_unmodified: usize,
+            // Classification of each *modified* account write (these, plus num_accounts_unmodified,
+            // sum to num_accounts_total):
+            /// writes to a brand new account (no previous version existed)
+            num_writes_new_account: usize,
+            /// writes to an account that holds no data (only metadata could have changed)
+            num_writes_no_data: usize,
+            /// writes that left the data unchanged and only modified metadata
+            num_writes_metadata_only: usize,
+            /// writes that modified some, but not all, pages of the data
+            num_writes_partial_pages: usize,
+            /// writes that modified every page of the data
+            num_writes_entire_data: usize,
+            /// total number of data pages modified, summed across partial- and entire-data writes
+            num_data_pages_modified: usize,
+            /// total number of data pages spanned, summed across partial- and entire-data writes
+            num_data_pages_total: usize,
             time_loading_accounts_prev: Duration,
             time_comparing_accounts: Duration,
+            time_classifying_writes: Duration,
             time_computing_hashes: Duration,
             time_mixing_hashes: Duration,
         }
@@ -92,8 +136,16 @@ impl Bank {
             fn add_assign(&mut self, other: Self) {
                 self.num_cache_misses += other.num_cache_misses;
                 self.num_accounts_unmodified += other.num_accounts_unmodified;
+                self.num_writes_new_account += other.num_writes_new_account;
+                self.num_writes_no_data += other.num_writes_no_data;
+                self.num_writes_metadata_only += other.num_writes_metadata_only;
+                self.num_writes_partial_pages += other.num_writes_partial_pages;
+                self.num_writes_entire_data += other.num_writes_entire_data;
+                self.num_data_pages_modified += other.num_data_pages_modified;
+                self.num_data_pages_total += other.num_data_pages_total;
                 self.time_loading_accounts_prev += other.time_loading_accounts_prev;
                 self.time_comparing_accounts += other.time_comparing_accounts;
+                self.time_classifying_writes += other.time_classifying_writes;
                 self.time_computing_hashes += other.time_computing_hashes;
                 self.time_mixing_hashes += other.time_mixing_hashes;
             }
@@ -150,7 +202,9 @@ impl Bank {
                         // mix out the previous version of the account
                         match initial_state_of_account {
                             InitialStateOfAccount::Dead => {
-                                // nothing to do here
+                                // there is no previous version of this account, so this write
+                                // creates the account in its entirety
+                                accum.1.num_writes_new_account += 1;
                             }
                             InitialStateOfAccount::Alive(prev_account) => {
                                 let (are_accounts_equal, measure_is_equal) =
@@ -161,6 +215,31 @@ impl Bank {
                                     accum.1.num_accounts_unmodified += 1;
                                     return accum;
                                 }
+
+                                // classify how much of the (modified) account this write changed
+                                let (_, measure_classify) = meas_dur!({
+                                    let prev_data = prev_account.data();
+                                    let curr_data = curr_account.data();
+                                    if prev_data.is_empty() && curr_data.is_empty() {
+                                        // the account holds no data, so only metadata changed
+                                        accum.1.num_writes_no_data += 1;
+                                    } else if prev_data == curr_data {
+                                        // the data is unchanged, so only metadata changed
+                                        accum.1.num_writes_metadata_only += 1;
+                                    } else {
+                                        let (num_pages_modified, num_pages_total) =
+                                            count_modified_data_pages(prev_data, curr_data);
+                                        accum.1.num_data_pages_modified += num_pages_modified;
+                                        accum.1.num_data_pages_total += num_pages_total;
+                                        if num_pages_modified == num_pages_total {
+                                            accum.1.num_writes_entire_data += 1;
+                                        } else {
+                                            accum.1.num_writes_partial_pages += 1;
+                                        }
+                                    }
+                                });
+                                accum.1.time_classifying_writes += measure_classify;
+
                                 let (prev_lt_hash, measure_hashing) =
                                     meas_dur!(AccountsDb::lt_hash_account(&prev_account, pubkey));
                                 let (_, measure_mixing) =
@@ -209,6 +288,33 @@ impl Bank {
                 stats.num_accounts_unmodified,
                 i64
             ),
+            (
+                "num_writes_new_account",
+                stats.num_writes_new_account,
+                i64
+            ),
+            ("num_writes_no_data", stats.num_writes_no_data, i64),
+            (
+                "num_writes_metadata_only",
+                stats.num_writes_metadata_only,
+                i64
+            ),
+            (
+                "num_writes_partial_pages",
+                stats.num_writes_partial_pages,
+                i64
+            ),
+            (
+                "num_writes_entire_data",
+                stats.num_writes_entire_data,
+                i64
+            ),
+            (
+                "num_data_pages_modified",
+                stats.num_data_pages_modified,
+                i64
+            ),
+            ("num_data_pages_total", stats.num_data_pages_total, i64),
             ("num_cache_misses", stats.num_cache_misses, i64),
             ("total_us", total_time.as_micros(), i64),
             (
@@ -224,6 +330,11 @@ impl Bank {
             (
                 "par_comparing_accounts_us",
                 stats.time_comparing_accounts.as_micros(),
+                i64
+            ),
+            (
+                "par_classifying_writes_us",
+                stats.time_classifying_writes.as_micros(),
                 i64
             ),
             (
@@ -395,7 +506,7 @@ mod tests {
         },
         agave_feature_set::FeatureSet,
         agave_snapshots::snapshot_config::SnapshotConfig,
-        solana_account::{ReadableAccount as _, WritableAccount as _},
+        solana_account::WritableAccount as _,
         solana_accounts_db::{
             accounts_db::{ACCOUNTS_DB_CONFIG_FOR_TESTING, AccountsDbConfig},
             accounts_index::{ACCOUNTS_INDEX_CONFIG_FOR_TESTING, AccountsIndexConfig, IndexLimit},
@@ -454,6 +565,43 @@ mod tests {
         );
 
         (config, mint_keypair)
+    }
+
+    #[test]
+    fn test_count_modified_data_pages() {
+        // identical data of various sizes: no pages modified
+        assert_eq!(count_modified_data_pages(&[], &[]), (0, 0));
+        assert_eq!(count_modified_data_pages(&[7; 100], &[7; 100]), (0, 1));
+        assert_eq!(
+            count_modified_data_pages(&[7; DATA_PAGE_SIZE * 3], &[7; DATA_PAGE_SIZE * 3]),
+            (0, 3),
+        );
+
+        // a single byte change within one page marks only that page modified
+        let mut curr = vec![7u8; DATA_PAGE_SIZE * 3];
+        curr[DATA_PAGE_SIZE + 10] = 8;
+        assert_eq!(
+            count_modified_data_pages(&[7; DATA_PAGE_SIZE * 3], &curr),
+            (1, 3),
+        );
+
+        // every page differs
+        assert_eq!(
+            count_modified_data_pages(&[7; DATA_PAGE_SIZE * 2], &[8; DATA_PAGE_SIZE * 2]),
+            (2, 2),
+        );
+
+        // growing the data: the trailing (previously absent) pages count as modified
+        assert_eq!(
+            count_modified_data_pages(&[7; DATA_PAGE_SIZE], &[7; DATA_PAGE_SIZE * 3]),
+            (2, 3),
+        );
+
+        // shrinking the data: the trailing (now absent) pages count as modified
+        assert_eq!(
+            count_modified_data_pages(&[7; DATA_PAGE_SIZE * 3], &[7; DATA_PAGE_SIZE]),
+            (2, 3),
+        );
     }
 
     #[test]
