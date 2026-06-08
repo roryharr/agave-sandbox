@@ -5280,8 +5280,9 @@ impl AccountsDb {
     /// cleaned up.
     ///
     /// Returns a vector of `SlotList<AccountInfo>` containing the reclaims for each batch
-    /// processed (each element is guaranteed non-empty) and the count of accounts that took
-    /// the skip-index zero-lamport path.
+    /// processed (each element is guaranteed non-empty), the count of zero-lamport accounts that
+    /// were fully removed from the index (Type-A), and the count that fell back to keeping a
+    /// shadowing zero entry because a lower entry survived.
     fn update_index_stored_accounts<'a>(
         &self,
         infos: Vec<AccountInfo>,
@@ -5290,7 +5291,7 @@ impl AccountsDb {
         reclaim: UpsertReclaim,
         update_index_thread_selection: UpdateIndexThreadSelection,
         thread_pool: &ThreadPool,
-    ) -> (Vec<ReclaimsSlotList<AccountInfo>>, u64) {
+    ) -> (Vec<ReclaimsSlotList<AccountInfo>>, u64, u64) {
         let target_slot = accounts.target_slot();
         let len = std::cmp::min(accounts.len(), infos.len());
 
@@ -5306,7 +5307,12 @@ impl AccountsDb {
 
         let update = |start, end| {
             let mut reclaims = ReclaimsSlotList::with_capacity((end - start) / 2);
+            // Count zero-lamport accounts that were fully removed from the index (Type-A) vs
+            // those that had to keep a shadowing zero entry because a lower entry survived
+            // (the fallback). The ratio shows how much of the remove-from-index optimization
+            // is actually being realized.
             let mut zero_lamport_recorded: u64 = 0;
+            let mut zero_lamport_fallback: u64 = 0;
 
             (start..end).for_each(|i| {
                 let info: AccountInfo = infos[i];
@@ -5349,6 +5355,7 @@ impl AccountsDb {
                                 &account,
                                 &self.account_indexes,
                             );
+                            zero_lamport_fallback += 1;
                         }
                     } else {
                         let old_slot = accounts.slot(i);
@@ -5368,7 +5375,7 @@ impl AccountsDb {
                     }
                 });
             });
-            (reclaims, zero_lamport_recorded)
+            (reclaims, zero_lamport_recorded, zero_lamport_fallback)
         };
 
         let threshold = 1;
@@ -5380,7 +5387,7 @@ impl AccountsDb {
             let chunk_size = len.div_ceil(thread_pool.current_num_threads());
             let batches = 1 + len / chunk_size;
             thread_pool.install(|| {
-                let results: Vec<(ReclaimsSlotList<AccountInfo>, u64)> = (0..batches)
+                let results: Vec<(ReclaimsSlotList<AccountInfo>, u64, u64)> = (0..batches)
                     .into_par_iter()
                     .map(|batch| {
                         let start = batch * chunk_size;
@@ -5389,23 +5396,25 @@ impl AccountsDb {
                     })
                     .collect();
                 let mut total_recorded = 0;
+                let mut total_fallback = 0;
                 let reclaims = results
                     .into_iter()
-                    .filter_map(|(reclaims, recorded)| {
+                    .filter_map(|(reclaims, recorded, fallback)| {
                         total_recorded += recorded;
+                        total_fallback += fallback;
                         (!reclaims.is_empty()).then_some(reclaims)
                     })
                     .collect();
-                (reclaims, total_recorded)
+                (reclaims, total_recorded, total_fallback)
             })
         } else {
-            let (reclaims, recorded) = update(0, len);
+            let (reclaims, recorded, fallback) = update(0, len);
             let reclaims_vec = if reclaims.is_empty() {
                 vec![]
             } else {
                 vec![reclaims]
             };
-            (reclaims_vec, recorded)
+            (reclaims_vec, recorded, fallback)
         }
     }
 
@@ -5951,15 +5960,18 @@ impl AccountsDb {
         let write_accounts_us = write_accounts_time.end_as_us();
 
         let update_index_time = Measure::start("update_index");
-        let (reclaims, num_zero_lamport_single_ref_accounts_recorded) = self
-            .update_index_stored_accounts(
-                infos,
-                &accounts,
-                storage,
-                reclaim_handling,
-                update_index_thread_selection,
-                &self.thread_pool_background,
-            );
+        let (
+            reclaims,
+            num_zero_lamport_single_ref_accounts_recorded,
+            num_zero_lamport_shadow_fallbacks,
+        ) = self.update_index_stored_accounts(
+            infos,
+            &accounts,
+            storage,
+            reclaim_handling,
+            update_index_thread_selection,
+            &self.thread_pool_background,
+        );
         let update_index_us = update_index_time.end_as_us();
 
         // Zero-lamport accounts recorded above were appended to storage's
@@ -6021,6 +6033,9 @@ impl AccountsDb {
                 num_zero_lamport_single_ref_accounts_recorded,
                 Ordering::Relaxed,
             );
+        stats
+            .num_zero_lamport_shadow_fallbacks
+            .fetch_add(num_zero_lamport_shadow_fallbacks, Ordering::Relaxed);
         stats.report();
 
         StoreAccountsTiming {
