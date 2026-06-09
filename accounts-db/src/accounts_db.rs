@@ -4678,8 +4678,8 @@ impl AccountsDb {
                 i64
             ),
             (
-                "write_through_pubkeys_us",
-                flush_stats.write_through_pubkeys_us.0,
+                "disk_index_write_through_us",
+                flush_stats.disk_index_write_through_us.0,
                 i64
             ),
         );
@@ -4857,9 +4857,9 @@ impl AccountsDb {
         // Now that this slot has left the cache, any pubkey that no longer appears
         // in any cached slot is eligible to be written through so its in-mem entry
         // becomes clean and can be evicted.
-        let (_, write_through_pubkeys_us) =
+        let (_, disk_index_write_through_us) =
             measure_us!(self.accounts_index.write_through_pubkeys(pubkeys_removed));
-        flush_stats.write_through_pubkeys_us = Saturating(write_through_pubkeys_us);
+        flush_stats.disk_index_write_through_us = Saturating(disk_index_write_through_us);
         // Add `accounts` to uncleaned_pubkeys since they were written to storage
         // and should be visited by `clean`.
         // If old slots were reclaimed, accounts were already cleaned,

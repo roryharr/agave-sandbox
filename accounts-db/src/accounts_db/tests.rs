@@ -724,7 +724,7 @@ fn test_flush_does_not_write_through_when_write_through_disabled() {
     assert_eq!(immediate_disk_writes(), baseline_writes);
 }
 
-/// The dead-slot purge path  removes only the purged slot's index entries, so a pubkey with
+/// The dead-slot purge path removes only the purged slot's index entries, so a pubkey with
 /// a surviving dirty single-ref entry at another slot must be written through when the purge
 /// drops its last cached slot.
 #[test]
