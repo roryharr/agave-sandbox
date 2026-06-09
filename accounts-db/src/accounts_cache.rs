@@ -320,8 +320,8 @@ impl AccountsCache {
     #[must_use]
     pub fn remove_slot(&self, slot: Slot) -> Option<Vec<Pubkey>> {
         let result = self.cache.remove(&slot).map(|(_, slot_cache)| slot_cache);
-         // If this slot was a root, it has now left the cache, so stop tracking it as unflushed.
-         self.unflushed_roots.write().unwrap().remove(&slot);
+        // If this slot was a root, it has now left the cache, so stop tracking it as unflushed.
+        self.unflushed_roots.write().unwrap().remove(&slot);
 
         result
             .as_ref()
