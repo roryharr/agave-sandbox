@@ -36,7 +36,7 @@ use {
             stored_account_info::{StoredAccountInfo, StoredAccountInfoWithoutData},
         },
         account_storage_entry::AccountStorageEntry,
-        accounts_cache::{AccountsCache, CachedAccount, SlotCache, SlotStatus},
+        accounts_cache::{AccountsCache, CachedAccount, SlotCache},
         accounts_db::stats::{
             AccountsStats, CleanAccountsStats, FlushStats, LoadAccountsStats,
             ObsoleteAccountsStats, PurgeStats, ShrinkAncientStats, ShrinkStats, ShrinkStatsSub,
@@ -3470,7 +3470,7 @@ impl AccountsDb {
                 break;
             }
 
-            if let Some((cached_account, slot, _)) =
+            if let Some((cached_account, slot)) =
                 self.accounts_cache.load_latest(&pubkey, ancestors)
             {
                 cached_versions.insert(pubkey, (cached_account, slot));
@@ -4059,38 +4059,21 @@ impl AccountsDb {
     ) -> Option<(AccountSharedData, Slot)> {
         let starting_max_root = self.accounts_index.max_root_inclusive();
 
-        // First check the write cache
-        let cache_result = self.accounts_cache.load_latest(pubkey, ancestors);
-
-        if let Some((cached_account, cached_slot, slot_status)) = &cache_result {
-            // If the slot is an ancestor or an unflushed root, it hasn't been flushed to
-            // storage yet, so the write cache is authoritative — return it directly.
-            if matches!(
-                slot_status,
-                SlotStatus::Ancestor | SlotStatus::UnflushedRoot
-            ) {
-                self.load_account_stats
-                    .num_loaded_from_write_cache
-                    .fetch_add(1, Ordering::Relaxed);
-                return Some((cached_account.account.clone(), *cached_slot));
-            }
+        // First check the write cache. Because roots are flushed oldest-first, any version
+        // found here is the newest visible on this fork, so the write cache is authoritative
+        // and can be returned directly without consulting storage.
+        if let Some((cached_account, cached_slot)) =
+            self.accounts_cache.load_latest(pubkey, ancestors)
+        {
+            self.load_account_stats
+                .num_loaded_from_write_cache
+                .fetch_add(1, Ordering::Relaxed);
+            return Some((cached_account.account.clone(), cached_slot));
         }
 
         let (slot, storage_location, _maybe_account_accessor) =
             self.read_index_for_accessor_or_load_slow(ancestors, pubkey, false)?;
         // Notice the subtle `?` at previous line, we bail out pretty early if missing.
-
-        if let Some((cached_account, cached_slot, _)) = &cache_result {
-            if *cached_slot >= slot {
-                // The write cache holds a version at a slot at least as new as what the
-                // index returned, so it represents the freshest visible value and can be
-                // returned directly without going through the storage accessor.
-                self.load_account_stats
-                    .num_loaded_from_write_cache
-                    .fetch_add(1, Ordering::Relaxed);
-                return Some((cached_account.account.clone(), *cached_slot));
-            }
-        }
 
         let in_write_cache = storage_location.is_cached();
         if !in_write_cache {
@@ -4114,17 +4097,12 @@ impl AccountsDb {
         // since the cache could be flushed in between the 2 calls.
         let in_write_cache = matches!(account_accessor, LoadedAccountAccessor::Cached(_));
         if in_write_cache {
-            // While the account wasn't loaded directly from the write cache, the write cache
-            // provided the correct slot, so count this as a load from the write cache
-            if cache_result.is_some_and(|(_, cached_slot, _)| cached_slot == slot) {
-                self.load_account_stats
-                    .num_loaded_from_write_cache
-                    .fetch_add(1, Ordering::Relaxed);
-            } else {
-                self.load_account_stats
-                    .num_loaded_from_index_cache
-                    .fetch_add(1, Ordering::Relaxed);
-            }
+            // `load_latest` missed above (otherwise we'd have returned early), but the account
+            // was written to the cache between then and the index lookup, so the index pointed
+            // us back at the cache.
+            self.load_account_stats
+                .num_loaded_from_index_cache
+                .fetch_add(1, Ordering::Relaxed);
         } else {
             self.load_account_stats
                 .num_loaded_from_index_storage
@@ -4688,36 +4666,27 @@ impl AccountsDb {
         // If there is a long running scan going on, this could prevent any cleaning
         // based on updates from slots > `max_clean_root`.
         let max_clean_root = self.max_clean_root(requested_flush_root);
-
-        let mut written_accounts = HashSet::new();
-
-        let mut should_flush_f = {
-            Some(move |&pubkey: &Pubkey| {
-                // if not in hashset, then not flushed previously, so flush it
-                written_accounts.insert(pubkey)
-            })
-        };
-
-        self.flush_rooted_accounts_cache(
-            requested_flush_root,
-            max_clean_root,
-            should_flush_f.as_mut(),
-        )
+        self.flush_rooted_accounts_cache(requested_flush_root, max_clean_root, true)
     }
 
     // Flush all rooted slots without cleaning. This is used when rooted accounts must be flushed
     // to storage but older versions of the accounts are still required. For example, the
     // older versions may be needed for snapshotting.
     fn flush_rooted_accounts_cache_without_clean(&self) -> (usize, usize, FlushStats) {
-        self.flush_rooted_accounts_cache(None, None, None::<&mut fn(&_) -> bool>)
+        self.flush_rooted_accounts_cache(None, None, false)
     }
 
     /// Flush all rooted slots up to `requested_flush_root`.
+    ///
+    /// When `clean` is true, only the newest version of each account across the
+    /// flushed roots (at or below `max_clean_root`) is written to storage; older
+    /// versions are purged from the index instead. When false, every account in
+    /// every flushed root is written.
     fn flush_rooted_accounts_cache(
         &self,
         requested_flush_root: Option<Slot>,
         max_clean_root: Option<Slot>,
-        mut should_flush_f: Option<&mut impl FnMut(&Pubkey) -> bool>,
+        clean: bool,
     ) -> (usize, usize, FlushStats) {
         // Always flush up to `requested_flush_root`, which is necessary for things like snapshotting.
         let flushed_roots: BTreeSet<Slot> =
@@ -4725,14 +4694,19 @@ impl AccountsDb {
         let max_flush_root = flushed_roots.last().copied();
         let num_new_roots = flushed_roots.len();
 
-        // Iterate from highest to lowest so that we don't need to flush earlier
-        // outdated updates in earlier roots
+        // Decide up front which cached accounts are the newest version and should be
+        // written to storage. A slot absent from the map flushes all of its accounts.
+        let flush_keys_by_slot = self.compute_flush_plans(&flushed_roots, max_clean_root, clean);
+
+        // `compute_flush_plans` has already chosen the newest version of each account,
+        // so the order in which roots are flushed no longer affects which version wins.
+        // Iterate oldest-to-newest: each account is written in exactly one root and
+        // purged from the others, and the surviving newer version stays reachable (in
+        // the cache until its own root is flushed), so concurrent readers always see it.
         let mut num_roots_flushed = 0;
         let mut flush_stats = FlushStats::default();
-        for root in flushed_roots.into_iter().rev() {
-            if let Some(stats) =
-                self.flush_slot_cache(root, should_flush_f.as_mut(), max_clean_root)
-            {
+        for root in flushed_roots {
+            if let Some(stats) = self.flush_slot_cache(root, flush_keys_by_slot.get(&root)) {
                 num_roots_flushed += 1;
                 flush_stats.accumulate(&stats);
             }
@@ -4746,37 +4720,70 @@ impl AccountsDb {
         (num_new_roots, num_roots_flushed, flush_stats)
     }
 
+    /// Selects, for each root being flushed, which cached accounts are the newest
+    /// version and therefore should be written to storage.
+    ///
+    /// Roots are visited newest-first so the newest version of each account wins;
+    /// older versions in earlier roots are left out of that root's set and will be
+    /// purged from the index instead of being written.
+    ///
+    /// Only roots at or below `max_clean_root` participate in this de-duplication.
+    /// A root above `max_clean_root` (or every root when `clean` is false) is
+    /// omitted from the returned map entirely, which signals to flush all of its
+    /// accounts: an in-flight scan may still need those versions, so they must not
+    /// be cleaned.
+    fn compute_flush_plans(
+        &self,
+        flushed_roots: &BTreeSet<Slot>,
+        max_clean_root: Option<Slot>,
+        clean: bool,
+    ) -> HashMap<Slot, HashSet<Pubkey>> {
+        let mut flush_keys_by_slot = HashMap::new();
+        if !clean {
+            return flush_keys_by_slot;
+        }
+
+        let mut written_accounts = HashSet::new();
+        for &root in flushed_roots.iter().rev() {
+            if max_clean_root.is_some_and(|max_clean_root| root > max_clean_root) {
+                // Above the clean boundary: flush everything, don't de-duplicate.
+                continue;
+            }
+            let Some(slot_cache) = self.accounts_cache.slot_cache(root) else {
+                continue;
+            };
+            let mut flush_keys = HashSet::new();
+            for entry in slot_cache.iter() {
+                let pubkey = *entry.key();
+                // If not seen in a newer root, this is the newest version, so flush it.
+                if written_accounts.insert(pubkey) {
+                    flush_keys.insert(pubkey);
+                }
+            }
+            flush_keys_by_slot.insert(root, flush_keys);
+        }
+        flush_keys_by_slot
+    }
+
     fn do_flush_slot_cache(
         &self,
         slot: Slot,
         slot_cache: &SlotCache,
-        mut should_flush_f: Option<&mut impl FnMut(&Pubkey) -> bool>,
-        max_clean_root: Option<Slot>,
+        flush_keys: Option<&HashSet<Pubkey>>,
     ) -> FlushStats {
         debug_assert!(self.accounts_index.is_alive_root(slot));
         let mut flush_stats = FlushStats::default();
         let iter_items: Vec<_> = slot_cache.iter().collect();
-        let mut pubkeys: Vec<Pubkey> = vec![];
-        if should_flush_f.is_some() {
-            if let Some(max_clean_root) = max_clean_root {
-                if slot > max_clean_root {
-                    // Only if the root is greater than the `max_clean_root` do we
-                    // have to prevent cleaning, otherwise, just default to `should_flush_f`
-                    // for any slots <= `max_clean_root`
-                    should_flush_f = None;
-                }
-            }
-        }
+        let mut purged_pubkeys: Vec<Pubkey> = vec![];
 
         let accounts: Vec<(&Pubkey, &AccountSharedData)> = iter_items
             .iter()
             .filter_map(|iter_item| {
                 let key = iter_item.key();
                 let account = &iter_item.value().account;
-                let should_flush = should_flush_f
-                    .as_mut()
-                    .map(|should_flush_f| should_flush_f(key))
-                    .unwrap_or(true);
+                // `None` flushes everything; `Some(set)` flushes only the newest
+                // versions selected by `compute_flush_plans`.
+                let should_flush = flush_keys.is_none_or(|flush_keys| flush_keys.contains(key));
                 if should_flush {
                     flush_stats.num_bytes_flushed +=
                         AppendVec::calculate_stored_size(account.data().len()) as u64;
@@ -4785,7 +4792,7 @@ impl AccountsDb {
                 } else {
                     // If we don't flush, we have to remove the entry from the
                     // index, since it's equivalent to purging
-                    pubkeys.push(*key);
+                    purged_pubkeys.push(*key);
                     flush_stats.num_bytes_purged +=
                         AppendVec::calculate_stored_size(account.data().len()) as u64;
                     flush_stats.num_accounts_purged += 1;
@@ -4797,14 +4804,15 @@ impl AccountsDb {
         let is_dead_slot = accounts.is_empty();
         // Remove the account index entries from earlier roots that are outdated by later roots.
         // Safe because queries to the index will be reading updates from later roots.
-        self.purge_slot_cache_pubkeys(slot, pubkeys, is_dead_slot);
+        self.purge_slot_cache_pubkeys(slot, purged_pubkeys, is_dead_slot);
 
-        // Use ReclaimOldSlots to reclaim old slots if marking obsolete accounts and cleaning
-        // Cleaning is enabled if `should_flush_f` is Some.
-        // should_flush_f is set to None when
+        // Use ReclaimOldSlots to reclaim old slots if marking obsolete accounts and cleaning.
+        // Cleaning is enabled iff this slot has a flush set (`flush_keys` is Some), which
+        // `compute_flush_plans` only produces for cleaned roots at or below `max_clean_root`.
+        // It is None when:
         // 1) There's an ongoing scan to avoid reclaiming accounts being scanned.
         // 2) The slot is > max_clean_root to prevent unrooted slots from reclaiming rooted versions.
-        let reclaim_method = if should_flush_f.is_some() {
+        let reclaim_method = if flush_keys.is_some() {
             UpsertReclaim::ReclaimOldSlots
         } else {
             UpsertReclaim::IgnoreReclaims
@@ -4863,19 +4871,18 @@ impl AccountsDb {
         flush_stats
     }
 
-    /// `should_flush_f` is an optional closure that determines whether a given
-    /// account should be flushed. Passing `None` will by default flush all
-    /// accounts
+    /// `flush_keys` optionally restricts which accounts are written to storage:
+    /// `Some(set)` flushes only the pubkeys in the set (purging the rest from the
+    /// index), while `None` flushes every account in the slot.
     fn flush_slot_cache(
         &self,
         slot: Slot,
-        should_flush_f: Option<&mut impl FnMut(&Pubkey) -> bool>,
-        max_clean_root: Option<Slot>,
+        flush_keys: Option<&HashSet<Pubkey>>,
     ) -> Option<FlushStats> {
         // If a slot cache exists for this slot, flush it.
-        self.accounts_cache.slot_cache(slot).map(|slot_cache| {
-            self.do_flush_slot_cache(slot, &slot_cache, should_flush_f, max_clean_root)
-        })
+        self.accounts_cache
+            .slot_cache(slot)
+            .map(|slot_cache| self.do_flush_slot_cache(slot, &slot_cache, flush_keys))
     }
 
     fn report_store_stats(&self) {
@@ -5873,29 +5880,12 @@ impl AccountsDb {
     /// Returns whether the latest version of pubkey from ancestors is zero-lamport
     /// Returns `None` if the account doesn't exist
     fn is_ancestor_zero_lamport(&self, pubkey: &Pubkey, ancestors: &Ancestors) -> Option<bool> {
-        if let Some((cached_account, cache_slot, status)) =
+        if let Some((cached_account, _cache_slot)) =
             self.accounts_cache.load_latest(pubkey, ancestors)
         {
-            let cache_is_zero_lamport = cached_account.account.lamports() == 0;
-            // When the slot isn't being flushed, the cache is definitely the newest
-            if matches!(status, SlotStatus::Ancestor | SlotStatus::UnflushedRoot) {
-                return Some(cache_is_zero_lamport);
-            }
-
-            // Slot is being flushed; a newer version may already exist in storage.
-            if let Some((index_slot, index_is_zero_lamport)) = self
-                .accounts_index
-                .get_with_and_then(pubkey, ancestors, true, |(slot, account)| {
-                    (slot, account.is_zero_lamport())
-                })
-            {
-                // Return the zero lamport status of the newest version between the cache and index
-                // If slots are the same it doesn't matter which is returned (They are identical)
-                if index_slot > cache_slot {
-                    return Some(index_is_zero_lamport);
-                }
-            }
-            Some(cache_is_zero_lamport)
+            // Because roots are flushed oldest-first, a cache hit is always the newest
+            // version on this fork, so no need to consult storage for a newer one.
+            Some(cached_account.account.lamports() == 0)
         } else {
             self.accounts_index
                 .get_with_and_then(pubkey, ancestors, true, |(_, account)| {
@@ -7013,7 +7003,7 @@ impl AccountsDb {
                 .contains(&slot),
             "slot: {slot}"
         );
-        self.flush_slot_cache(slot, None::<&mut fn(&_) -> bool>, None);
+        self.flush_slot_cache(slot, None);
     }
 
     /// useful to adapt tests written prior to introduction of the write cache

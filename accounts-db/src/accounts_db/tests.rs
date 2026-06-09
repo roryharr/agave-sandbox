@@ -6795,40 +6795,30 @@ fn test_is_ancestor_zero_lamport_index_only() {
     assert_eq!(db.is_ancestor_zero_lamport(&pubkey, &ancestors), Some(true));
 }
 
-/// Verifies that when the cache entry is in a `*BeingFlushed` state, is_ancestor_zero_lamport
-/// also consults the index and returns the zero lamport status of whichever version sits on the
-/// higher slot, regardless of whether that version is in the cache or the index.
-#[test_case(10, 5, true; "newer_cache_wins")]
-#[test_case(5, 10, false; "newer_index_wins")]
-fn test_is_ancestor_zero_lamport_being_flushed_picks_higher_slot(
-    cache_slot: Slot,
-    index_slot: Slot,
-    expected: bool,
-) {
+/// Verifies that when a being-flushed cache entry sits on a higher slot than the version in
+/// storage, is_ancestor_zero_lamport returns the cache version directly. Because roots are
+/// flushed oldest-first, a cache hit is always the newest version on this fork, so the index
+/// does not need to be consulted.
+#[test]
+fn test_is_ancestor_zero_lamport_being_flushed_uses_cache() {
     let db = AccountsDb::new_single_for_tests();
     let pubkey = Pubkey::new_unique();
 
-    // Non-zero lamport entry in the index. Set up first: flushing goes through the cache,
-    // so doing it after the cache setup would conflict with `begin_flush_roots`.
+    // Older, non-zero version flushed to storage. Set up first: flushing goes through the
+    // cache, so doing it after the cache setup would conflict with `begin_flush_roots`.
     let account = AccountSharedData::new(100, 0, &Pubkey::default());
-    db.store_for_tests((index_slot, [(&pubkey, &account)].as_slice()));
-    db.add_root_and_flush_write_cache(index_slot);
+    db.store_for_tests((5, [(&pubkey, &account)].as_slice()));
+    db.add_root_and_flush_write_cache(5);
     assert!(!db.accounts_cache.contains_pubkey(&pubkey));
 
-    // Zero lamport entry in the cache. Note: this entry may be older than the slot that was
-    // flushed above which is normally not allowed to be added to the cache. However,
-    // this state is a valid intermediate state when flushing the cache so needs
-    // test coverage
+    // Newer, zero-lamport version still in the cache and being flushed.
     let account = AccountSharedData::new(0, 0, &Pubkey::default());
-    db.accounts_cache.store(cache_slot, &pubkey, account);
-    db.accounts_cache.add_root(cache_slot);
-    db.accounts_cache.begin_flush_roots(Some(cache_slot));
+    db.accounts_cache.store(10, &pubkey, account);
+    db.accounts_cache.add_root(10);
+    db.accounts_cache.begin_flush_roots(Some(10));
 
-    let ancestors = Ancestors::from(vec![cache_slot, index_slot]);
-    assert_eq!(
-        db.is_ancestor_zero_lamport(&pubkey, &ancestors),
-        Some(expected)
-    );
+    let ancestors = Ancestors::from(vec![5, 10]);
+    assert_eq!(db.is_ancestor_zero_lamport(&pubkey, &ancestors), Some(true));
 
     db.accounts_cache.end_flush_roots();
 }
