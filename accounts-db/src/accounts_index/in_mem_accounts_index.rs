@@ -60,8 +60,8 @@ pub struct InMemAccountsIndex<T: IndexValue, U: DiskIndexValue + From<T> + Into<
     /// stats related to starting up
     pub(crate) startup_stats: Arc<StartupStats>,
 
-    /// If true, eagerly flush a dirty entry to disk once `slot_list.len() == 1` and
-    /// `ref_count == 1`, so it goes clean and can be evicted.
+    /// If true, flush dirty entries to disk once `slot_list.len() == 1` and
+    /// `ref_count == 1`, making it evictable
     should_write_through: bool,
 }
 
