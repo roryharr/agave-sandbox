@@ -60,7 +60,8 @@ pub struct InMemAccountsIndex<T: IndexValue, U: DiskIndexValue + From<T> + Into<
     /// stats related to starting up
     pub(crate) startup_stats: Arc<StartupStats>,
 
-    /// Whether to write through to disk on upsert (true when threshold-based bin management is active)
+    /// If true, eagerly flush a dirty entry to disk once `slot_list.len() == 1` and
+    /// `ref_count == 1`, so it goes clean and can be evicted.
     should_write_through: bool,
 }
 
@@ -147,8 +148,7 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
             ),
             num_ages_to_distribute_flushes,
             startup_stats: Arc::clone(&storage.startup_stats),
-            // should_write_through: write through on every upsert so inline eviction can fire immediately
-            should_write_through: storage.threshold_entries_per_bin.is_some(),
+            should_write_through: storage.should_write_through(),
         }
     }
 
@@ -481,19 +481,20 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
         });
     }
 
-    /// If the in-mem entry for `pubkey` is single-slot with `ref_count == 1` and currently dirty,
+    /// If the in-mem entry for pubkey is 'slot_list.len == 1' with `ref_count == 1` and currently dirty,
     /// write it through to disk
     pub fn try_write_through(&self, pubkey: &Pubkey) {
-        if !self.should_write_through {
-            return;
-        }
         let to_write = self.get_only_in_mem(pubkey, false, |entry| {
             entry.and_then(|entry| {
                 if !entry.dirty() {
                     return None;
                 }
+
                 let slot_list = entry.slot_list_read_lock();
-                (slot_list.len() == 1 && entry.ref_count() == 1).then(|| slot_list[0])
+                match (entry.ref_count(), &slot_list[..]) {
+                    (1, [info]) => Some(*info),
+                    _ => None,
+                }
             })
         });
         if let Some((slot, info)) = to_write {
@@ -3024,7 +3025,7 @@ mod tests {
         );
     }
 
-    /// `slot_list_mut` write-through fires only for single-slot, ref_count=1 entries.
+    /// `slot_list_mut` write-through fires only for slot list len == 1, ref_count=1 entries.
     #[test_case(SlotList::from([(1, 0)]), 1, true  ; "writes_through")]
     #[test_case(SlotList::from(vec![(1, 10), (2, 20)]),  1, false ; "multi_slot")]
     #[test_case(SlotList::from([(1, 0)]), 2, false ; "multi_ref")]
@@ -3057,9 +3058,9 @@ mod tests {
         );
     }
 
-    /// `upsert` with `should_write_through=true` writes through to disk and clears the dirty flag.
+    /// `upsert` then `try_write_through` clears the dirty flag.
     #[test]
-    fn test_upsert_write_through_clears_dirty() {
+    fn test_try_write_through_clears_dirty() {
         let index = new_should_write_through_for_test(None);
         let pubkey = solana_pubkey::new_rand();
         let slot = 1;
@@ -3089,12 +3090,12 @@ mod tests {
         assert_eq!(ref_count, 1);
     }
 
-    /// `try_write_through` must leave a multi-version entry alone: if the pubkey still has more
+    /// `try_write_through` must leave a multi-ref entry alone: if the pubkey still has more
     /// than one slot-list entry (ref_count > 1), persisting just one of them to disk would let a
     /// later eviction drop the fresher in-mem entry in favor of an incomplete disk entry. The
     /// entry must stay dirty and nothing must be written to disk.
     #[test]
-    fn test_try_write_through_skips_multi_version_entry() {
+    fn test_try_write_through_skips_multi_ref_entry() {
         let index = new_should_write_through_for_test(None);
         let pubkey = solana_pubkey::new_rand();
         let info = 10;
