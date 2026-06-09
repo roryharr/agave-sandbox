@@ -4690,7 +4690,7 @@ impl AccountsDb {
     ) -> (usize, usize, FlushStats) {
         // Always flush up to `requested_flush_root`, which is necessary for things like snapshotting.
         let flushed_roots: BTreeSet<Slot> =
-            self.accounts_cache.begin_flush_roots(requested_flush_root);
+            self.accounts_cache.roots_to_flush(requested_flush_root);
         let max_flush_root = flushed_roots.last().copied();
         let num_new_roots = flushed_roots.len();
 
@@ -4714,12 +4714,11 @@ impl AccountsDb {
                 num_roots_flushed += 1;
                 flush_stats.accumulate(&stats);
             }
+            // `flush_slot_cache` removed the slot's cache, which also drops it from the
+            // tracked unflushed roots.
         }
 
         max_flush_root.inspect(|&root| self.accounts_cache.set_max_flush_root(root));
-
-        // Now that all the rooted slots are flushed, we can clear the roots from the cache
-        self.accounts_cache.end_flush_roots();
 
         (num_new_roots, num_roots_flushed, flush_stats)
     }

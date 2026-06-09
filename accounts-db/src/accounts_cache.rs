@@ -236,10 +236,9 @@ pub struct AccountsCache {
     index: AccountsCacheIndex,
     // Queue of potentially unflushed roots. Random eviction + cache too large
     // could have triggered a flush of this slot already
-    maybe_unflushed_roots: RwLock<BTreeSet<Slot>>,
-    // Roots that have been claimed for flushing by `begin_flush_roots` but not yet
-    // cleared by `end_flush_roots`
-    roots_being_flushed: RwLock<BTreeSet<Slot>>,
+    // Rooted slots whose accounts are still in the write cache (not yet flushed to storage).
+    // A slot enters via `add_root` and is dropped by `remove_slot` once its cache is flushed.
+    unflushed_roots: RwLock<BTreeSet<Slot>>,
     max_flushed_root: MaxFlushedRoot,
     /// The size of account data stored in the whole AccountsCache, in bytes
     total_size: Arc<AtomicU64>,
@@ -267,11 +266,7 @@ impl AccountsCache {
     pub fn report_size(&self) {
         datapoint_info!(
             "accounts_cache_size",
-            (
-                "num_roots",
-                self.maybe_unflushed_roots.read().unwrap().len(),
-                i64
-            ),
+            ("num_roots", self.unflushed_roots.read().unwrap().len(), i64),
             ("num_slots", self.cache.len(), i64),
             ("total_size", self.size(), i64),
             (
@@ -324,6 +319,8 @@ impl AccountsCache {
         if let Some(slot_cache) = &result {
             self.index.remove(slot_cache.iter().map(|item| *item.key()));
         }
+        // If this slot was a root, it has now left the cache, so stop tracking it as unflushed.
+        self.unflushed_roots.write().unwrap().remove(&slot);
         result
     }
 
@@ -367,21 +364,13 @@ impl AccountsCache {
             .unwrap_or(index_max_slot)
             .min(index_max_slot);
 
-        let r_maybe_unflushed_roots = self.maybe_unflushed_roots.read().unwrap();
-        for &slot in r_maybe_unflushed_roots.range(..=max_root_slot).rev() {
+        let r_unflushed_roots = self.unflushed_roots.read().unwrap();
+        for &slot in r_unflushed_roots.range(..=max_root_slot).rev() {
             if let Some(account) = self.load(slot, pubkey) {
                 return Some((account, slot));
             }
         }
-        drop(r_maybe_unflushed_roots);
-
-        let r_roots_being_flushed = self.roots_being_flushed.read().unwrap();
-        for &slot in r_roots_being_flushed.range(..=max_root_slot).rev() {
-            if let Some(account) = self.load(slot, pubkey) {
-                return Some((account, slot));
-            }
-        }
-        drop(r_roots_being_flushed);
+        drop(r_unflushed_roots);
 
         // Found nothing, the version of the account in the cache must be on a different fork
         None
@@ -392,42 +381,24 @@ impl AccountsCache {
     }
 
     pub fn add_root(&self, root: Slot) {
-        self.maybe_unflushed_roots.write().unwrap().insert(root);
+        self.unflushed_roots.write().unwrap().insert(root);
     }
 
     pub fn num_unflushed_roots(&self) -> usize {
-        self.maybe_unflushed_roots.read().unwrap().len()
+        self.unflushed_roots.read().unwrap().len()
     }
 
-    /// Atomically moves roots up to and including `max_root` (or all roots if `None`) out of
-    /// `maybe_unflushed_roots` and into `roots_being_flushed`, then returns them
+    /// Returns the unflushed roots up to and including `max_root` (or all of them if `None`),
+    /// i.e. the rooted slots whose caches should be flushed to storage.
     ///
-    /// Panics if there are already roots being flushed (i.e. `end_flush_roots` was not called after
-    /// a previous `begin_flush_roots`)
-    pub fn begin_flush_roots(&self, max_root: Option<Slot>) -> BTreeSet<Slot> {
-        let mut w_maybe_unflushed_roots = self.maybe_unflushed_roots.write().unwrap();
-        let mut w_roots_being_flushed = self.roots_being_flushed.write().unwrap();
-
-        assert!(
-            w_roots_being_flushed.is_empty(),
-            "begin_flush_roots called while roots are already being flushed; end_flush_roots must \
-             be called first"
-        );
-
-        let roots_to_flush = if let Some(max_root) = max_root {
-            let remaining = w_maybe_unflushed_roots.split_off(&(max_root + 1));
-            std::mem::replace(&mut *w_maybe_unflushed_roots, remaining)
-        } else {
-            std::mem::take(&mut *w_maybe_unflushed_roots)
-        };
-
-        *w_roots_being_flushed = roots_to_flush.clone();
-        roots_to_flush
-    }
-
-    /// Signals that flushing is complete. Clears the roots that were staged by `begin_flush_roots`
-    pub fn end_flush_roots(&self) {
-        self.roots_being_flushed.write().unwrap().clear();
+    /// This is a read-only snapshot: the returned roots stay tracked as unflushed until
+    /// `remove_slot` drops each one as its cache is flushed.
+    pub fn roots_to_flush(&self, max_root: Option<Slot>) -> BTreeSet<Slot> {
+        let unflushed_roots = self.unflushed_roots.read().unwrap();
+        match max_root {
+            Some(max_root) => unflushed_roots.range(..=max_root).copied().collect(),
+            None => unflushed_roots.iter().copied().collect(),
+        }
     }
 
     pub fn cached_frozen_slots(&self) -> Vec<Slot> {
@@ -667,31 +638,26 @@ mod tests {
     }
 
     /// Tests that `load_latest` returns the correct slot and account value
-    /// given various combinations of ancestor slots, root slots, and flushing state.
+    /// given various combinations of ancestor slots and root slots.
     ///
-    /// Ancestors always take priority over roots regardless of slot
-    // None case
+    /// Ancestors always take priority over roots regardless of slot.
     // `uncached_ancestors` are slots added to the Ancestors set but with no account
     // data stored in the cache. This lets us test root bounding by min_slot
     // without the ancestor path short-circuiting the lookup.
-    #[test_case(&[], &[], &[], &[], None; "not ancestor not root")]
-    #[test_case(&[10], &[], &[], &[], Some(10); "ancestor only")]
-    #[test_case(&[5, 10, 15], &[], &[], &[], Some(15); "highest ancestor returned")]
-    #[test_case(&[], &[10, 20], &[], &[], Some(20); "rooted, with no ancestors")]
-    #[test_case(&[], &[], &[10], &[], Some(10); "root being flushed")]
-    #[test_case(&[10], &[], &[10], &[], Some(10); "ancestor being flushed")]
-    #[test_case(&[5], &[20], &[], &[], Some(5); "ancestor wins over higher root")]
-    #[test_case(&[], &[20], &[10], &[], Some(20);"unflushed root over flushing root")]
-    #[test_case(&[5], &[20], &[10], &[], Some(5);"ancestor over unflushed and flushing roots")]
+    #[test_case(&[], &[], &[], None; "not ancestor not root")]
+    #[test_case(&[10], &[], &[], Some(10); "ancestor only")]
+    #[test_case(&[5, 10, 15], &[], &[], Some(15); "highest ancestor returned")]
+    #[test_case(&[], &[10, 20], &[], Some(20); "highest root returned, no ancestors")]
+    #[test_case(&[10], &[10], &[], Some(10); "ancestor that is also a root")]
+    #[test_case(&[5], &[20], &[], Some(5); "ancestor wins over higher root")]
+    #[test_case(&[5], &[10, 20], &[], Some(5); "ancestor wins over multiple higher roots")]
     // Root beyond ancestors.min_slot() is excluded; older root still found
-    #[test_case(&[], &[5, 11], &[], &[10], Some(5); "unflushed root beyond min ancestor excluded")]
-    #[test_case(&[], &[], &[5, 11], &[10], Some(5); "flushing root beyond min ancestor excluded")]
+    #[test_case(&[], &[5, 11], &[10], Some(5); "root beyond min ancestor excluded")]
     // Root within min_slot bound is still returned
-    #[test_case(&[], &[10], &[], &[15], Some(10); "unflushed root below min ancestor returned")]
+    #[test_case(&[], &[10], &[15], Some(10); "root below min ancestor returned")]
     fn test_load_latest_slot_priority(
         ancestor_slots: &[Slot],
-        unflushed_root_slots: &[Slot],
-        flushing_root_slots: &[Slot],
+        root_slots: &[Slot],
         uncached_ancestors: &[Slot],
         expected: Option<Slot>,
     ) {
@@ -705,7 +671,7 @@ mod tests {
                 AccountSharedData::new(slot, 0, &Pubkey::default()),
             );
         }
-        for &slot in unflushed_root_slots.iter().chain(flushing_root_slots) {
+        for &slot in root_slots {
             cache.store(
                 slot,
                 &pk,
@@ -713,10 +679,6 @@ mod tests {
             );
             cache.add_root(slot);
         }
-        if let Some(&max) = flushing_root_slots.iter().max() {
-            cache.begin_flush_roots(Some(max));
-        }
-
         let mut all_ancestors: Vec<Slot> = ancestor_slots.to_vec();
         all_ancestors.extend_from_slice(uncached_ancestors);
         let ancestors = Ancestors::from(all_ancestors);
@@ -747,96 +709,70 @@ mod tests {
 
         cache.store(10, &pk, AccountSharedData::new(100, 0, &Pubkey::default()));
         cache.add_root(10);
-        cache.begin_flush_roots(None);
-        cache.end_flush_roots();
+        // Flushing removes the slot's cache; `remove_slot` also drops it from the unflushed roots.
+        cache.remove_slot(10);
 
-        // After clearing flushed roots, slot is no longer visible
+        // The slot is no longer in the cache or tracked as a root, so it is not visible.
         let empty = Ancestors::default();
         assert!(cache.load_latest(&pk, &empty).is_none());
+        assert!(cache.unflushed_roots.read().unwrap().is_empty());
     }
 
     #[test]
-    fn test_begin_flush_roots_with_max_root() {
+    fn test_roots_to_flush_with_max_root() {
         let cache = AccountsCache::default();
         cache.add_root(1);
         cache.add_root(3);
         cache.add_root(5);
         cache.add_root(7);
 
-        // begin_flush_roots(Some(5)) should return {1, 3, 5} and leave {7}
-        let taken = cache.begin_flush_roots(Some(5));
-        assert_eq!(taken, BTreeSet::from([1, 3, 5]));
+        // roots_to_flush(Some(5)) returns {1, 3, 5}, excluding 7.
+        let to_flush = cache.roots_to_flush(Some(5));
+        assert_eq!(to_flush, BTreeSet::from([1, 3, 5]));
 
-        // Remaining unflushed roots should only contain 7
-        assert_eq!(cache.maybe_unflushed_roots.read().unwrap().len(), 1);
-        assert!(cache.maybe_unflushed_roots.read().unwrap().contains(&7));
-
-        // Taken roots should now be in roots_being_flushed
-        assert!(cache.roots_being_flushed.read().unwrap().contains(&1));
-        assert!(cache.roots_being_flushed.read().unwrap().contains(&3));
-        assert!(cache.roots_being_flushed.read().unwrap().contains(&5));
-        assert!(!cache.roots_being_flushed.read().unwrap().contains(&7));
-
-        cache.end_flush_roots();
+        // It is a read-only snapshot: the tracked roots are unchanged.
+        assert_eq!(
+            *cache.unflushed_roots.read().unwrap(),
+            BTreeSet::from([1, 3, 5, 7])
+        );
     }
 
     #[test]
-    fn test_begin_flush_roots_none_takes_all() {
+    fn test_roots_to_flush_none_takes_all() {
         let cache = AccountsCache::default();
         cache.add_root(2);
         cache.add_root(4);
         cache.add_root(6);
 
-        let taken = cache.begin_flush_roots(None);
-        assert_eq!(taken, BTreeSet::from([2, 4, 6]));
+        let to_flush = cache.roots_to_flush(None);
+        assert_eq!(to_flush, BTreeSet::from([2, 4, 6]));
 
-        // All unflushed roots should be drained
-        assert!(cache.maybe_unflushed_roots.read().unwrap().is_empty());
-
-        // All should be in roots_being_flushed
+        // Still a read-only snapshot.
         assert_eq!(
-            *cache.roots_being_flushed.read().unwrap(),
+            *cache.unflushed_roots.read().unwrap(),
             BTreeSet::from([2, 4, 6])
         );
-
-        cache.end_flush_roots();
     }
 
     #[test]
-    #[should_panic(expected = "begin_flush_roots called while roots are already being flushed")]
-    fn test_begin_flush_roots_panics_if_already_flushing() {
+    fn test_remove_slot_drops_unflushed_root() {
         let cache = AccountsCache::default();
+        let pk = Pubkey::new_unique();
+        cache.store(1, &pk, AccountSharedData::new(1, 0, &Pubkey::default()));
         cache.add_root(1);
-        cache.begin_flush_roots(None);
-        // Calling again without end_flush_roots should panic
-        cache.add_root(2);
-        cache.begin_flush_roots(None);
-    }
-
-    #[test]
-    fn test_end_flush_roots_allows_next_flush() {
-        let cache = AccountsCache::default();
-        cache.add_root(1);
+        cache.store(2, &pk, AccountSharedData::new(2, 0, &Pubkey::default()));
         cache.add_root(2);
 
-        // First cycle
-        let taken = cache.begin_flush_roots(None);
-        assert_eq!(taken, BTreeSet::from([1, 2]));
+        assert_eq!(cache.roots_to_flush(None), BTreeSet::from([1, 2]));
 
-        cache.end_flush_roots();
-
-        // After clear, roots_being_flushed is empty
-        assert!(cache.roots_being_flushed.read().unwrap().is_empty());
-
-        // Second cycle works without panic
-        cache.add_root(3);
-        let taken = cache.begin_flush_roots(None);
-        assert_eq!(taken, BTreeSet::from([3]));
-        cache.end_flush_roots();
+        // Flushing slot 1 removes its cache and drops it from the tracked roots.
+        cache.remove_slot(1);
+        assert_eq!(*cache.unflushed_roots.read().unwrap(), BTreeSet::from([2]));
+        assert_eq!(cache.roots_to_flush(None), BTreeSet::from([2]));
     }
 
     #[test]
-    fn test_load_latest_multiple_ancestors_one_being_flushed() {
+    fn test_load_latest_highest_ancestor_also_root() {
         let cache = AccountsCache::default();
         let pk = Pubkey::new_unique();
 
@@ -844,9 +780,8 @@ mod tests {
         cache.store(5, &pk, AccountSharedData::new(5, 0, &Pubkey::default()));
         cache.store(10, &pk, AccountSharedData::new(10, 0, &Pubkey::default()));
 
-        // Slot 10 is also a root that gets claimed for flushing
+        // Slot 10 is also a root awaiting flush.
         cache.add_root(10);
-        cache.begin_flush_roots(None);
 
         let ancestors = Ancestors::from(vec![5, 10]);
         let (account, slot) = cache.load_latest(&pk, &ancestors).unwrap();
@@ -854,7 +789,5 @@ mod tests {
         // Slot 10 is the highest ancestor and still in the cache, so it is returned.
         assert_eq!(slot, 10);
         assert_eq!(account.account.lamports(), 10);
-
-        cache.end_flush_roots();
     }
 }

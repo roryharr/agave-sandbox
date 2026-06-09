@@ -6804,23 +6804,19 @@ fn test_is_ancestor_zero_lamport_being_flushed_uses_cache() {
     let db = AccountsDb::new_single_for_tests();
     let pubkey = Pubkey::new_unique();
 
-    // Older, non-zero version flushed to storage. Set up first: flushing goes through the
-    // cache, so doing it after the cache setup would conflict with `begin_flush_roots`.
+    // Older, non-zero version flushed to storage.
     let account = AccountSharedData::new(100, 0, &Pubkey::default());
     db.store_for_tests((5, [(&pubkey, &account)].as_slice()));
     db.add_root_and_flush_write_cache(5);
     assert!(!db.accounts_cache.contains_pubkey(&pubkey));
 
-    // Newer, zero-lamport version still in the cache and being flushed.
+    // Newer, zero-lamport version still in the cache on a root awaiting flush.
     let account = AccountSharedData::new(0, 0, &Pubkey::default());
     db.accounts_cache.store(10, &pubkey, account);
     db.accounts_cache.add_root(10);
-    db.accounts_cache.begin_flush_roots(Some(10));
 
     let ancestors = Ancestors::from(vec![5, 10]);
     assert_eq!(db.is_ancestor_zero_lamport(&pubkey, &ancestors), Some(true));
-
-    db.accounts_cache.end_flush_roots();
 }
 
 /// loading an account through an older bank must not return
