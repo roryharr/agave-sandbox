@@ -4694,11 +4694,11 @@ impl AccountsDb {
         let max_flush_root = flushed_roots.last().copied();
         let num_new_roots = flushed_roots.len();
 
-        // Decide up front which cached accounts are the newest version and should be
-        // written to storage. A slot absent from the map flushes all of its accounts.
-        let flush_keys_by_slot = self.compute_flush_plans(&flushed_roots, max_clean_root, clean);
+        // Decide up front, for each account de-duplicated across the cleaned roots, which
+        // root holds its newest version and should therefore write it to storage.
+        let winner_slots = self.compute_winner_slots(&flushed_roots, max_clean_root, clean);
 
-        // `compute_flush_plans` has already chosen the newest version of each account,
+        // `compute_winner_slots` has already chosen the newest version of each account,
         // so the order in which roots are flushed no longer affects which version wins.
         // Iterate oldest-to-newest: each account is written in exactly one root and
         // purged from the others, and the surviving newer version stays reachable (in
@@ -4706,7 +4706,11 @@ impl AccountsDb {
         let mut num_roots_flushed = 0;
         let mut flush_stats = FlushStats::default();
         for root in flushed_roots {
-            if let Some(stats) = self.flush_slot_cache(root, flush_keys_by_slot.get(&root)) {
+            // Cleaned roots flush only their winning accounts (`Some`); the rest flush
+            // everything (`None`): an in-flight scan may still need those versions.
+            let winner_slots =
+                Self::slot_is_cleaned(clean, max_clean_root, root).then_some(&winner_slots);
+            if let Some(stats) = self.flush_slot_cache(root, winner_slots) {
                 num_roots_flushed += 1;
                 flush_stats.accumulate(&stats);
             }
@@ -4720,56 +4724,54 @@ impl AccountsDb {
         (num_new_roots, num_roots_flushed, flush_stats)
     }
 
-    /// Selects, for each root being flushed, which cached accounts are the newest
-    /// version and therefore should be written to storage.
+    /// Whether a root being flushed participates in de-duplication (cleaning). Only roots
+    /// at or below `max_clean_root` are cleaned; a root above it (or every root when `clean`
+    /// is false) flushes all of its accounts, since an in-flight scan may still need those
+    /// versions.
+    fn slot_is_cleaned(clean: bool, max_clean_root: Option<Slot>, slot: Slot) -> bool {
+        clean && !max_clean_root.is_some_and(|max_clean_root| slot > max_clean_root)
+    }
+
+    /// Maps each account de-duplicated across the cleaned roots to the root holding its
+    /// newest version, which is the only root that should write it to storage. Older
+    /// versions in earlier roots are absent (their slot won't match) and get purged.
     ///
-    /// Roots are visited newest-first so the newest version of each account wins;
-    /// older versions in earlier roots are left out of that root's set and will be
-    /// purged from the index instead of being written.
-    ///
-    /// Only roots at or below `max_clean_root` participate in this de-duplication.
-    /// A root above `max_clean_root` (or every root when `clean` is false) is
-    /// omitted from the returned map entirely, which signals to flush all of its
-    /// accounts: an in-flight scan may still need those versions, so they must not
-    /// be cleaned.
-    fn compute_flush_plans(
+    /// Roots are visited newest-first so the first (newest) version of each account wins.
+    /// This single map also serves as the de-duplication set: a pubkey already present was
+    /// seen in a newer root and is therefore an older version to purge.
+    fn compute_winner_slots(
         &self,
         flushed_roots: &BTreeSet<Slot>,
         max_clean_root: Option<Slot>,
         clean: bool,
-    ) -> HashMap<Slot, HashSet<Pubkey>> {
-        let mut flush_keys_by_slot = HashMap::new();
-        if !clean {
-            return flush_keys_by_slot;
-        }
-
-        let mut written_accounts = HashSet::new();
+    ) -> HashMap<Pubkey, Slot> {
+        let mut winner_slots = HashMap::new();
+        let mut reserved = false;
         for &root in flushed_roots.iter().rev() {
-            if max_clean_root.is_some_and(|max_clean_root| root > max_clean_root) {
-                // Above the clean boundary: flush everything, don't de-duplicate.
+            if !Self::slot_is_cleaned(clean, max_clean_root, root) {
                 continue;
             }
             let Some(slot_cache) = self.accounts_cache.slot_cache(root) else {
                 continue;
             };
-            let mut flush_keys = HashSet::new();
-            for entry in slot_cache.iter() {
-                let pubkey = *entry.key();
-                // If not seen in a newer root, this is the newest version, so flush it.
-                if written_accounts.insert(pubkey) {
-                    flush_keys.insert(pubkey);
-                }
+            if !reserved {
+                // Size from the newest cleaned root's account count, doubled to leave room
+                // for additional unique accounts contributed by older roots.
+                winner_slots.reserve(slot_cache.len() * 2);
+                reserved = true;
             }
-            flush_keys_by_slot.insert(root, flush_keys);
+            for entry in slot_cache.iter() {
+                winner_slots.entry(*entry.key()).or_insert(root);
+            }
         }
-        flush_keys_by_slot
+        winner_slots
     }
 
     fn do_flush_slot_cache(
         &self,
         slot: Slot,
         slot_cache: &SlotCache,
-        flush_keys: Option<&HashSet<Pubkey>>,
+        winner_slots: Option<&HashMap<Pubkey, Slot>>,
     ) -> FlushStats {
         debug_assert!(self.accounts_index.is_alive_root(slot));
         let mut flush_stats = FlushStats::default();
@@ -4781,9 +4783,10 @@ impl AccountsDb {
             .filter_map(|iter_item| {
                 let key = iter_item.key();
                 let account = &iter_item.value().account;
-                // `None` flushes everything; `Some(set)` flushes only the newest
-                // versions selected by `compute_flush_plans`.
-                let should_flush = flush_keys.is_none_or(|flush_keys| flush_keys.contains(key));
+                // `None` flushes everything; `Some(map)` flushes a pubkey only at the root
+                // holding its newest version (per `compute_winner_slots`), purging the rest.
+                let should_flush =
+                    winner_slots.is_none_or(|winner_slots| winner_slots.get(key) == Some(&slot));
                 if should_flush {
                     flush_stats.num_bytes_flushed +=
                         AppendVec::calculate_stored_size(account.data().len()) as u64;
@@ -4807,12 +4810,11 @@ impl AccountsDb {
         self.purge_slot_cache_pubkeys(slot, purged_pubkeys, is_dead_slot);
 
         // Use ReclaimOldSlots to reclaim old slots if marking obsolete accounts and cleaning.
-        // Cleaning is enabled iff this slot has a flush set (`flush_keys` is Some), which
-        // `compute_flush_plans` only produces for cleaned roots at or below `max_clean_root`.
-        // It is None when:
+        // Cleaning is enabled iff this slot is de-duplicated (`winner_slots` is Some), which
+        // only holds for cleaned roots at or below `max_clean_root`. It is None when:
         // 1) There's an ongoing scan to avoid reclaiming accounts being scanned.
         // 2) The slot is > max_clean_root to prevent unrooted slots from reclaiming rooted versions.
-        let reclaim_method = if flush_keys.is_some() {
+        let reclaim_method = if winner_slots.is_some() {
             UpsertReclaim::ReclaimOldSlots
         } else {
             UpsertReclaim::IgnoreReclaims
@@ -4871,18 +4873,18 @@ impl AccountsDb {
         flush_stats
     }
 
-    /// `flush_keys` optionally restricts which accounts are written to storage:
-    /// `Some(set)` flushes only the pubkeys in the set (purging the rest from the
-    /// index), while `None` flushes every account in the slot.
+    /// `winner_slots` optionally restricts which accounts are written to storage:
+    /// `Some(map)` flushes a pubkey only at the root holding its newest version (purging it
+    /// from every other root's index), while `None` flushes every account in the slot.
     fn flush_slot_cache(
         &self,
         slot: Slot,
-        flush_keys: Option<&HashSet<Pubkey>>,
+        winner_slots: Option<&HashMap<Pubkey, Slot>>,
     ) -> Option<FlushStats> {
         // If a slot cache exists for this slot, flush it.
         self.accounts_cache
             .slot_cache(slot)
-            .map(|slot_cache| self.do_flush_slot_cache(slot, &slot_cache, flush_keys))
+            .map(|slot_cache| self.do_flush_slot_cache(slot, &slot_cache, winner_slots))
     }
 
     fn report_store_stats(&self) {
