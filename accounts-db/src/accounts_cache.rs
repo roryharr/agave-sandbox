@@ -730,7 +730,7 @@ mod tests {
         cache.add_root(10);
         // A flush finishes a slot with `remove_slot`, which drops both its cache and its
         // unflushed-root tracking; call it directly here to stand in for that flush.
-        cache.remove_slot(10);
+        let _ = cache.remove_slot(10);
 
         // With the slot gone from the cache and untracked as a root, it is not visible.
         let empty = Ancestors::default();
@@ -784,7 +784,7 @@ mod tests {
         cache.add_root(2);
 
         // remove_slot drops slot 1 from both the cache and the tracked roots, leaving slot 2.
-        cache.remove_slot(1);
+        let _ = cache.remove_slot(1);
         assert_eq!(*cache.unflushed_roots.read().unwrap(), BTreeSet::from([2]));
     }
 
