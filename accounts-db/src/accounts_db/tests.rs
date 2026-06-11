@@ -1084,13 +1084,13 @@ fn test_clean_dead_slot_with_obsolete_accounts() {
 
     // Ref count for pubkey is 1 as the older version was marked obsolete
     assert_eq!(accounts.accounts_index.ref_count_from_storage(&pubkey), 1);
-    // pubkey2 is Type-A under the new flush path — never indexed.
+    // pubkey2 is a tombstone under the new flush path — never indexed.
     assert_eq!(accounts.accounts_index.ref_count_from_storage(&pubkey2), 0);
 
     accounts.clean_accounts_for_tests();
 
     assert!(accounts.storage.get_slot_storage_entry(0).is_none());
-    // Slot 1's Type-A tombstone keeps the storage alive until the post-snapshot shrink sweep.
+    // Slot 1's tombstone keeps the storage alive until the post-snapshot shrink sweep.
     assert!(accounts.storage.get_slot_storage_entry(1).is_some());
 
     // Ref count for pubkey should be 1. It was NOT decremented during clean_accounts_for_tests
@@ -1131,15 +1131,15 @@ fn test_remove_zero_lamport_multi_ref_accounts_panic() {
 
 #[test]
 fn test_remove_zero_lamport_single_ref_accounts_after_shrink() {
-    // Zero-lamport accounts created via the flush path (Type-A) have no index entry; the
-    // helper must silently skip them. Entries that DO live in the index (Type-B, from the
+    // Zero-lamport accounts created via the flush path (tombstone) have no index entry; the
+    // helper must silently skip them. Entries that DO live in the index (single-ref, from the
     // unref-during-clean path) must be unref'd and purged.
     let accounts = AccountsDb::new_single_for_tests();
     let pubkey_in_index = Pubkey::from([1; 32]);
     let pubkey_not_in_index = Pubkey::from([2; 32]);
     let slot = 1;
 
-    // Type-B simulation: insert a zero-lamport single-ref index entry directly.
+    // single-ref simulation: insert a zero-lamport single-ref index entry directly.
     let mut reclaims = ReclaimsSlotList::new();
     let info = AccountInfo::new(
         StorageLocation::AppendVec(0, 0),
@@ -1233,10 +1233,10 @@ fn test_shrink_zero_lamport_single_ref_account() {
             "{latest_full_snapshot_slot:?}"
         );
         let expected_alive_count = if latest_full_snapshot_slot.unwrap_or(Slot::MAX) < slot {
-            // pre-snapshot: zero-lamport Type-A carried forward in new storage
+            // pre-snapshot: zero-lamport tombstone carried forward in new storage
             2
         } else {
-            // post-snapshot: zero-lamport Type-A dropped from rewrite
+            // post-snapshot: zero-lamport tombstone dropped from rewrite
             1
         };
         assert_eq!(
@@ -1605,7 +1605,7 @@ fn test_clean_zero_lamport_and_old_roots() {
     // updated in the rooted slot 1
     assert_eq!(accounts.alive_account_count_in_slot(0), 0);
 
-    // Slot 1's storage still holds the Type-A tombstone (the zero-lamport account is no
+    // Slot 1's storage still holds the tombstone (the zero-lamport account is no
     // longer indexed but persists in storage until the post-snapshot shrink sweep).
     assert!(accounts.storage.get_slot_storage_entry(1).is_some());
     assert!(!accounts.contains(&pubkey));
@@ -1654,11 +1654,11 @@ fn test_clean_old_with_both_normal_and_zero_lamport_accounts() {
     accounts.add_root_and_flush_write_cache(2);
 
     assert_eq!(accounts.alive_account_count_in_slot(0), 0);
-    // Slot 1 retains pubkey1 as a Type-A tombstone (not indexed but persisted in storage).
+    // Slot 1 retains pubkey1 as a tombstone (not indexed but persisted in storage).
     assert_eq!(accounts.alive_account_count_in_slot(1), 1);
     assert_eq!(accounts.alive_account_count_in_slot(2), 1);
 
-    // pubkey1 is not indexed under the new flush path (Type-A); only pubkey2 surfaces
+    // pubkey1 is not indexed under the new flush path (tombstone); only pubkey2 surfaces
     // via the secondary index.
     let mut found_accounts = HashSet::new();
     let index_key = IndexKey::SplTokenMint(mint_key);
@@ -1724,7 +1724,7 @@ fn test_clean_old_with_both_normal_and_zero_lamport_accounts() {
     //both zero lamport and normal accounts are cleaned up
     assert_eq!(accounts.alive_account_count_in_slot(0), 0);
     // Slot 1's only store was the zero-lamport pubkey1. Under the new flush path it's a
-    // Type-A tombstone — not purged by clean; will be removed by the post-snapshot shrink
+    // tombstone — not purged by clean; will be removed by the post-snapshot shrink
     // sweep.
     assert_eq!(accounts.alive_account_count_in_slot(1), 1);
     assert_eq!(accounts.alive_account_count_in_slot(2), 1);
@@ -1767,13 +1767,13 @@ fn test_clean_max_slot_zero_lamport_account() {
     accounts.add_root_and_flush_write_cache(1);
 
     assert_eq!(accounts.alive_account_count_in_slot(1), 1);
-    // pubkey is Type-A under the new flush path — no longer indexed.
+    // pubkey is a tombstone under the new flush path — no longer indexed.
     assert!(!accounts.contains(&pubkey));
 
     // Now the account can be cleaned up
     accounts.clean_accounts(Some(1), false);
     assert_eq!(accounts.alive_account_count_in_slot(0), 0);
-    // Slot 1 still holds the Type-A tombstone until the post-snapshot shrink sweep.
+    // Slot 1 still holds the tombstone until the post-snapshot shrink sweep.
     assert_eq!(accounts.alive_account_count_in_slot(1), 1);
 }
 
@@ -1848,13 +1848,13 @@ fn test_accounts_db_purge_keep_live() {
     accounts.print_accounts_stats("post_purge");
 
     // The earlier entry for pubkey in the account index was reclaimed; pubkey is now
-    // Type-A in slot 2 and not present in the index.
+    // a tombstone in slot 2 and not present in the index.
     assert!(!accounts.contains(&pubkey));
 
     // storage for slot 1 had 2 accounts, now has 1 after pubkey 1
     // was reclaimed
     accounts.check_storage(1, 1, 2);
-    // storage for slot 2 had 1 accounts, now has 1 (Type-A tombstone)
+    // storage for slot 2 had 1 accounts, now has 1 (tombstone)
     accounts.check_storage(2, 1, 1);
 }
 
@@ -1909,7 +1909,7 @@ fn test_accounts_db_purge1() {
 
     // slot 1's storage was reclaimed during the slot-2 flush
     assert_no_stores(&accounts, 1);
-    // slot 2 still holds the Type-A tombstone until the post-snapshot shrink sweep
+    // slot 2 still holds the tombstone until the post-snapshot shrink sweep
     assert!(accounts.storage.get_slot_storage_entry(2).is_some());
 }
 
@@ -3499,7 +3499,7 @@ fn test_flush_cache_dont_clean_zero_lamport_account() {
     db.flush_accounts_cache(true, None);
     db.clean_accounts_for_tests();
 
-    // The `zero_lamport_account_key` is Type-A under the new flush path (not indexed);
+    // The `zero_lamport_account_key` is a tombstone under the new flush path (not indexed);
     // the tombstone lives only in slot 2's storage.
     assert_eq!(
         db.accounts_index
@@ -3512,7 +3512,7 @@ fn test_flush_cache_dont_clean_zero_lamport_account() {
     );
 
     // The zero-lamport account in slot 2 should not be purged yet, because
-    // it is newer than the latest full snapshot, which blocks cleanup. The Type-A
+    // it is newer than the latest full snapshot, which blocks cleanup. The tombstone
     // tombstone lives in slot 2's storage until the post-snapshot shrink sweep.
     assert!(db.storage.get_slot_storage_entry(2).is_some());
 }
@@ -4336,7 +4336,7 @@ fn test_clean_drop_dead_zero_lamport_single_ref_accounts() {
     // run clean
     accounts_db.clean_accounts(Some(1), false);
 
-    // Slot 0 was reclaimed during slot 1's flush and dropped; slot 1 holds the Type-A
+    // Slot 0 was reclaimed during slot 1's flush and dropped; slot 1 holds the tombstone
     // tombstone until the post-snapshot shrink sweep.
     assert!(accounts_db.storage.get_slot_storage_entry(0).is_none());
     assert!(accounts_db.storage.get_slot_storage_entry(1).is_some());
@@ -4363,14 +4363,14 @@ fn test_clean_drop_dead_storage_handle_zero_lamport_single_ref_accounts() {
     db.flush_accounts_cache(true, None);
 
     // Clean should mark slot 0 dead and drop it. Slot 1 has a single-ref zero-lamport
-    // (Type-A) account; it stays alive because account_key2 keeps the storage non-empty.
+    // (tombstone) account; it stays alive because account_key2 keeps the storage non-empty.
     db.clean_accounts(Some(1), false);
 
     // Assert that after clean, slot 0 is dropped.
     assert!(db.storage.get_slot_storage_entry(0).is_none());
 
-    // account_key1 is Type-A in slot 1 — not indexed but tracked on the storage's ZLSR
-    // list. The slot becomes a shrink candidate.
+    // account_key1 is a tombstone in slot 1 — not indexed but tracked on the storage's
+    // tombstone list. The slot becomes a shrink candidate.
     assert_eq!(db.accounts_index.ref_count_from_storage(&account_key1), 0);
     assert_eq!(
         db.get_and_assert_single_storage(1)
@@ -5114,7 +5114,7 @@ define_accounts_db_test!(test_purge_alive_unrooted_slots_after_clean, |accounts|
     accounts.add_root_and_flush_write_cache(slot1);
 
     // The zero-lamport flush at slot 1 does not add an index entry under the new flush
-    // path (Type-A). The only remaining index entry for shared_key is the cached entry
+    // path (tombstone). The only remaining index entry for shared_key is the cached entry
     // from the unrooted slot 0, which doesn't contribute to ref_count.
     assert_eq!(
         accounts.accounts_index.ref_count_from_storage(&shared_key),
@@ -5186,7 +5186,7 @@ define_accounts_db_test!(
         accounts_db.store_for_tests((slot3, &[(&pubkey, &account)][..]));
         accounts_db.add_root_and_flush_write_cache(slot3);
 
-        // After the zero-lamport flush at slot 3, pubkey is Type-A — not indexed.
+        // After the zero-lamport flush at slot 3, pubkey is a tombstone — not indexed.
         assert_eq!(
             accounts_db.accounts_index.ref_count_from_storage(&pubkey),
             0
@@ -5865,7 +5865,7 @@ fn test_shrink_collect_simple() {
                                 &ShrinkStats::default(),
                             );
                             // Per-pubkey destination under the new flush path:
-                            //   - zero-lamport at slot5: Type-A (not indexed). Partitioned
+                            //   - zero-lamport at slot5: tombstone (not indexed). Partitioned
                             //     out of stored_accounts and dropped entirely by shrink (no
                             //     carry-forward; no index work).
                             //   - non-zero & alive: indexed, slot5 in slot list, lands in
@@ -5945,7 +5945,7 @@ fn test_shrink_collect_simple() {
 
                             assert_eq!(shrink_collect.capacity, expected_capacity);
                             assert_eq!(shrink_collect.total_starting_accounts, account_count);
-                            // All zero-lamport entries are partitioned out into zlsr_carry_forward
+                            // All zero-lamport entries are partitioned out into tombstones_to_carry_forward
                             // before load_accounts_index_for_shrink runs, so `all_are_zero_lamports`
                             // is true iff alive_accounts ended up empty.
                             assert_eq!(
@@ -6041,7 +6041,7 @@ fn test_shrink_collect_with_obsolete_accounts() {
     // Ensure that the keys to unref does not include the obsolete accounts and only
     // includes the unreferenced accounts. Zero-lamport pubkeys are not indexed under the
     // new flush path, so the `purge_exact` calls above were no-ops for them — they're
-    // partitioned out into the ZLSR-carry-forward bucket, not unrefed.
+    // partitioned out into the tombstone-carry-forward bucket, not unrefed.
     let zero_lamport_set: HashSet<_> = zero_lamport_pubkeys.iter().collect();
     assert_eq!(
         shrink_collect

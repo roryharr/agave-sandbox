@@ -260,14 +260,14 @@ pub(crate) struct ShrinkCollect<'a, T: ShrinkCollectRefs<'a>> {
     pub(crate) pubkeys_to_unref: Vec<&'a Pubkey>,
     pub(crate) zero_lamport_single_ref_pubkeys: Vec<&'a Pubkey>,
     pub(crate) alive_accounts: T,
-    /// Zero-lamport accounts whose offsets are on `store`'s ZLSR list AND whose index entry
-    /// at this slot has been removed (Type-A — set by the new flush path's `drain_and_remove`).
+    /// Zero-lamport accounts whose offsets are on `store`'s tombstone list AND whose index entry
+    /// at this slot has been removed (a tombstone — set by the new flush path's `drain_and_remove`).
     /// They are *not* in the index at this slot, so the synthesis path in shrink would
     /// mis-route them. They must still be carried forward to the new storage so the
     /// account's contribution to `lt_hash` (which is computed from storage iteration) stays
     /// consistent with mainline behavior, where the same zero-lamport entries are carried
     /// forward via the indexed `alive_accounts` path.
-    pub(crate) zlsr_removed_from_index: Vec<AccountFromStorage>,
+    pub(crate) tombstones_to_carry_forward: Vec<AccountFromStorage>,
     /// total size in storage of all alive accounts
     pub(crate) alive_total_bytes: usize,
     pub(crate) total_starting_accounts: usize,
@@ -1211,12 +1211,12 @@ impl AccountsDb {
     }
 
     /// Debug-only: assert that no entry in the given slot_list points at an offset on its
-    /// storage's `zero_lamport_unreffed_offsets` (Type-A) list. Type-A entries are removed
+    /// storage's `tombstone_offsets` (tombstone) list. tombstone entries are removed
     /// from the index by construction, so any code path that reads slot_list entries must
     /// never observe one. Skips cached entries (no storage offset). Fetching the storage
     /// is a DashMap read; the assert is gated behind `debug_assertions`.
     #[cfg(debug_assertions)]
-    fn debug_assert_slot_list_offsets_not_unreffed(
+    fn debug_assert_slot_list_offsets_not_tombstones(
         &self,
         slot_list: &[(Slot, AccountInfo)],
         caller: &str,
@@ -1226,7 +1226,7 @@ impl AccountsDb {
                 continue;
             }
             if let Some(store) = self.storage.get_slot_storage_entry(*slot) {
-                store.assert_offsets_not_on_unreffed_list(&[account_info.offset()], caller);
+                store.assert_offsets_not_tombstones(&[account_info.offset()], caller);
             }
         }
     }
@@ -1885,7 +1885,7 @@ impl AccountsDb {
                             let mut useless = true;
                             if let Some((slot_list, ref_count)) = slot_list_and_ref_count {
                                 #[cfg(debug_assertions)]
-                                self.debug_assert_slot_list_offsets_not_unreffed(
+                                self.debug_assert_slot_list_offsets_not_tombstones(
                                     slot_list,
                                     "clean scan",
                                 );
@@ -2019,7 +2019,7 @@ impl AccountsDb {
                     *ref_count = self.accounts_index.ref_count_from_storage(pubkey);
                 }
                 #[cfg(debug_assertions)]
-                self.debug_assert_slot_list_offsets_not_unreffed(
+                self.debug_assert_slot_list_offsets_not_tombstones(
                     slot_list.as_slice(),
                     "clean store_counts",
                 );
@@ -2654,20 +2654,20 @@ impl AccountsDb {
         let total_starting_accounts = stored_accounts.len();
         stored_accounts.retain(|account| !obsolete_offsets.contains(&account.index_info.offset()));
 
-        // Filter Type-A entries (offsets on the storage's `zero_lamport_unreffed_offsets`
+        // Filter tombstone entries (offsets on the storage's `tombstone_offsets`
         // list — written by the new flush path's `drain_and_remove`). They have no
         // slot_list entry at this slot, so the generic shrink synthesis would mis-route
         // them. Drop them from the rewrite when we can purge; otherwise carry the data
         // forward to the new storage so `lt_hash` / snapshot iteration stays consistent.
         let can_purge_zero_lamport_single_ref =
             self.can_purge_zero_lamport_single_ref_after_shrink(slot);
-        let mut zlsr_carry_forward: Vec<AccountFromStorage> = Vec::new();
-        let unreffed_offsets = store.snapshot_zero_lamport_unreffed_offsets();
-        if !unreffed_offsets.is_empty() {
+        let mut tombstones_to_carry_forward: Vec<AccountFromStorage> = Vec::new();
+        let tombstone_offsets = store.snapshot_tombstone_offsets();
+        if !tombstone_offsets.is_empty() {
             stored_accounts.retain(|account| {
-                if unreffed_offsets.contains(&account.index_info.offset()) {
+                if tombstone_offsets.contains(&account.index_info.offset()) {
                     if !can_purge_zero_lamport_single_ref {
-                        zlsr_carry_forward.push(*account);
+                        tombstones_to_carry_forward.push(*account);
                     }
                     false
                 } else {
@@ -2683,7 +2683,7 @@ impl AccountsDb {
             pubkeys_to_unref: Vec::with_capacity(len),
             zero_lamport_single_ref_pubkeys: Vec::new(),
             alive_accounts: T::with_capacity(len, slot),
-            zlsr_removed_from_index: zlsr_carry_forward,
+            tombstones_to_carry_forward: tombstones_to_carry_forward,
             total_starting_accounts,
             all_are_zero_lamports: true,
             alive_total_bytes: 0, // will be updated after `alive_accounts` is populated
@@ -2963,12 +2963,12 @@ impl AccountsDb {
         );
 
         // This shouldn't happen if alive_bytes is accurate.
-        let zlsr_carry_forward_bytes: usize = shrink_collect
-            .zlsr_removed_from_index
+        let tombstone_carry_forward_bytes: usize = shrink_collect
+            .tombstones_to_carry_forward
             .iter()
             .map(|a| a.stored_size())
             .sum();
-        let total_rewrite_bytes = shrink_collect.alive_total_bytes + zlsr_carry_forward_bytes;
+        let total_rewrite_bytes = shrink_collect.alive_total_bytes + tombstone_carry_forward_bytes;
 
         // However, it is possible that the remaining alive bytes could be 0. In that case, the whole slot should be marked dead by clean.
         if Self::should_not_shrink(total_rewrite_bytes as u64, shrink_collect.capacity)
@@ -3026,24 +3026,25 @@ impl AccountsDb {
             UpdateIndexThreadSelection::PoolWithThreshold,
         );
 
-        // Carry forward Type-A entries: write their data to the new storage and register
-        // the new offsets on the new storage's `zero_lamport_unreffed_offsets` list. No
+        // Carry forward tombstone entries: write their data to the new storage and register
+        // the new offsets on the new storage's `tombstone_offsets` list. No
         // index update -- by construction (they were removed from the index at flush via
         // drain_and_remove) the index has no slot_list entry pointing at these.
-        if !shrink_collect.zlsr_removed_from_index.is_empty() {
-            let zlsr_refs: Vec<&AccountFromStorage> =
-                shrink_collect.zlsr_removed_from_index.iter().collect();
-            let zlsr_accounts = [(slot, &zlsr_refs[..])];
-            let storable_zlsr = StorableAccountsBySlot::new(slot, &zlsr_accounts, self);
-            let zlsr_infos = self.write_accounts_to_storage(
+        if !shrink_collect.tombstones_to_carry_forward.is_empty() {
+            let tombstone_refs: Vec<&AccountFromStorage> =
+                shrink_collect.tombstones_to_carry_forward.iter().collect();
+            let tombstone_accounts = [(slot, &tombstone_refs[..])];
+            let storable_tombstones = StorableAccountsBySlot::new(slot, &tombstone_accounts, self);
+            let tombstone_infos = self.write_accounts_to_storage(
                 slot,
                 shrink_in_progress.new_storage(),
-                &storable_zlsr,
+                &storable_tombstones,
             );
-            let zlsr_offsets: Vec<Offset> = zlsr_infos.iter().map(|info| info.offset()).collect();
+            let tombstone_offsets: Vec<Offset> =
+                tombstone_infos.iter().map(|info| info.offset()).collect();
             shrink_in_progress
                 .new_storage()
-                .batch_insert_zero_lamport_unreffed_offsets(&zlsr_offsets);
+                .batch_insert_tombstone_offsets(&tombstone_offsets);
         }
 
         rewrite_elapsed.stop();
@@ -5275,7 +5276,7 @@ impl AccountsDb {
     ///
     /// Returns a vector of `SlotList<AccountInfo>` containing the reclaims for each batch
     /// processed (each element is guaranteed non-empty), the count of zero-lamport tombstones
-    /// recorded on the unreffed list, and the count marked obsolete.
+    /// recorded on the tombstone list, and the count marked obsolete.
     fn update_index_stored_accounts<'a>(
         &self,
         infos: Vec<AccountInfo>,
@@ -5301,7 +5302,7 @@ impl AccountsDb {
         let update = |start, end| {
             let mut reclaims = ReclaimsSlotList::with_capacity((end - start) / 2);
             // Zero-lamport tombstones that had prior index versions reclaimed and were dropped
-            // from the index (recorded on the storage's unreffed list) vs those that were never
+            // from the index (recorded on the storage's tombstone list) vs those that were never
             // indexed at all and had their bytes marked obsolete directly.
             let mut zero_lamport_removed: u64 = 0;
             let mut zero_lamport_marked_obsolete: u64 = 0;
@@ -5321,9 +5322,9 @@ impl AccountsDb {
                         ) {
                             DrainResult::Removed => {
                                 // The pubkey is gone from the index. Record this offset on the
-                                // storage's unreffed list so shrink recognizes the tombstone later
+                                // storage's tombstone list so shrink recognizes the tombstone later
                                 // without scanning the index.
-                                storage.insert_zero_lamport_unreffed_offset(info.offset());
+                                storage.insert_tombstone_offset(info.offset());
                                 zero_lamport_removed += 1;
                             }
                             DrainResult::NotFound => {
@@ -5558,7 +5559,7 @@ impl AccountsDb {
                 );
 
                 let offsets_vec: Vec<Offset> = offsets.iter().copied().collect();
-                store.assert_offsets_not_on_unreffed_list(&offsets_vec, assert_caller);
+                store.assert_offsets_not_tombstones(&offsets_vec, assert_caller);
 
                 let remaining_accounts = if offsets.len() == store.count() {
                     // all remaining alive accounts in the storage are being removed, so the entire storage/slot is dead
@@ -5959,7 +5960,7 @@ impl AccountsDb {
         let update_index_us = update_index_time.end_as_us();
 
         // Zero-lamport tombstones handled above left dead bytes in the storage (on its
-        // unreffed list or marked obsolete); the storage may now be shrinkable.
+        // tombstone list or marked obsolete); the storage may now be shrinkable.
         if (num_zero_lamport_single_ref_accounts_recorded > 0
             || num_zero_lamport_accounts_marked_obsolete > 0)
             && self.is_candidate_for_shrink(storage)

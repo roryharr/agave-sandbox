@@ -44,12 +44,12 @@ pub struct AccountStorageEntry {
     zero_lamport_single_ref_offsets: RwLock<IntSet<Offset>>,
 
     /// offsets to zero-lamport accounts that have been removed from the accounts index
-    /// entirely (Type-A — produced by the new flush path's `drain_and_remove`). They live
+    /// entirely (a tombstone — produced by the new flush path's `drain_and_remove`). They live
     /// in the storage as tombstones so they remain part of the storage's content (and
     /// therefore part of `lt_hash` contributions during snapshot rebuild / index generation),
     /// but the index has no slot_list entry pointing at them. Shrink uses this list to
-    /// recognize Type-A entries without needing to scan the index.
-    zero_lamport_unreffed_offsets: RwLock<IntSet<Offset>>,
+    /// recognize tombstone entries without needing to scan the index.
+    tombstone_offsets: RwLock<IntSet<Offset>>,
 
     /// Obsolete Accounts. These are accounts that are still present in the storage
     /// but should be ignored during rebuild. They have been removed
@@ -81,7 +81,7 @@ impl AccountStorageEntry {
             num_alive_accounts: AtomicUsize::new(0),
             num_alive_bytes: AtomicUsize::new(0),
             zero_lamport_single_ref_offsets: RwLock::default(),
-            zero_lamport_unreffed_offsets: RwLock::default(),
+            tombstone_offsets: RwLock::default(),
             obsolete_accounts: RwLock::default(),
         }
     }
@@ -97,9 +97,7 @@ impl AccountStorageEntry {
             zero_lamport_single_ref_offsets: RwLock::new(
                 self.zero_lamport_single_ref_offsets.read().unwrap().clone(),
             ),
-            zero_lamport_unreffed_offsets: RwLock::new(
-                self.zero_lamport_unreffed_offsets.read().unwrap().clone(),
-            ),
+            tombstone_offsets: RwLock::new(self.tombstone_offsets.read().unwrap().clone()),
             obsolete_accounts: RwLock::new(self.obsolete_accounts.read().unwrap().clone()),
         })
     }
@@ -117,7 +115,7 @@ impl AccountStorageEntry {
             num_alive_accounts: AtomicUsize::new(0),
             num_alive_bytes: AtomicUsize::new(0),
             zero_lamport_single_ref_offsets: RwLock::default(),
-            zero_lamport_unreffed_offsets: RwLock::default(),
+            tombstone_offsets: RwLock::default(),
             obsolete_accounts: RwLock::new(obsolete_accounts),
         }
     }
@@ -185,25 +183,24 @@ impl AccountStorageEntry {
         count
     }
 
-    /// Return the number of zero_lamport_single_ref accounts in the storage. Includes both
-    /// in-index Type-B entries (`zero_lamport_single_ref_offsets`) and Type-A entries removed
-    /// from the index (`zero_lamport_unreffed_offsets`) — both represent dead tombstone bytes
-    /// for shrink-productivity accounting.
+    /// Number of dead zero-lamport accounts in the storage, counting both in-index single-ref
+    /// entries (`zero_lamport_single_ref_offsets`) and tombstones removed from the index
+    /// (`tombstone_offsets`). Used for shrink-productivity accounting.
     pub(crate) fn num_zero_lamport_single_ref_accounts(&self) -> usize {
         self.zero_lamport_single_ref_offsets.read().unwrap().len()
-            + self.zero_lamport_unreffed_offsets.read().unwrap().len()
+            + self.tombstone_offsets.read().unwrap().len()
     }
 
-    /// Insert a zero-lamport unreffed offset (Type-A — account removed from index but
-    /// kept in storage as a tombstone).  Returns true if newly inserted.
-    pub(crate) fn insert_zero_lamport_unreffed_offset(&self, offset: usize) -> bool {
-        let mut offsets = self.zero_lamport_unreffed_offsets.write().unwrap();
+    /// Insert a tombstone offset — a zero-lamport account removed from the index but kept in
+    /// storage as a deletion marker. Returns true if newly inserted.
+    pub(crate) fn insert_tombstone_offset(&self, offset: usize) -> bool {
+        let mut offsets = self.tombstone_offsets.write().unwrap();
         offsets.insert(offset)
     }
 
-    /// Batch-insert zero-lamport unreffed offsets.  Returns the number newly inserted.
-    pub(crate) fn batch_insert_zero_lamport_unreffed_offsets(&self, offsets: &[Offset]) -> u64 {
-        let mut set = self.zero_lamport_unreffed_offsets.write().unwrap();
+    /// Batch-insert tombstone offsets.  Returns the number newly inserted.
+    pub(crate) fn batch_insert_tombstone_offsets(&self, offsets: &[Offset]) -> u64 {
+        let mut set = self.tombstone_offsets.write().unwrap();
         let mut count = 0;
         for offset in offsets {
             if set.insert(*offset) {
@@ -213,27 +210,27 @@ impl AccountStorageEntry {
         count
     }
 
-    /// Snapshot the current zero-lamport-unreffed offset set. Callers iterate without
+    /// Snapshot the current tombstone offset set. Callers iterate without
     /// holding the lock.
-    pub(crate) fn snapshot_zero_lamport_unreffed_offsets(&self) -> IntSet<Offset> {
-        self.zero_lamport_unreffed_offsets.read().unwrap().clone()
+    pub(crate) fn snapshot_tombstone_offsets(&self) -> IntSet<Offset> {
+        self.tombstone_offsets.read().unwrap().clone()
     }
 
-    /// Invariant check: Type-A entries (offsets on `zero_lamport_unreffed_offsets`) are
+    /// Invariant check: tombstone entries (offsets on `tombstone_offsets`) are
     /// NEVER present in the accounts index, so any code path that derives offsets *from*
     /// the index (clean reclaims, shrink reclaims, the older-entry side of flush reclaims)
     /// must not encounter them. Caller passes a short label so a failing assert points at
     /// the offending path.
-    pub(crate) fn assert_offsets_not_on_unreffed_list(&self, offsets: &[Offset], caller: &str) {
-        let unreffed = self.zero_lamport_unreffed_offsets.read().unwrap();
-        if unreffed.is_empty() {
+    pub(crate) fn assert_offsets_not_tombstones(&self, offsets: &[Offset], caller: &str) {
+        let tombstones = self.tombstone_offsets.read().unwrap();
+        if tombstones.is_empty() {
             return;
         }
         for offset in offsets {
             assert!(
-                !unreffed.contains(offset),
-                "{caller}: offset {offset} at slot {} is on the Type-A unreffed list — \
-                 Type-A invariant violated (offset reached an index-derived reclaim path)",
+                !tombstones.contains(offset),
+                "{caller}: offset {offset} at slot {} is on the tombstone list — \
+                 tombstone invariant violated (offset reached an index-derived reclaim path)",
                 self.slot,
             );
         }
