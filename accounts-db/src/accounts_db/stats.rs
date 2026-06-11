@@ -169,10 +169,9 @@ pub struct StoreAccountsForFlushStats {
     pub handle_reclaims_us: AtomicU64,
     pub num_accounts_stored: AtomicU64,
     pub num_zero_lamport_single_ref_accounts_recorded: AtomicU64,
-    /// Zero-lamport accounts that could NOT be removed from the index (a lower entry survived)
-    /// and instead kept a shadowing zero entry. High relative to `_recorded` means the
-    /// remove-from-index optimization is rarely being realized.
-    pub num_zero_lamport_shadow_fallbacks: AtomicU64,
+    /// Zero-lamport tombstones that were never in the index (a cache-only deletion) and had
+    /// their bytes marked obsolete directly rather than reclaiming a prior version.
+    pub num_zero_lamport_accounts_marked_obsolete: AtomicU64,
     pub num_reclaims: AtomicU64,
     pub num_obsolete_slots_removed: AtomicUsize,
     pub num_obsolete_bytes_removed: AtomicU64,
@@ -216,8 +215,8 @@ impl StoreAccountsForFlushStats {
                 i64
             ),
             (
-                "num_zero_lamport_shadow_fallbacks",
-                self.num_zero_lamport_shadow_fallbacks
+                "num_zero_lamport_accounts_marked_obsolete",
+                self.num_zero_lamport_accounts_marked_obsolete
                     .swap(0, Ordering::Relaxed),
                 i64
             ),

@@ -48,7 +48,8 @@ use {
         accounts_index::{
             AccountSecondaryIndexes, AccountsIndex, AccountsIndexRootsStats,
             AccountsIndexScanResult, IndexKey, IsCached, ReclaimsSlotList, RefCount, ScanFilter,
-            SlotList, Startup, UpsertReclaim, in_mem_accounts_index::StartupStats,
+            SlotList, Startup, UpsertReclaim,
+            in_mem_accounts_index::{DrainResult, StartupStats},
         },
         accounts_scan::{ScanConfig, ScanError, ScanGuard, ScanResult, ScanTracker},
         accounts_update_notifier_interface::{AccountForGeyser, AccountsUpdateNotifier},
@@ -1225,8 +1226,7 @@ impl AccountsDb {
                 continue;
             }
             if let Some(store) = self.storage.get_slot_storage_entry(*slot) {
-                store
-                    .assert_offsets_not_on_unreffed_list(&[account_info.offset()], caller);
+                store.assert_offsets_not_on_unreffed_list(&[account_info.offset()], caller);
             }
         }
     }
@@ -5267,16 +5267,15 @@ impl AccountsDb {
     /// Updates the accounts index with the given `infos` and `accounts`.
     /// Used when storing accounts to storage.
     ///
-    /// Under `UpsertReclaim::ReclaimOldSlots`, zero-lamport accounts are *not* inserted into
-    /// the index. Their offset is recorded on `storage`'s zero-lamport-single-ref list so
-    /// shrink/clean can reclaim the bytes after the next full snapshot. Any pre-existing index
-    /// entries for those pubkeys are still drained into reclaims so the older storages get
-    /// cleaned up.
+    /// Under `UpsertReclaim::ReclaimOldSlots`, zero-lamport (tombstone) accounts are *not*
+    /// inserted into the index. If older versions exist they are drained into reclaims and the
+    /// tombstone's offset is recorded on `storage`'s zero-lamport-single-ref list so shrink/clean
+    /// can reclaim the bytes after the next full snapshot. If the pubkey was never indexed at all,
+    /// the tombstone's bytes are marked obsolete directly so it can be dropped entirely.
     ///
     /// Returns a vector of `SlotList<AccountInfo>` containing the reclaims for each batch
-    /// processed (each element is guaranteed non-empty), the count of zero-lamport accounts that
-    /// were fully removed from the index (Type-A), and the count that fell back to keeping a
-    /// shadowing zero entry because a lower entry survived.
+    /// processed (each element is guaranteed non-empty), the count of zero-lamport tombstones
+    /// recorded on the unreffed list, and the count marked obsolete.
     fn update_index_stored_accounts<'a>(
         &self,
         infos: Vec<AccountInfo>,
@@ -5301,55 +5300,46 @@ impl AccountsDb {
 
         let update = |start, end| {
             let mut reclaims = ReclaimsSlotList::with_capacity((end - start) / 2);
-            // Count zero-lamport accounts that were fully removed from the index (Type-A) vs
-            // those that had to keep a shadowing zero entry because a lower entry survived
-            // (the fallback). The ratio shows how much of the remove-from-index optimization
-            // is actually being realized.
-            let mut zero_lamport_recorded: u64 = 0;
-            let mut zero_lamport_fallback: u64 = 0;
+            // Zero-lamport tombstones that had prior index versions reclaimed and were dropped
+            // from the index (recorded on the storage's unreffed list) vs those that were never
+            // indexed at all and had their bytes marked obsolete directly.
+            let mut zero_lamport_removed: u64 = 0;
+            let mut zero_lamport_marked_obsolete: u64 = 0;
 
             (start..end).for_each(|i| {
                 let info: AccountInfo = infos[i];
                 debug_assert!(!info.is_cached());
                 accounts.account(i, |account| {
                     if skip_index_for_zero_lamport && account.is_zero_lamport() {
-                        // Type-A: try to drop the pubkey from the index entirely. drain_and_remove
-                        // removes this slot's cached item and reclaims older uncached versions,
-                        // returning whether the pubkey ended up fully removed.
-                        let removed = self.accounts_index.drain_and_remove(
+                        // Cache writes no longer upsert the index, so this zero-lamport tombstone
+                        // is not added to the index either: reclaim any older versions and drop
+                        // the pubkey.
+                        match self.accounts_index.drain_and_remove(
                             account.pubkey(),
                             target_slot,
                             &mut reclaims,
-                        );
-                        if removed {
-                            // The account is fully gone from the index, so record the offset on
-                            // the storage's "unreffed" list for shrink to recognize the tombstone
-                            // later without scanning the index.
-                            storage.insert_zero_lamport_unreffed_offset(info.offset());
-                            zero_lamport_recorded += 1;
-                        } else {
-                            // An entry survived -- a cached entry at a lower, not-yet-flushed root.
-                            // We must NOT remove the account from the index here: with no
-                            // (target_slot, zero) entry to shadow it, a concurrent `do_load` in the
-                            // window before that lower slot is flushed would resolve to the lower
-                            // cached (stale, non-zero) value. Keep the zero-lamport entry in the
-                            // index, exactly as the mainline upsert path does; clean will purge it
-                            // later. (Do not record an unreffed offset -- the account is still
-                            // index-referenced.)
-                            self.accounts_index.upsert(
-                                target_slot,
-                                target_slot,
-                                account.pubkey(),
-                                info,
-                                &mut reclaims,
-                                reclaim,
-                            );
-                            self.accounts_index.update_secondary_indexes(
-                                account.pubkey(),
-                                &account,
-                                &self.account_indexes,
-                            );
-                            zero_lamport_fallback += 1;
+                        ) {
+                            DrainResult::Removed => {
+                                // The pubkey is gone from the index. Record this offset on the
+                                // storage's unreffed list so shrink recognizes the tombstone later
+                                // without scanning the index.
+                                storage.insert_zero_lamport_unreffed_offset(info.offset());
+                                zero_lamport_removed += 1;
+                            }
+                            DrainResult::NotFound => {
+                                // Never indexed -- a cache-only deletion with nothing to reclaim.
+                                // Mark the tombstone's bytes obsolete directly so clean/shrink drop
+                                // them without ever needing an index entry.
+                                storage
+                                    .obsolete_accounts
+                                    .write()
+                                    .unwrap()
+                                    .mark_accounts_obsolete(
+                                        std::iter::once((info.offset(), account.data().len())),
+                                        target_slot,
+                                    );
+                                zero_lamport_marked_obsolete += 1;
+                            }
                         }
                     } else {
                         let old_slot = accounts.slot(i);
@@ -5369,7 +5359,7 @@ impl AccountsDb {
                     }
                 });
             });
-            (reclaims, zero_lamport_recorded, zero_lamport_fallback)
+            (reclaims, zero_lamport_removed, zero_lamport_marked_obsolete)
         };
 
         let threshold = 1;
@@ -5957,7 +5947,7 @@ impl AccountsDb {
         let (
             reclaims,
             num_zero_lamport_single_ref_accounts_recorded,
-            num_zero_lamport_shadow_fallbacks,
+            num_zero_lamport_accounts_marked_obsolete,
         ) = self.update_index_stored_accounts(
             infos,
             &accounts,
@@ -5968,9 +5958,10 @@ impl AccountsDb {
         );
         let update_index_us = update_index_time.end_as_us();
 
-        // Zero-lamport accounts recorded above were appended to storage's
-        // zero-lamport-single-ref list; the storage may now be shrinkable.
-        if num_zero_lamport_single_ref_accounts_recorded > 0
+        // Zero-lamport tombstones handled above left dead bytes in the storage (on its
+        // unreffed list or marked obsolete); the storage may now be shrinkable.
+        if (num_zero_lamport_single_ref_accounts_recorded > 0
+            || num_zero_lamport_accounts_marked_obsolete > 0)
             && self.is_candidate_for_shrink(storage)
             && self.is_shrinking_productive(storage)
         {
@@ -6028,8 +6019,8 @@ impl AccountsDb {
                 Ordering::Relaxed,
             );
         stats
-            .num_zero_lamport_shadow_fallbacks
-            .fetch_add(num_zero_lamport_shadow_fallbacks, Ordering::Relaxed);
+            .num_zero_lamport_accounts_marked_obsolete
+            .fetch_add(num_zero_lamport_accounts_marked_obsolete, Ordering::Relaxed);
         stats.report();
 
         StoreAccountsTiming {

@@ -19,7 +19,7 @@ use {
     accounts_index_storage::AccountsIndexStorage,
     bucket_map_holder::Age,
     in_mem_accounts_index::{
-        ExistedLocation, InMemAccountsIndex, InsertNewEntryResults, StartupStats,
+        DrainResult, ExistedLocation, InMemAccountsIndex, InsertNewEntryResults, StartupStats,
     },
     iter::AccountsIndexPubkeyIterator,
     log::*,
@@ -973,21 +973,16 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> AccountsIndex<T, U> {
         map.replace(pubkey, (new_slot, account_info), old_slot);
     }
 
-    /// Removes slot list entries at or below `target_slot` for `pubkey`. Uncached entries
-    /// are pushed to `reclaims`; cached entries at `target_slot` are dropped; cached entries
-    /// at slots below `target_slot` are left alone. The pubkey is removed from the index if
-    /// no entries remain. No-op if the pubkey isn't in the index.
-    ///
-    /// Used by the flush path for zero-lamport accounts: the new value is *not* added to
-    /// the index, but pre-existing entries for the same pubkey still need cleanup. Returns
-    /// `true` iff the pubkey was fully removed from the index; the caller must only treat the
-    /// account as a removed Type-A tombstone in that case (see the in-mem impl for why).
+    /// Reclaims every storage version of `pubkey` older than `target_slot` into `reclaims` and
+    /// removes the pubkey from the index. Used by the flush path for zero-lamport accounts: the
+    /// new value is *not* added to the index, but pre-existing entries still need cleanup.
+    /// Returns [`DrainResult::NotFound`] if the pubkey was never indexed (see the in-mem impl).
     pub fn drain_and_remove(
         &self,
         pubkey: &Pubkey,
         target_slot: Slot,
         reclaims: &mut ReclaimsSlotList<T>,
-    ) -> bool {
+    ) -> DrainResult {
         let map = self.get_bin(pubkey);
         map.drain_and_remove(pubkey, target_slot, reclaims)
     }

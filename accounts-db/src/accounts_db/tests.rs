@@ -1174,7 +1174,8 @@ fn test_shrink_zero_lamport_single_ref_account() {
     // note that 'None' checks the case based on the default value of `latest_full_snapshot_slot` in `AccountsDb`
     for latest_full_snapshot_slot in [None, Some(0), Some(1), Some(2)] {
         // store a zero and non-zero lamport account
-        // make sure clean marks the ref_count=1, zero lamport account dead and removes pubkey from index completely
+        // make sure the zero lamport account is dropped from the index and recorded as a
+        // zero-lamport tombstone on the storage
         let accounts = AccountsDb::new_single_for_tests();
         let pubkey_zero = Pubkey::from([1; 32]);
         let pubkey2 = Pubkey::from([2; 32]);
@@ -1182,6 +1183,10 @@ fn test_shrink_zero_lamport_single_ref_account() {
         let zero_lamport_account =
             AccountSharedData::new(0, 0, AccountSharedData::default().owner());
         let slot = 1;
+        // Give pubkey_zero a prior non-zero rooted version so the zero-lamport store at `slot`
+        // takes the "removed from index" flush path and records a tombstone on the storage.
+        accounts.store_for_tests((0, [(&pubkey_zero, &account)].as_slice()));
+        accounts.add_root_and_flush_write_cache(0);
         // Store a zero-lamport account and a non-zero lamport account
         accounts.store_for_tests((
             slot,
@@ -1473,6 +1478,20 @@ fn test_alive_bytes_after_shrink_with_zero_lamport_single_ref_accounts() {
     ];
     let alive_account = AccountSharedData::new(11, 17, &Pubkey::default());
     let alive_pubkey = Pubkey::new_unique();
+
+    // Give the dead pubkeys a prior non-zero rooted version so the zero-lamport store at `slot`
+    // takes the "removed from index" flush path and records each as a tombstone on the storage.
+    let prior_account = AccountSharedData::new(7, 123, &Pubkey::default());
+    accounts_db.store_for_tests((
+        0,
+        [
+            (&dead_pubkeys[0], &prior_account),
+            (&dead_pubkeys[1], &prior_account),
+            (&dead_pubkeys[2], &prior_account),
+        ]
+        .as_slice(),
+    ));
+    accounts_db.add_root_and_flush_write_cache(0);
 
     accounts_db.store_for_tests((
         slot,
@@ -3741,15 +3760,23 @@ define_accounts_db_test!(test_alive_bytes, |accounts_db| {
 define_accounts_db_test!(
     test_alive_bytes_exclude_zero_lamport_single_ref_accounts,
     |accounts_db| {
-        let slot: Slot = 0;
+        let slot: Slot = 1;
         let num_keys = 10;
+        let keys: Vec<Pubkey> = (0..num_keys).map(|_| Pubkey::new_unique()).collect();
 
-        // populate storage with zero lamport accounts; the flush path records each offset
-        // on the storage's zero-lamport-single-ref list automatically.
-        for _i in 0..num_keys {
+        // Give each key a prior non-zero rooted version so the zero-lamport flush at `slot`
+        // takes the "removed from index" path and records each offset on the storage's
+        // zero-lamport-single-ref list.
+        let nonzero_account = AccountSharedData::new(1, 0, AccountSharedData::default().owner());
+        for key in &keys {
+            accounts_db.store_for_tests((0, &[(key, &nonzero_account)][..]));
+        }
+        accounts_db.add_root(0);
+        accounts_db.flush_accounts_cache(true, None);
+
+        for key in &keys {
             let zero_account = AccountSharedData::new(0, 0, AccountSharedData::default().owner());
-            let key = Pubkey::new_unique();
-            accounts_db.store_for_tests((slot, &[(&key, &zero_account)][..]));
+            accounts_db.store_for_tests((slot, &[(key, &zero_account)][..]));
         }
 
         accounts_db.add_root(slot);
@@ -5863,8 +5890,7 @@ fn test_shrink_collect_simple() {
                                     lamports == 0
                                 }
                             };
-                            let mut expected_alive_accounts: Vec<Pubkey> = pubkeys
-                                [..account_count]
+                            let mut expected_alive_accounts: Vec<Pubkey> = pubkeys[..account_count]
                                 .iter()
                                 .filter(|p| !is_zero_at_slot5(p) && alive_for_pubkey(p))
                                 .cloned()
