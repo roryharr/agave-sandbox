@@ -432,6 +432,11 @@ struct IndexGenerationAccumulator {
     /// The number of accounts in this slot that were skipped when generating the index as they
     /// were already marked obsolete in the account storage entry
     num_obsolete_accounts_skipped: u64,
+    /// Zero-lamport accounts gathered across all processed slots, carried forward for tombstone
+    /// conversion in `generate_index`. Each entry is `(storage index into `storages`, pubkey,
+    /// account info)`. After duplicate resolution the lone references are dropped from the index
+    /// and recorded as tombstones; older duplicates fail the lone-reference check and are skipped.
+    tombstone_candidates: Vec<(usize, Pubkey, AccountInfo)>,
     slot_arena: IndexGenerationSlotArena,
 }
 impl IndexGenerationAccumulator {
@@ -449,6 +454,7 @@ impl IndexGenerationAccumulator {
             lt_hash: LtHash::identity(),
             capitalization: 0,
             num_obsolete_accounts_skipped: 0,
+            tombstone_candidates: Vec::new(),
             slot_arena: IndexGenerationSlotArena::default(),
         }
     }
@@ -469,6 +475,8 @@ impl IndexGenerationAccumulator {
             .expect("capitalization cannot overflow");
         self.num_obsolete_accounts_skipped += other.num_obsolete_accounts_skipped;
         self.storage_info.append(&mut other.storage_info);
+        self.tombstone_candidates
+            .append(&mut other.tombstone_candidates);
     }
 }
 
@@ -478,14 +486,16 @@ impl IndexGenerationAccumulator {
 #[derive(Debug, Default)]
 struct IndexGenerationSlotArena {
     keyed_account_infos: Vec<(Pubkey, AccountInfo)>,
-    zero_lamport_offsets: Vec<usize>,
+    /// Zero-lamport accounts seen in this slot, gathered for tombstone conversion in
+    /// `generate_index` once duplicate resolution has isolated the single references.
+    zero_lamport_keyed_infos: Vec<(Pubkey, AccountInfo)>,
 }
 
 impl IndexGenerationSlotArena {
     /// Makes sure no actual items are stored in the allocated data structures
     fn ensure_empty(&mut self) {
         assert!(self.keyed_account_infos.is_empty(), "should be drained");
-        self.zero_lamport_offsets.clear();
+        self.zero_lamport_keyed_infos.clear();
     }
 }
 
@@ -6364,7 +6374,7 @@ impl AccountsDb {
         let mut all_accounts_are_zero_lamports = true;
         accum.slot_arena.ensure_empty();
         let keyed_account_infos = &mut accum.slot_arena.keyed_account_infos;
-        let zero_lamport_offsets = &mut accum.slot_arena.zero_lamport_offsets;
+        let zero_lamport_keyed_infos = &mut accum.slot_arena.zero_lamport_keyed_infos;
 
         let geyser_notifier = self
             .accounts_update_notifier
@@ -6407,18 +6417,20 @@ impl AccountsDb {
                 if !is_account_zero_lamport {
                     accounts_data_len += data_len as u64;
                     all_accounts_are_zero_lamports = false;
-                } else {
-                    // All zero lamport accounts are obsolete or single ref by the end of index
-                    // generation. Store the offsets so they can be batch inserted later
-                    zero_lamport_offsets.push(offset);
                 }
-                keyed_account_infos.push((
-                    *account.pubkey,
-                    AccountInfo::new(
-                        StorageLocation::AppendVec(store_id, offset), // will never be cached
-                        is_account_zero_lamport,
-                    ),
-                ));
+                let account_info = AccountInfo::new(
+                    StorageLocation::AppendVec(store_id, offset), // will never be cached
+                    is_account_zero_lamport,
+                );
+                if is_account_zero_lamport {
+                    // Gather zero-lamport accounts for tombstone conversion. By the end of index
+                    // generation every zero-lamport account is either an older duplicate
+                    // (reclaimed while marking obsolete accounts) or the lone reference to its
+                    // pubkey; the lone references are dropped from the index and recorded as
+                    // tombstones in `generate_index`.
+                    zero_lamport_keyed_infos.push((*account.pubkey, account_info));
+                }
+                keyed_account_infos.push((*account.pubkey, account_info));
 
                 if !self.account_indexes.is_empty() {
                     self.accounts_index.update_secondary_indexes(
@@ -6487,10 +6499,14 @@ impl AccountsDb {
             accum.storage_info.push((store_id, info));
         }
 
-        // Add all zero lamport accounts as zero lamport single refs to avoid having to revisit
-        // them later. This is safe as all zero lamport accounts will be single ref or obsolete
-        // by the end of index generation
-        storage.batch_insert_zero_lamport_single_ref_account_offsets(zero_lamport_offsets);
+        // Carry the gathered zero-lamport accounts forward. They are converted to tombstones in
+        // `generate_index` once duplicate resolution has reclaimed every older version, leaving
+        // each survivor as the lone reference to its pubkey.
+        accum.tombstone_candidates.extend(
+            zero_lamport_keyed_infos
+                .drain(..)
+                .map(|(pubkey, account_info)| (storage_index, pubkey, account_info)),
+        );
 
         accum.num_accounts += insert_info.count as u64;
         accum.insert_time_us += insert_time_us;
@@ -6811,6 +6827,34 @@ impl AccountsDb {
         timings.mark_obsolete_accounts_us = mark_obsolete_accounts_time.as_us();
         timings.num_obsolete_accounts_marked = obsolete_account_stats.accounts_marked_obsolete;
         timings.num_slots_removed_as_obsolete = obsolete_account_stats.slots_removed;
+
+        // Convert the gathered zero-lamport accounts into tombstones. Duplicate resolution above
+        // has reclaimed every older version, so each surviving zero-lamport account is now the
+        // lone reference to its pubkey: drop it from the index and record its offset on the
+        // storage's tombstone list so shrink carries it forward as a deletion marker without
+        // rescanning the index. Candidates that were themselves older duplicates (already
+        // reclaimed, or shadowed by a surviving newer version) fail the lone-reference check and
+        // are left untouched.
+        let mut convert_tombstones_time = Measure::start("convert_tombstones");
+        let mut num_tombstones = 0u64;
+        for (storage_index, pubkey, account_info) in total_accum.tombstone_candidates.drain(..) {
+            let storage = &storages[storage_index];
+            if self.accounts_index.remove_zero_lamport_single_ref(
+                &pubkey,
+                storage.slot(),
+                account_info,
+            ) {
+                storage.insert_tombstone_offset(account_info.offset());
+                num_tombstones += 1;
+            }
+        }
+        convert_tombstones_time.stop();
+        info!(
+            "generate_index: converted {num_tombstones} zero-lamport single-ref accounts to \
+             tombstones in {} us",
+            convert_tombstones_time.as_us(),
+        );
+
         total_time.stop();
         timings.total_time_us = total_time.as_us();
         timings.report(self.accounts_index.get_startup_stats());

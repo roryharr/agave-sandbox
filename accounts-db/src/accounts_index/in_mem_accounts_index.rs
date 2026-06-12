@@ -468,6 +468,81 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
         DrainResult::Removed
     }
 
+    /// Tombstone a single-ref zero-lamport account found during index generation.
+    ///
+    /// Removes `pubkey` from the index iff its slot list is exactly the one entry
+    /// `(slot, account_info)` — i.e. `pubkey` is referenced only by this zero-lamport account.
+    /// Returns `true` when the entry was removed (the account is now a tombstone: gone from the
+    /// index, still present in storage as a deletion marker).
+    ///
+    /// Returns `false`, leaving the index untouched, when the slot list is not exactly this lone
+    /// entry. During index generation a gathered zero-lamport offset may turn out to be an older
+    /// duplicate whose newer version still survives, or one that was already reclaimed while
+    /// resolving duplicates; callers can pass every gathered candidate and rely on this check to
+    /// skip those.
+    pub fn remove_zero_lamport_single_ref(
+        &self,
+        pubkey: &Pubkey,
+        slot: Slot,
+        account_info: T,
+    ) -> bool
+    where
+        T: PartialEq,
+    {
+        // Dual lookup: if the pubkey isn't in memory, promote its on-disk entry into the map
+        // (loading disk I/O outside the map lock) so the check+remove below is uniform.
+        if self.get_only_in_mem(pubkey, false, |entry| entry.is_none()) {
+            let Some(disk_entry) = self.load_account_entry_from_disk(pubkey) else {
+                return false;
+            };
+            let mut map = self.map_internal.write().unwrap();
+            if let Entry::Vacant(vacant) = map.entry(*pubkey) {
+                self.stats().inc_mem_count();
+                vacant.insert(Box::new(disk_entry));
+            }
+        }
+
+        let mut m = Measure::start("entry");
+        let mut map = self.map_internal.write().unwrap();
+        let capacity_pre = map.capacity();
+        let entry = map.entry(*pubkey);
+        m.stop();
+
+        // It could have been removed by a racing drain between the lookup above and here.
+        let Entry::Occupied(occupied) = entry else {
+            return false;
+        };
+        let value = occupied.get();
+
+        {
+            let slot_list = value.slot_list_read_lock();
+            if slot_list.len() != 1 || slot_list[0] != (slot, account_info) {
+                // Not a lone reference to this zero-lamport account; leave it in the index.
+                return false;
+            }
+        }
+
+        // `unref_by_count` returns the ref count *prior* to the decrement; a lone reference must
+        // have had a ref count of exactly 1.
+        let ref_count_before = value.unref_by_count(1);
+        assert_eq!(
+            ref_count_before, 1,
+            "remove_zero_lamport_single_ref({pubkey}, slot={slot}): lone slot-list entry had \
+             ref_count != 1"
+        );
+        self.delete_disk_key(occupied.key());
+        self.stats().dec_mem_count();
+        self.stats().inc_delete();
+        occupied.remove();
+
+        let capacity_post = map.capacity();
+        drop(map);
+        self.stats()
+            .update_in_mem_capacity(capacity_pre, capacity_post);
+        self.update_entry_stats(m, /* found_in_mem = */ true);
+        true
+    }
+
     // If the slot list for pubkey exists in the index and is empty, remove the index entry for pubkey and return true.
     // Return false otherwise.
     pub fn remove_if_slot_list_empty(&self, pubkey: Pubkey) -> bool {

@@ -424,10 +424,8 @@ mod serde_snapshot_tests {
 
         accounts.add_root_and_flush_write_cache(current_slot);
 
-        // pubkey is zero-lamport at the latest slot — Type-A under the new flush path,
-        // so it isn't in the index. After snapshot serialization + reconstruction,
-        // generate_index_for_slot scans storages and re-adds it as a single-ref entry,
-        // making it loadable again.
+        // pubkey is zero-lamport at the latest slot, so the flush path tombstoned it: removed
+        // from the index, kept in storage as a deletion marker. It is not loadable.
         accounts.assert_not_load_account(current_slot, pubkey);
 
         accounts.print_accounts_stats("accounts");
@@ -444,7 +442,9 @@ mod serde_snapshot_tests {
 
         accounts.print_accounts_stats("reconstructed");
 
-        accounts.assert_load_account(current_slot, pubkey, zero_lamport);
+        // Index generation tombstones the zero-lamport account the same way the flush path did, so
+        // it stays out of the index and unloadable after reconstruction.
+        accounts.assert_not_load_account(current_slot, pubkey);
     }
 
     fn with_chained_zero_lamport_accounts<F>(f: F)
@@ -502,8 +502,10 @@ mod serde_snapshot_tests {
         accounts.print_accounts_stats("post_f");
 
         accounts.assert_load_account(current_slot, pubkey, some_lamport);
-        accounts.assert_load_account(current_slot, purged_pubkey1, 0);
-        accounts.assert_load_account(current_slot, purged_pubkey2, 0);
+        // purged_pubkey1/2 are zero-lamport at their latest slot, so they are tombstones (removed
+        // from the index, kept in storage) and not loadable.
+        accounts.assert_not_load_account(current_slot, purged_pubkey1);
+        accounts.assert_not_load_account(current_slot, purged_pubkey2);
         accounts.assert_load_account(current_slot, dummy_pubkey, dummy_lamport);
 
         let calculated_capitalization =
@@ -617,8 +619,9 @@ mod serde_snapshot_tests {
         accounts.print_count_and_status("after purge zero");
 
         accounts.assert_load_account(current_slot, pubkey, old_lamport);
-        accounts.assert_load_account(current_slot, purged_pubkey1, 0);
-        accounts.assert_load_account(current_slot, purged_pubkey2, 0);
+        // Zero-lamport at their latest slot: tombstoned during index generation, not loadable.
+        accounts.assert_not_load_account(current_slot, purged_pubkey1);
+        accounts.assert_not_load_account(current_slot, purged_pubkey2);
     }
 
     #[test]
@@ -727,9 +730,10 @@ mod serde_snapshot_tests {
 
         info!("pubkey: {pubkey1}");
         accounts.print_accounts_stats("pre_clean");
-        // After reconstruction, generate_index re-adds pubkey1 to the index as a
-        // zero-lamport single-ref entry, so it is loadable again.
-        accounts.assert_load_account(current_slot, pubkey1, zero_lamport);
+        // After reconstruction, generate_index tombstones pubkey1 (zero-lamport, single-ref):
+        // removed from the index, kept in storage as a deletion marker. It stays unloadable and
+        // cannot revive to its older non-zero state.
+        accounts.assert_not_load_account(current_slot, pubkey1);
         accounts.assert_load_account(current_slot, pubkey2, old_lamport);
         accounts.assert_load_account(current_slot, dummy_pubkey, dummy_lamport);
 

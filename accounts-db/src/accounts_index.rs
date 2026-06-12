@@ -987,6 +987,23 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> AccountsIndex<T, U> {
         map.drain_and_remove(pubkey, target_slot, reclaims)
     }
 
+    /// Tombstone a single-ref zero-lamport account found during index generation. Removes
+    /// `pubkey` from the index iff its slot list is exactly `(slot, account_info)`. Returns `true`
+    /// when removed, or `false` (leaving the index untouched) when it is not a lone reference —
+    /// see the in-mem impl.
+    pub fn remove_zero_lamport_single_ref(
+        &self,
+        pubkey: &Pubkey,
+        slot: Slot,
+        account_info: T,
+    ) -> bool
+    where
+        T: PartialEq,
+    {
+        let map = self.get_bin(pubkey);
+        map.remove_zero_lamport_single_ref(pubkey, slot, account_info)
+    }
+
     pub fn ref_count_from_storage(&self, pubkey: &Pubkey) -> RefCount {
         let map = self.get_bin(pubkey);
         map.get_internal_inner(pubkey, |entry| {
