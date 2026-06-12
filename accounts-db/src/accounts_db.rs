@@ -5297,8 +5297,6 @@ impl AccountsDb {
             assert!(target_slot <= self.accounts_index.max_root_inclusive());
         }
 
-        let skip_index_for_zero_lamport = reclaim == UpsertReclaim::ReclaimOldSlots;
-
         let update = |start, end| {
             let mut reclaims = ReclaimsSlotList::with_capacity((end - start) / 2);
             // Zero-lamport tombstones that had prior index versions reclaimed and were dropped
@@ -5307,11 +5305,21 @@ impl AccountsDb {
             let mut zero_lamport_removed: u64 = 0;
             let mut zero_lamport_marked_obsolete: u64 = 0;
 
+            // Mark a tombstone's bytes obsolete directly so clean/shrink drop them without ever
+            // needing an index entry.
+            let mark_tombstone_obsolete = |offset: usize, data_len: usize| {
+                storage
+                    .obsolete_accounts
+                    .write()
+                    .unwrap()
+                    .mark_accounts_obsolete(std::iter::once((offset, data_len)), target_slot);
+            };
+
             (start..end).for_each(|i| {
                 let info: AccountInfo = infos[i];
                 debug_assert!(!info.is_cached());
                 accounts.account(i, |account| {
-                    if skip_index_for_zero_lamport && account.is_zero_lamport() {
+                    if account.is_zero_lamport() && reclaim == UpsertReclaim::ReclaimOldSlots {
                         // Cache writes no longer upsert the index, so this zero-lamport tombstone
                         // is not added to the index either: reclaim any older versions and drop
                         // the pubkey.
@@ -5329,35 +5337,43 @@ impl AccountsDb {
                             }
                             DrainResult::NotFound => {
                                 // Never indexed -- a cache-only deletion with nothing to reclaim.
-                                // Mark the tombstone's bytes obsolete directly so clean/shrink drop
-                                // them without ever needing an index entry.
-                                storage
-                                    .obsolete_accounts
-                                    .write()
-                                    .unwrap()
-                                    .mark_accounts_obsolete(
-                                        std::iter::once((info.offset(), account.data().len())),
-                                        target_slot,
-                                    );
+                                mark_tombstone_obsolete(info.offset(), account.data().len());
                                 zero_lamport_marked_obsolete += 1;
                             }
                         }
-                    } else {
-                        let old_slot = accounts.slot(i);
-                        self.accounts_index.upsert(
-                            target_slot,
-                            old_slot,
-                            account.pubkey(),
-                            info,
-                            &mut reclaims,
-                            reclaim,
-                        );
-                        self.accounts_index.update_secondary_indexes(
-                            account.pubkey(),
-                            &account,
-                            &self.account_indexes,
-                        );
+                        return;
                     }
+
+                    // IgnoreReclaims must not reclaim older versions (an ongoing scan, or a slot
+                    // above max_clean_root, still needs them). But if the pubkey has no older
+                    // version there is nothing to reclaim, so a zero-lamport tombstone can still
+                    // skip the index write -- the same outcome ReclaimOldSlots reaches for an
+                    // unindexed tombstone -- instead of inserting a useless zero-lamport single ref.
+                    if account.is_zero_lamport()
+                        && reclaim == UpsertReclaim::IgnoreReclaims
+                        && !self
+                            .accounts_index
+                            .get_and_then(account.pubkey(), |entry| (false, entry.is_some()))
+                    {
+                        mark_tombstone_obsolete(info.offset(), account.data().len());
+                        zero_lamport_marked_obsolete += 1;
+                        return;
+                    }
+
+                    let old_slot = accounts.slot(i);
+                    self.accounts_index.upsert(
+                        target_slot,
+                        old_slot,
+                        account.pubkey(),
+                        info,
+                        &mut reclaims,
+                        reclaim,
+                    );
+                    self.accounts_index.update_secondary_indexes(
+                        account.pubkey(),
+                        &account,
+                        &self.account_indexes,
+                    );
                 });
             });
             (reclaims, zero_lamport_removed, zero_lamport_marked_obsolete)
