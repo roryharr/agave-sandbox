@@ -205,7 +205,7 @@ impl AccountsCacheIndex {
 
     /// Decrement the reference count for each pubkey in `pubkeys`. Removes an entry entirely if
     /// the count reaches zero. `max_slot` is not updated; it will become stale if the removed slot
-    /// is the highest slot. Return a Vec of pubkeys removed from the index
+    /// is the highest slot. Returns a vec of pubkeys removed from the index.
     fn remove(&self, pubkeys: impl IntoIterator<Item = Pubkey>) -> Vec<Pubkey> {
         let mut removed_pubkeys = Vec::new();
         for pubkey in pubkeys {
@@ -316,7 +316,7 @@ impl AccountsCache {
             .and_then(|slot_cache| slot_cache.get_cloned(pubkey))
     }
 
-    /// Removes a slot from the accounts cache and returns the set of pubkeys removed from the index
+    /// Removes a slot from the accounts cache and returns the set of pubkeys removed from the index.
     #[must_use]
     pub fn remove_slot(&self, slot: Slot) -> Option<Vec<Pubkey>> {
         let result = self.cache.remove(&slot).map(|(_, slot_cache)| slot_cache);

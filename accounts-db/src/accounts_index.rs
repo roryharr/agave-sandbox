@@ -798,8 +798,8 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> AccountsIndex<T, U> {
     }
 
     /// Write through to disk the in-mem entries for `pubkeys`. Each entry is only persisted if it
-    /// is dirty, 'slot_list.len == 1', and `ref_count == 1`. Persisting an entry clears its dirty
-    /// flag so it becomes eligible for eviction. No-op when disk index is disabled
+    /// is dirty, `slot_list.len() == 1`, and `ref_count == 1`. Persisting an entry clears its
+    /// dirty flag so it becomes eligible for eviction. No-op when disk index is disabled.
     pub fn write_through_pubkeys(&self, pubkeys: Vec<Pubkey>) {
         if !self.storage.storage.should_write_through() {
             return;

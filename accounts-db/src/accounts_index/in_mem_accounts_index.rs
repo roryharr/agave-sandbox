@@ -400,7 +400,7 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
     /// The entry is always marked dirty after `user_fn` returns, regardless of whether
     /// `user_fn` modifies the slot list — callers should ideally know they will modify it.
     /// When write-through is active and the resulting slot list has exactly one entry with
-    /// ref_count=1, the entry is additionally flushed to disk immediately and the dirty
+    /// `ref_count == 1`, the entry is additionally flushed to disk immediately and the dirty
     /// flag may be cleared.
     pub(crate) fn slot_list_mut_with_entry<RT>(
         &self,
@@ -481,8 +481,8 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
         });
     }
 
-    /// If the in-mem entry for pubkey is 'slot_list.len == 1' with `ref_count == 1` and currently dirty,
-    /// write it through to disk
+    /// If the in-mem entry for pubkey is `slot_list.len() == 1` with `ref_count == 1` and
+    /// currently dirty, write it through to disk
     pub fn try_write_through(&self, pubkey: &Pubkey) {
         let to_write = self.get_only_in_mem(pubkey, false, |entry| {
             entry.and_then(|entry| {
@@ -3025,7 +3025,7 @@ mod tests {
         );
     }
 
-    /// `slot_list_mut` write-through fires only for slot list len == 1, ref_count=1 entries.
+    /// `slot_list_mut` write-through fires only for `slot_list.len() == 1`, `ref_count == 1` entries.
     #[test_case(SlotList::from([(1, 0)]), 1, true  ; "writes_through")]
     #[test_case(SlotList::from(vec![(1, 10), (2, 20)]),  1, false ; "multi_slot")]
     #[test_case(SlotList::from([(1, 0)]), 2, false ; "multi_ref")]
