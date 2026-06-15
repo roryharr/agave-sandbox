@@ -30,7 +30,7 @@ pub use accounts_db_config::{
 use qualifier_attr::qualifiers;
 use {
     crate::{
-        account_info::{AccountInfo, Offset, StorageLocation},
+        account_info::{AccountInfo, Offset, StorageLocation, INLINE_DATA_CAPACITY},
         account_storage::{
             AccountStorage, AccountStoragesOrderer, ShrinkInProgress,
             stored_account_info::{StoredAccountInfo, StoredAccountInfoWithoutData},
@@ -657,6 +657,13 @@ pub enum LoadedAccountAccessor<'a> {
     Stored(Option<(Arc<AccountStorageEntry>, usize)>),
     // None value in Cached variant means the cache was flushed
     Cached(Option<Cow<'a, Arc<CachedAccount>>>),
+}
+
+/// Result of a load-path index lookup: either the account reconstructed from an inline index
+/// entry, or just its storage location for the caller to read from cache/storage.
+enum IndexedLoad {
+    Inline(AccountSharedData),
+    Location(StorageLocation),
 }
 
 impl LoadedAccountAccessor<'_> {
@@ -3722,6 +3729,33 @@ impl AccountsDb {
             })
     }
 
+    /// Single index lookup for the load path. If the index entry inlines the account, reconstruct
+    /// it directly (no storage read); otherwise return its storage location so the caller can read
+    /// cache/storage as before.
+    fn read_index_for_load(
+        &self,
+        ancestors: &Ancestors,
+        pubkey: &Pubkey,
+    ) -> Option<(Slot, IndexedLoad)> {
+        self.accounts_index
+            .get_with_and_then(pubkey, ancestors, true, |(slot, account_info)| {
+                let load = match account_info.inline_data() {
+                    Some(data) => IndexedLoad::Inline(
+                        AccountSharedData::create_from_existing_shared_data(
+                            account_info.inline_lamports(),
+                            Arc::new(data.to_vec()),
+                            *account_info.inline_owner(),
+                            account_info.inline_executable(),
+                            // rent_epoch (0 or u64::MAX) is reconstructed exactly from a flag bit.
+                            account_info.inline_rent_epoch(),
+                        ),
+                    ),
+                    None => IndexedLoad::Location(account_info.storage_location()),
+                };
+                (slot, load)
+            })
+    }
+
     fn retry_to_get_account_accessor<'a>(
         &'a self,
         mut slot: Slot,
@@ -4071,9 +4105,19 @@ impl AccountsDb {
             return Some((cached_account.account.clone(), cached_slot));
         }
 
-        let (slot, storage_location, _maybe_account_accessor) =
-            self.read_index_for_accessor_or_load_slow(ancestors, pubkey, false)?;
+        let (slot, indexed_load) = self.read_index_for_load(ancestors, pubkey)?;
         // Notice the subtle `?` at previous line, we bail out pretty early if missing.
+
+        // If the index entry inlines the account, we already have it -- no storage read needed.
+        let storage_location = match indexed_load {
+            IndexedLoad::Inline(account) => {
+                self.load_account_stats
+                    .num_loaded_inline
+                    .fetch_add(1, Ordering::Relaxed);
+                return Some((account, slot));
+            }
+            IndexedLoad::Location(storage_location) => storage_location,
+        };
 
         let in_write_cache = storage_location.is_cached();
         if !in_write_cache {
@@ -5966,11 +6010,44 @@ impl AccountsDb {
             };
 
             let store_id = storage.id();
+            let base = infos.len();
             for (i, offset) in stored_accounts_info.offsets.iter().enumerate() {
-                infos.push(AccountInfo::new(
-                    StorageLocation::AppendVec(store_id, *offset),
-                    accounts_and_meta_to_store.is_zero_lamport(i),
-                ));
+                let index = base + i;
+                let storage_location = StorageLocation::AppendVec(store_id, *offset);
+                let is_zero_lamport = accounts_and_meta_to_store.is_zero_lamport(index);
+                // Inline the account into the index entry when it is small enough to fit and its
+                // rent_epoch is 0 or the rent-exempt sentinel (u64::MAX). `do_load` reconstructs
+                // inlined accounts with rent_epoch = u64::MAX, so we must only inline accounts for
+                // which that value is correct:
+                //  - rent_epoch is excluded from the accounts lt_hash (see hash_account_helper), so
+                //    this can never affect consensus/capitalization;
+                //  - the runtime already coerces every rent-exempt account to u64::MAX on load, and
+                //    0 is the value freshly-created accounts carry, so MAX is the expected value;
+                //  - genuine rent-paying legacy accounts carry a specific epoch (never 0 or MAX),
+                //    so they stay on the storage path and keep their observable rent_epoch.
+                // The storage location is still recorded, so clean/shrink are unaffected; the inline
+                // copy just lets `do_load` skip the read.
+                let info = if accounts_and_meta_to_store.data_len(index) <= INLINE_DATA_CAPACITY {
+                    accounts_and_meta_to_store.account(index, |account| {
+                        let rent_epoch = account.rent_epoch();
+                        if rent_epoch == 0 || rent_epoch == u64::MAX {
+                            AccountInfo::new_inline(
+                                storage_location,
+                                is_zero_lamport,
+                                account.lamports(),
+                                account.owner(),
+                                account.executable(),
+                                rent_epoch,
+                                account.data(),
+                            )
+                        } else {
+                            AccountInfo::new(storage_location, is_zero_lamport)
+                        }
+                    })
+                } else {
+                    AccountInfo::new(storage_location, is_zero_lamport)
+                };
+                infos.push(info);
             }
             storage.add_accounts(
                 stored_accounts_info.offsets.len(),
@@ -6267,13 +6344,29 @@ impl AccountsDb {
                     // generation. Store the offsets so they can be batch inserted later
                     zero_lamport_offsets.push(offset);
                 }
-                keyed_account_infos.push((
-                    *account.pubkey,
-                    AccountInfo::new(
-                        StorageLocation::AppendVec(store_id, offset), // will never be cached
+                // Inline the account when it fits and its rent_epoch is reconstructible (0 or
+                // u64::MAX), mirroring the flush path so startup-built entries serve `do_load`
+                // without a storage read. This adds no memory over a non-inline entry -- AccountInfo
+                // is a fixed 224 bytes regardless -- but at scale the index must run in disk
+                // (threshold) mode so these entries are written to disk rather than held in RAM.
+                let storage_location = StorageLocation::AppendVec(store_id, offset); // never cached
+                let rent_epoch = account.rent_epoch();
+                let info = if data_len <= INLINE_DATA_CAPACITY
+                    && (rent_epoch == 0 || rent_epoch == u64::MAX)
+                {
+                    AccountInfo::new_inline(
+                        storage_location,
                         is_account_zero_lamport,
-                    ),
-                ));
+                        account.lamports(),
+                        account.owner(),
+                        account.executable(),
+                        rent_epoch,
+                        account.data(),
+                    )
+                } else {
+                    AccountInfo::new(storage_location, is_account_zero_lamport)
+                };
+                keyed_account_infos.push((*account.pubkey, info));
 
                 if !self.account_indexes.is_empty() {
                     self.accounts_index.update_secondary_indexes(

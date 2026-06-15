@@ -30,8 +30,11 @@ pub struct AccountMapEntry<T> {
     meta: AccountMapEntryMeta,
 }
 
-// Ensure the size of AccountMapEntry never changes unexpectedly
-const _: () = assert!(size_of::<AccountMapEntry<AccountInfo>>() == 48);
+// Ensure the size of AccountMapEntry never changes unexpectedly. This is the *in-memory* index
+// entry: it wraps the 224-byte AccountInfo in a slot list + RwLock + ref_count + meta, so it is
+// larger than the 256-byte on-disk bucket_map IndexEntry (which is the value that is sized to 4
+// cache lines).
+const _: () = assert!(size_of::<AccountMapEntry<AccountInfo>>() == 264);
 
 impl<T: IndexValue> AccountMapEntry<T> {
     pub fn new(slot_list: SlotList<T>, ref_count: RefCount, meta: AccountMapEntryMeta) -> Self {

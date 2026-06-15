@@ -529,6 +529,17 @@ mod tests {
         assert_eq!(std::mem::size_of::<IndexEntry<u64>>(), 32 + 8 + 8);
     }
 
+    // A 224-byte inline value (accounts-db's AccountInfo) yields a 256-byte on-disk entry: the
+    // 32-byte pubkey key plus the value stored inline in the union. accounts-db relies on this to
+    // keep index cells at exactly 4 cache lines.
+    #[test]
+    fn test_size_inline_value() {
+        #[repr(C, align(8))]
+        #[derive(Clone, Copy)]
+        struct Value224([u8; 224]);
+        assert_eq!(std::mem::size_of::<IndexEntry<Value224>>(), 256);
+    }
+
     #[test]
     #[should_panic(expected = "New storage offset must fit into 7 bytes!")]
     fn test_set_storage_offset_value_too_large() {

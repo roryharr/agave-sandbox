@@ -254,6 +254,41 @@ fn test_generate_index_for_single_ref_zero_lamport_slot() {
     );
 }
 
+/// A small, rent-exempt account written directly to storage is inlined into its index entry when
+/// the index is rebuilt by generate_index, so a subsequent load reconstructs it without a storage
+/// read.
+#[test]
+fn test_generate_index_inlines_small_account() {
+    let db = AccountsDb::new_single_for_tests();
+    let slot0 = 0;
+    let pubkey = Pubkey::from([1; 32]);
+    let append_vec = db.create_and_insert_store(slot0, 100_000, "test");
+
+    let mut account = AccountSharedData::new(42, 0, &Pubkey::new_unique());
+    account.set_data(vec![7u8; 100]); // < INLINE_DATA_CAPACITY
+    account.set_rent_epoch(u64::MAX);
+
+    let data = [(&pubkey, &account)];
+    append_vec
+        .accounts
+        .write_accounts(&(slot0, &data[..]), 0)
+        .unwrap();
+
+    assert!(!db.accounts_index.contains(&pubkey));
+    db.generate_index(None, false);
+
+    let ancestors = Ancestors::from(vec![slot0]);
+    let (loaded, _slot) = db.do_load_for_tests(&ancestors, &pubkey).unwrap();
+    assert!(accounts_equal(&loaded, &account));
+    assert_eq!(
+        db.load_account_stats
+            .num_loaded_inline
+            .load(Ordering::Relaxed),
+        1,
+        "generate_index should have produced an inline entry"
+    );
+}
+
 pub(crate) fn append_single_account_with_default_hash(
     storage: &AccountStorageEntry,
     pubkey: &Pubkey,
@@ -3332,7 +3367,13 @@ fn test_read_only_accounts_cache() {
 
     let account_key = Pubkey::new_unique();
     let zero_lamport_account = AccountSharedData::new(0, 0, AccountSharedData::default().owner());
-    let slot1_account = AccountSharedData::new(1, 1, AccountSharedData::default().owner());
+    // Data larger than the inline capacity so this account is read from storage (and thus through
+    // the read-only cache) rather than reconstructed inline, which would bypass the cache.
+    let slot1_account = AccountSharedData::new(
+        1,
+        crate::account_info::INLINE_DATA_CAPACITY + 1,
+        AccountSharedData::default().owner(),
+    );
     db.store_for_tests((0, &[(&account_key, &zero_lamport_account)][..]));
     db.store_for_tests((1, &[(&account_key, &slot1_account)][..]));
 
@@ -3386,7 +3427,13 @@ fn test_load_with_read_only_accounts_cache() {
 
     let account_key = Pubkey::new_unique();
     let zero_lamport_account = AccountSharedData::new(0, 0, AccountSharedData::default().owner());
-    let slot1_account = AccountSharedData::new(1, 1, AccountSharedData::default().owner());
+    // Data larger than the inline capacity so this account is read from storage (and thus through
+    // the read-only cache) rather than reconstructed inline, which would bypass the cache.
+    let slot1_account = AccountSharedData::new(
+        1,
+        crate::account_info::INLINE_DATA_CAPACITY + 1,
+        AccountSharedData::default().owner(),
+    );
     db.store_for_tests((0, &[(&account_key, &zero_lamport_account)][..]));
     db.store_for_tests((1, &[(&account_key, &slot1_account)][..]));
 
@@ -7047,6 +7094,73 @@ fn test_do_load_returns_cache_value_for_cache_only_pubkey() {
         db.do_load_for_tests(&ancestors, &pubkey)
             .map(|(loaded, loaded_slot)| (loaded.lamports(), loaded_slot)),
         Some((account.lamports(), slot))
+    );
+}
+
+/// A small, rent-exempt account is inlined into its index entry at flush time, so `do_load`
+/// reconstructs it without touching storage. A too-large account and a non-rent-exempt account
+/// fall back to the storage read path. All three must load back byte-for-byte identically.
+#[test]
+fn test_inline_account_loaded_without_storage_read() {
+    use crate::account_info::INLINE_DATA_CAPACITY;
+
+    let db = AccountsDb::new_single_for_tests();
+
+    // small + rent-exempt => inlined (data exactly fills the inline capacity)
+    let small = Pubkey::new_unique();
+    let mut small_account = AccountSharedData::new(100, 0, &Pubkey::new_unique());
+    small_account.set_data(vec![7u8; INLINE_DATA_CAPACITY]);
+    small_account.set_rent_epoch(u64::MAX);
+
+    // one byte too large to inline => storage read
+    let big = Pubkey::new_unique();
+    let mut big_account = AccountSharedData::new(200, 0, &Pubkey::new_unique());
+    big_account.set_data(vec![9u8; INLINE_DATA_CAPACITY + 1]);
+    big_account.set_rent_epoch(u64::MAX);
+
+    // small but not rent-exempt => not inlined (reconstruction couldn't preserve rent_epoch)
+    let legacy = Pubkey::new_unique();
+    let mut legacy_account = AccountSharedData::new(300, 0, &Pubkey::new_unique());
+    legacy_account.set_data(vec![3u8; 10]);
+    legacy_account.set_rent_epoch(123);
+
+    let slot = 1;
+    db.store_for_tests((
+        slot,
+        [
+            (&small, &small_account),
+            (&big, &big_account),
+            (&legacy, &legacy_account),
+        ]
+        .as_slice(),
+    ));
+    db.add_root(slot);
+    db.flush_accounts_cache_slot_for_tests(slot);
+
+    let ancestors = Ancestors::from(vec![slot]);
+    for (pubkey, expected) in [
+        (&small, &small_account),
+        (&big, &big_account),
+        (&legacy, &legacy_account),
+    ] {
+        let (loaded, loaded_slot) = db.do_load_for_tests(&ancestors, pubkey).unwrap();
+        assert_eq!(loaded_slot, slot, "{pubkey}");
+        assert!(accounts_equal(&loaded, expected), "{pubkey}");
+    }
+
+    assert_eq!(
+        db.load_account_stats
+            .num_loaded_inline
+            .load(Ordering::Relaxed),
+        1,
+        "only the small rent-exempt account should be served inline"
+    );
+    assert_eq!(
+        db.load_account_stats
+            .num_loaded_from_index_storage
+            .load(Ordering::Relaxed),
+        2,
+        "the large and non-rent-exempt accounts should read from storage"
     );
 }
 

@@ -989,6 +989,8 @@ pub struct LoadAccountsStats {
     pub num_loaded_from_read_cache: AtomicU64,
     pub num_loaded_from_index_cache: AtomicU64,
     pub num_loaded_from_index_storage: AtomicU64,
+    /// Reconstructed directly from an inline index entry, skipping the storage read.
+    pub num_loaded_inline: AtomicU64,
 }
 
 impl LoadAccountsStats {
@@ -1014,6 +1016,11 @@ impl LoadAccountsStats {
                 "num_loaded_from_index_storage",
                 self.num_loaded_from_index_storage
                     .swap(0, Ordering::Relaxed),
+                i64
+            ),
+            (
+                "num_loaded_inline",
+                self.num_loaded_inline.swap(0, Ordering::Relaxed),
                 i64
             ),
         );
