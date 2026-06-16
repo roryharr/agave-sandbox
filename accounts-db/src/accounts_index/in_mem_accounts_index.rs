@@ -490,7 +490,6 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
                     return None;
                 }
 
-
                 let slot_list = entry.slot_list_read_lock();
                 match (entry.ref_count(), &slot_list[..]) {
                     (1, [info]) => Some(*info),
@@ -499,7 +498,10 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
             })
         });
         if let Some((slot, info)) = to_write {
-            debug_assert!(!info.is_cached(), "Cached entries should not be written through");
+            debug_assert!(
+                !info.is_cached(),
+                "Cached entries should not be written through"
+            );
             self.write_through(pubkey, slot, info);
         }
     }
