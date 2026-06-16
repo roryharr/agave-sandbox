@@ -874,6 +874,14 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
 
     /// Queue up these insertions for when the flush thread is dealing with this bin.
     /// This is very fast and requires no lookups or disk access.
+    /// Pre-size this bin's disk bucket for `count` entries, so startup index generation grows
+    /// straight to the final size instead of resizing incrementally per batch.
+    pub fn set_anticipated_size_floor(&self, count: u64) {
+        if let Some(bucket) = self.bucket.as_ref() {
+            bucket.set_anticipated_size_floor(count);
+        }
+    }
+
     pub fn startup_insert_only(
         &self,
         slot: Slot,

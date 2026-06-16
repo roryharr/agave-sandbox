@@ -130,6 +130,14 @@ impl<T: Clone + Copy + PartialEq + std::fmt::Debug> BucketApi<T> {
         bucket.as_mut().unwrap().set_anticipated_count(count);
     }
 
+    /// Set a persistent lower bound on the anticipated entry count for this bucket. Unlike
+    /// `set_anticipated_count`, it survives batch inserts, so a pre-sized startup grows to the
+    /// final size in a single resize instead of incrementally.
+    pub fn set_anticipated_size_floor(&self, count: u64) {
+        let mut bucket = self.get_write_bucket();
+        bucket.as_mut().unwrap().set_anticipated_size_floor(count);
+    }
+
     /// batch insert of `items`. Assumption is a single slot list element and ref_count == 1.
     /// For any pubkeys that already exist, the index in `items` of the failed insertion and the existing data (previously put in the index) are returned.
     pub fn batch_insert_non_duplicates(&self, items: &[(Pubkey, T)]) -> Vec<(usize, T)> {

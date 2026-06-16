@@ -531,6 +531,21 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> AccountsIndex<T, U> {
         self.storage.set_startup(value);
     }
 
+    /// Pre-size each bin's disk bucket for the expected total number of entries so startup index
+    /// generation grows straight to the final size in a single resize per bin, rather than crawling
+    /// up incrementally (which rehashes the whole bucket on every step). `total_entries` is
+    /// distributed evenly across bins; an over-estimate just over-allocates slightly.
+    pub(crate) fn set_anticipated_startup_size(&self, total_entries: usize) {
+        let bins = self.account_maps.len();
+        if bins == 0 {
+            return;
+        }
+        let per_bin = (total_entries / bins) as u64;
+        for bin in self.account_maps.iter() {
+            bin.set_anticipated_size_floor(per_bin);
+        }
+    }
+
     /// Scan AccountsIndex for a given iterator of Pubkeys.
     ///
     /// This fn takes 4 arguments.

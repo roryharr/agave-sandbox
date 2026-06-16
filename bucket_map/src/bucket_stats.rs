@@ -32,8 +32,22 @@ impl BucketStats {
 
     pub fn resize_grow(&self, old_size: u64, new_size: u64) {
         let size_change = new_size.saturating_sub(old_size);
-        self.total_file_size
-            .fetch_add(size_change, Ordering::Relaxed);
+        let total = self
+            .total_file_size
+            .fetch_add(size_change, Ordering::Relaxed)
+            + size_change;
+        // Safety valve for the inline-account-index experiment: the index file is expected to
+        // settle well under this. If a bucket file blows past 1 TiB, the index is either not
+        // converging or the box can't hold it -- abort hard rather than fill the disk out from
+        // under the node.
+        const MAX_BUCKET_FILE_SIZE: u64 = 1 << 40; // 1 TiB
+        if total > MAX_BUCKET_FILE_SIZE {
+            eprintln!(
+                "FATAL: bucket map file size {total} bytes exceeded {MAX_BUCKET_FILE_SIZE} (1 TiB); \
+                 aborting to avoid filling the disk"
+            );
+            std::process::exit(1);
+        }
     }
 }
 

@@ -659,10 +659,11 @@ pub enum LoadedAccountAccessor<'a> {
     Cached(Option<Cow<'a, Arc<CachedAccount>>>),
 }
 
-/// Result of a load-path index lookup: either the account reconstructed from an inline index
-/// entry, or just its storage location for the caller to read from cache/storage.
+/// Result of a load-path index lookup: either an inline index entry (a `Copy` of the AccountInfo,
+/// reconstructed lazily only on a read-cache miss), or just a storage location for the caller to
+/// read from cache/storage.
 enum IndexedLoad {
-    Inline(AccountSharedData),
+    Inline(AccountInfo),
     Location(StorageLocation),
 }
 
@@ -3729,9 +3730,9 @@ impl AccountsDb {
             })
     }
 
-    /// Single index lookup for the load path. If the index entry inlines the account, reconstruct
-    /// it directly (no storage read); otherwise return its storage location so the caller can read
-    /// cache/storage as before.
+    /// Single index lookup for the load path. If the index entry inlines the account, return a
+    /// copy of it (reconstruction is deferred to a read-cache miss); otherwise return its storage
+    /// location so the caller can read from cache/storage as before.
     fn read_index_for_load(
         &self,
         ancestors: &Ancestors,
@@ -3739,21 +3740,28 @@ impl AccountsDb {
     ) -> Option<(Slot, IndexedLoad)> {
         self.accounts_index
             .get_with_and_then(pubkey, ancestors, true, |(slot, account_info)| {
-                let load = match account_info.inline_data() {
-                    Some(data) => IndexedLoad::Inline(
-                        AccountSharedData::create_from_existing_shared_data(
-                            account_info.inline_lamports(),
-                            Arc::new(data.to_vec()),
-                            *account_info.inline_owner(),
-                            account_info.inline_executable(),
-                            // rent_epoch (0 or u64::MAX) is reconstructed exactly from a flag bit.
-                            account_info.inline_rent_epoch(),
-                        ),
-                    ),
-                    None => IndexedLoad::Location(account_info.storage_location()),
+                let load = if account_info.is_inline() {
+                    IndexedLoad::Inline(account_info)
+                } else {
+                    IndexedLoad::Location(account_info.storage_location())
                 };
                 (slot, load)
             })
+    }
+
+    /// Reconstruct an AccountSharedData from an inline index entry (no storage read).
+    fn reconstruct_inline_account(account_info: &AccountInfo) -> AccountSharedData {
+        let data = account_info
+            .inline_data()
+            .expect("inline account must carry inline data");
+        AccountSharedData::create_from_existing_shared_data(
+            account_info.inline_lamports(),
+            Arc::new(data.to_vec()),
+            *account_info.inline_owner(),
+            account_info.inline_executable(),
+            // rent_epoch (0 or u64::MAX) is reconstructed exactly from a flag bit.
+            account_info.inline_rent_epoch(),
+        )
     }
 
     fn retry_to_get_account_accessor<'a>(
@@ -4108,12 +4116,26 @@ impl AccountsDb {
         let (slot, indexed_load) = self.read_index_for_load(ancestors, pubkey)?;
         // Notice the subtle `?` at previous line, we bail out pretty early if missing.
 
-        // If the index entry inlines the account, we already have it -- no storage read needed.
+        // If the index entry inlines the account, prefer the read-only cache for hot accounts (a
+        // cheap Arc clone) over reconstructing every time; reconstruct only on a cache miss and
+        // populate the cache so subsequent loads take the cheap path. Reconstruction is from the
+        // index entry, so it still avoids the storage read.
         let storage_location = match indexed_load {
-            IndexedLoad::Inline(account) => {
+            IndexedLoad::Inline(account_info) => {
+                if let Some(account) = self.read_only_accounts_cache.load(*pubkey, slot) {
+                    self.load_account_stats
+                        .num_loaded_from_read_cache
+                        .fetch_add(1, Ordering::Relaxed);
+                    return Some((account, slot));
+                }
+                let account = Self::reconstruct_inline_account(&account_info);
                 self.load_account_stats
                     .num_loaded_inline
                     .fetch_add(1, Ordering::Relaxed);
+                if populate_read_cache == PopulateReadCache::True {
+                    self.read_only_accounts_cache
+                        .store(*pubkey, slot, account.clone());
+                }
                 return Some((account, slot));
             }
             IndexedLoad::Location(storage_location) => storage_location,
@@ -6470,6 +6492,16 @@ impl AccountsDb {
         let num_storages = storages.len();
 
         self.accounts_index.set_startup(Startup::Startup);
+
+        // Pre-size the disk index for the expected number of entries so each bucket grows straight
+        // to its final size in one resize, instead of crawling up 10% per batch (which rehashes the
+        // entire bucket every step -- catastrophic now that entries are large and the index exceeds
+        // page cache). Summing per-storage counts over-counts pubkeys present in multiple slots,
+        // but an over-estimate only over-allocates slightly, which is the safe direction.
+        let estimated_total_accounts: usize =
+            storages.iter().map(|storage| storage.count()).sum();
+        self.accounts_index
+            .set_anticipated_startup_size(estimated_total_accounts);
 
         let mut total_accum = IndexGenerationAccumulator::with_slots_capacity(num_storages);
         let storages_orderer =

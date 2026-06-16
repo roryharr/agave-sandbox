@@ -103,6 +103,12 @@ pub struct Bucket<T: Copy + PartialEq + 'static> {
     /// Used as a hint for the next time we need to grow.
     anticipated_size: u64,
 
+    /// Persistent lower bound on the anticipated size, set once (e.g. at startup) to the final
+    /// expected entry count for this bucket. Unlike `anticipated_size`, it is NOT reset after each
+    /// batch insert, so a long sequence of small batches still grows straight to the final size in
+    /// one resize instead of crawling up incrementally.
+    anticipated_size_floor: u64,
+
     pub reallocated: Reallocated<IndexBucket<T>, DataBucket>,
 
     /// set to true once any entries have been deleted from the index.
@@ -171,6 +177,7 @@ impl<'b, T: Clone + Copy + PartialEq + std::fmt::Debug + 'static> Bucket<T> {
             stats,
             reallocated: Reallocated::default(),
             anticipated_size: 0,
+            anticipated_size_floor: 0,
             at_least_one_entry_deleted: false,
             restartable_bucket,
             reused_file_at_startup,
@@ -682,11 +689,19 @@ impl<'b, T: Clone + Copy + PartialEq + std::fmt::Debug + 'static> Bucket<T> {
         self.anticipated_size = count;
     }
 
+    /// Set a persistent lower bound on the anticipated size (see `anticipated_size_floor`).
+    pub(crate) fn set_anticipated_size_floor(&mut self, count: u64) {
+        self.anticipated_size_floor = count;
+    }
+
     pub fn grow_index(&self, mut current_capacity: u64) {
         if self.index.contents.capacity() == current_capacity {
             // make sure to grow to at least % more than the anticipated size
             // The indexing algorithm expects to require some over-allocation.
-            let anticipated_size = self.anticipated_size * 140 / 100;
+            // The persistent floor lets a pre-sized startup grow straight to the final size in one
+            // resize rather than crawling up 10% per batch.
+            let anticipated_size =
+                self.anticipated_size.max(self.anticipated_size_floor) * 140 / 100;
             let mut m = Measure::start("grow_index");
             //debug!("GROW_INDEX: {}", current_capacity_pow2);
             let mut count = 0;
