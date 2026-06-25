@@ -325,7 +325,6 @@ pub struct GetUniqueAccountsResult {
 }
 
 pub struct AccountsAddRootTiming {
-    pub index_us: u64,
     pub cache_us: u64,
 }
 
@@ -2404,9 +2403,6 @@ impl AccountsDb {
             );
         }
 
-        // Remove dead slots from the accounts index root tracker
-        self.remove_dead_slots_metadata(dead_slots.iter());
-
         clean_dead_slots.stop();
 
         let mut purge_removed_slots = Measure::start("reclaims::purge_removed_slots");
@@ -3206,29 +3202,6 @@ impl AccountsDb {
         self.combine_ancient_slots_packed(sorted_slots, can_randomly_shrink);
     }
 
-    /// each slot in 'dropped_roots' has been combined into an ancient append vec.
-    /// We are done with the slot now forever.
-    pub(crate) fn handle_dropped_roots_for_ancient(
-        &self,
-        dropped_roots: impl Iterator<Item = Slot>,
-    ) {
-        dropped_roots.for_each(|slot| {
-            self.accounts_index.clean_dead_slot(slot);
-            // the storage has been removed from this slot and recycled or dropped
-            assert!(self.storage.remove(&slot, false).is_none());
-            debug_assert!(
-                !self
-                    .accounts_index
-                    .roots_tracker
-                    .read()
-                    .unwrap()
-                    .alive_roots
-                    .contains(&slot),
-                "slot: {slot}"
-            );
-        });
-    }
-
     /// add all 'pubkeys' into the set of pubkeys that are 'uncleaned', associated with 'slot'
     /// clean will visit these pubkeys next time it runs
     fn add_uncleaned_pubkeys_after_shrink(
@@ -3803,7 +3776,6 @@ impl AccountsDb {
         //          |                             |
         //          V                             |
         // P3 purge_slots_from_cache()/           | index
-        //       remove_dead_slots_metadata()     | (removes index roots metadata for cached slot)
         //       purge_slot_storage()/            |
         //          purge_keys_exact()            | (removes accounts index entries)
         //          handle_reclaims()             | (removes storage entries)
@@ -4133,7 +4105,6 @@ impl AccountsDb {
             if let Some(slot_cache) = self.accounts_cache.slot_cache(*remove_slot) {
                 num_cached_slots_removed += 1;
                 total_removed_cached_bytes += slot_cache.total_bytes();
-                self.remove_dead_slots_metadata(iter::once(remove_slot));
                 remove_cache_elapsed.stop();
                 remove_cache_elapsed_across_slots += remove_cache_elapsed.as_us();
                 // Nobody else should have removed the slot cache entry yet
@@ -4724,10 +4695,6 @@ impl AccountsDb {
             // all the data for the slot
             assert!(self.storage.get_slot_storage_entry(slot).is_some());
             self.reopen_storage_as_readonly_shrinking_in_progress_ok(slot);
-        } else {
-            // Every account in this slot was superseded by a newer root, so it flushes to no
-            // storage. Drop the now-dead slot from the index roots metadata
-            self.remove_dead_slots_metadata(iter::once(&slot));
         }
 
         // Remove this slot from the cache, which will to AccountsDb's new readers should look like an
@@ -5381,14 +5348,6 @@ impl AccountsDb {
         (dead_slots, reclaimed_offsets)
     }
 
-    fn remove_dead_slots_metadata<'a>(&'a self, dead_slots_iter: impl Iterator<Item = &'a Slot>) {
-        let accounts_index_root_stats = self.accounts_index.clean_dead_slots(dead_slots_iter);
-
-        self.clean_accounts_stats
-            .latest_accounts_index_roots_stats
-            .update(&accounts_index_root_stats);
-    }
-
     /// lookup each pubkey in 'pubkeys' and unref it in the accounts index
     /// skip pubkeys that are in 'pubkeys_removed_from_accounts_index'
     fn unref_pubkeys<'a>(
@@ -6032,9 +5991,6 @@ impl AccountsDb {
     }
 
     pub fn add_root(&self, slot: Slot) -> AccountsAddRootTiming {
-        let mut index_time = Measure::start("index_add_root");
-        self.accounts_index.add_root(slot);
-        index_time.stop();
         let mut cache_time = Measure::start("cache_add_root");
         self.accounts_cache.add_root(slot);
         cache_time.stop();
@@ -6042,7 +5998,6 @@ impl AccountsDb {
         self.max_root.fetch_max(slot, Ordering::Relaxed);
 
         AccountsAddRootTiming {
-            index_us: index_time.as_us(),
             cache_us: cache_time.as_us(),
         }
     }
@@ -6543,11 +6498,6 @@ impl AccountsDb {
                 .insert(slot, storages[storage_index].clone());
         }
 
-        // Need to add these last, otherwise older updates will be cleaned
-        for storage in &storages {
-            self.accounts_index.add_root(storage.slot());
-        }
-
         self.set_storage_count_and_alive_bytes(total_accum.storage_info, &mut timings);
 
         let mut mark_obsolete_accounts_time = Measure::start("mark_obsolete_accounts_time");
@@ -6753,15 +6703,11 @@ impl AccountsDb {
     }
 
     pub fn print_accounts_stats(&self, label: &str) {
-        self.print_index(label);
+        self.print_index();
         self.print_count_and_status(label);
     }
 
-    fn print_index(&self, label: &str) {
-        let mut alive_roots: Vec<_> = self.accounts_index.all_alive_roots();
-        #[allow(clippy::stable_sort_primitive)]
-        alive_roots.sort();
-        info!("{label}: accounts_index alive_roots: {alive_roots:?}");
+    fn print_index(&self) {
         self.accounts_index.account_maps.iter().for_each(|map| {
             for pubkey in map.keys() {
                 self.accounts_index.get_and_then(&pubkey, |account_entry| {

@@ -278,7 +278,6 @@ pub type BankSlotDelta = SlotDelta<Result<()>>;
 pub struct SquashTiming {
     pub squash_accounts_ms: u64,
     pub squash_accounts_cache_ms: u64,
-    pub squash_accounts_index_ms: u64,
     pub squash_cache_ms: u64,
 }
 
@@ -286,7 +285,6 @@ impl AddAssign for SquashTiming {
     fn add_assign(&mut self, rhs: Self) {
         self.squash_accounts_ms += rhs.squash_accounts_ms;
         self.squash_accounts_cache_ms += rhs.squash_accounts_cache_ms;
-        self.squash_accounts_index_ms += rhs.squash_accounts_index_ms;
         self.squash_cache_ms += rhs.squash_cache_ms;
     }
 }
@@ -3087,14 +3085,12 @@ impl Bank {
         roots.push(self.slot());
         roots.extend(self.parents_iter().map(|parent| parent.slot()));
 
-        let mut total_index_us = 0;
         let mut total_cache_us = 0;
 
         let mut squash_accounts_time = Measure::start("squash_accounts_time");
         for slot in roots.iter().rev() {
             // root forks cannot be purged
             let add_root_timing = self.rc.accounts.add_root(*slot);
-            total_index_us += add_root_timing.index_us;
             total_cache_us += add_root_timing.cache_us;
         }
         squash_accounts_time.stop();
@@ -3110,7 +3106,6 @@ impl Bank {
 
         SquashTiming {
             squash_accounts_ms: squash_accounts_time.as_ms(),
-            squash_accounts_index_ms: total_index_us / 1000,
             squash_accounts_cache_ms: total_cache_us / 1000,
             squash_cache_ms: squash_cache_time.as_ms(),
         }
@@ -5331,7 +5326,9 @@ impl Bank {
     pub fn run_final_hash_calc(&self) {
         self.force_flush_accounts_cache();
         // note that this slot may not be a root
-        _ = self.verify_accounts(None);
+        _ = self.verify_accounts(
+            None,
+        );
     }
 
     /// Verify the account state as part of startup, typically from a snapshot.
@@ -5550,7 +5547,9 @@ impl Bank {
         let (verified_accounts, verify_accounts_time_us) = measure_us!({
             let should_verify_accounts = !self.rc.accounts.accounts_db.skip_initial_hash_calc;
             if should_verify_accounts {
-                self.verify_accounts(calculated_accounts_lt_hash)
+                self.verify_accounts(
+                    calculated_accounts_lt_hash,
+                )
             } else {
                 info!("Verifying accounts... Skipped.");
                 true
