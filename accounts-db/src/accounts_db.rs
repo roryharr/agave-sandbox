@@ -309,10 +309,11 @@ impl AccountFromStorage {
         // Any value of storage id in account info works fine when we want the 'normal' storage.
         let storage_id = 0;
         AccountFromStorage {
-            index_info: AccountInfo::new(
-                StorageLocation::AppendVec(storage_id, offset),
+            index_info: AccountInfo::new(StorageLocation::AppendVec(
+                storage_id,
+                offset,
                 account.is_zero_lamport(),
-            ),
+            )),
             pubkey: *account.pubkey(),
             data_len: account.data_len as u64,
         }
@@ -654,6 +655,10 @@ pub enum LoadedAccountAccessor {
     // StoredAccountInfo can't be held directly here due to its lifetime dependency on
     // AccountStorageEntry
     Stored(Option<(Arc<AccountStorageEntry>, usize)>),
+    /// A zero-lamport account reproduced directly from its index entry, without reading
+    /// storage. A zero-lamport account is fully determined: `AccountSharedData::default()`.
+    /// Holds the pubkey so callback-based consumers can report it.
+    ZeroLamport(Pubkey),
 }
 
 impl LoadedAccountAccessor {
@@ -676,6 +681,7 @@ impl LoadedAccountAccessor {
                          reset yet",
                     )
             }
+            LoadedAccountAccessor::ZeroLamport(_) => AccountSharedData::default(),
             _ => self.check_and_get_loaded_account(|loaded_account| loaded_account.take_account()),
         }
     }
@@ -705,6 +711,9 @@ impl LoadedAccountAccessor {
                      yet",
                 )
             }
+            LoadedAccountAccessor::ZeroLamport(_) => self
+                .get_loaded_account(callback)
+                .expect("a zero-lamport accessor always yields an account"),
         }
     }
 
@@ -727,6 +736,9 @@ impl LoadedAccountAccessor {
                             })
                     })
             }
+            LoadedAccountAccessor::ZeroLamport(pubkey) => {
+                Some(callback(LoadedAccount::ZeroLamport(pubkey)))
+            }
         }
     }
 }
@@ -734,13 +746,20 @@ impl LoadedAccountAccessor {
 pub enum LoadedAccount<'a> {
     Stored(StoredAccountInfo<'a>),
     Cached(Cow<'a, Arc<CachedAccount>>),
+    /// A zero-lamport account reproduced from its index entry without reading storage.
+    /// Every field other than the pubkey matches `AccountSharedData::default()`.
+    ZeroLamport(&'a Pubkey),
 }
+
+/// owner of a reproduced zero-lamport account; matches `AccountSharedData::default().owner()`
+const ZERO_LAMPORT_ACCOUNT_OWNER: Pubkey = Pubkey::new_from_array([0u8; 32]);
 
 impl LoadedAccount<'_> {
     pub fn pubkey(&self) -> &Pubkey {
         match self {
             LoadedAccount::Stored(stored_account) => stored_account.pubkey(),
             LoadedAccount::Cached(cached_account) => cached_account.pubkey(),
+            LoadedAccount::ZeroLamport(pubkey) => pubkey,
         }
     }
 
@@ -751,6 +770,7 @@ impl LoadedAccount<'_> {
                 Cow::Owned(cached_account) => cached_account.account.clone(),
                 Cow::Borrowed(cached_account) => cached_account.account.clone(),
             },
+            LoadedAccount::ZeroLamport(_) => AccountSharedData::default(),
         }
     }
 
@@ -758,6 +778,7 @@ impl LoadedAccount<'_> {
         match self {
             LoadedAccount::Stored(_) => false,
             LoadedAccount::Cached(_) => true,
+            LoadedAccount::ZeroLamport(_) => false,
         }
     }
 
@@ -772,30 +793,35 @@ impl ReadableAccount for LoadedAccount<'_> {
         match self {
             LoadedAccount::Stored(stored_account) => stored_account.lamports(),
             LoadedAccount::Cached(cached_account) => cached_account.account.lamports(),
+            LoadedAccount::ZeroLamport(_) => 0,
         }
     }
     fn data(&self) -> &[u8] {
         match self {
             LoadedAccount::Stored(stored_account) => stored_account.data(),
             LoadedAccount::Cached(cached_account) => cached_account.account.data(),
+            LoadedAccount::ZeroLamport(_) => &[],
         }
     }
     fn owner(&self) -> &Pubkey {
         match self {
             LoadedAccount::Stored(stored_account) => stored_account.owner(),
             LoadedAccount::Cached(cached_account) => cached_account.account.owner(),
+            LoadedAccount::ZeroLamport(_) => &ZERO_LAMPORT_ACCOUNT_OWNER,
         }
     }
     fn executable(&self) -> bool {
         match self {
             LoadedAccount::Stored(stored_account) => stored_account.executable(),
             LoadedAccount::Cached(cached_account) => cached_account.account.executable(),
+            LoadedAccount::ZeroLamport(_) => false,
         }
     }
     fn rent_epoch(&self) -> Epoch {
         match self {
             LoadedAccount::Stored(stored_account) => stored_account.rent_epoch(),
             LoadedAccount::Cached(cached_account) => cached_account.account.rent_epoch(),
+            LoadedAccount::ZeroLamport(_) => 0,
         }
     }
 }
@@ -2549,10 +2575,11 @@ impl AccountsDb {
                 // file_id is unused and can be anything. We will always be loading whatever storage is in the slot.
                 let file_id = 0;
                 stored_accounts.push(AccountFromStorage {
-                    index_info: AccountInfo::new(
-                        StorageLocation::AppendVec(file_id, offset),
+                    index_info: AccountInfo::new(StorageLocation::AppendVec(
+                        file_id,
+                        offset,
                         account.is_zero_lamport(),
-                    ),
+                    )),
                     pubkey: *account.pubkey(),
                     data_len: account.data_len as u64,
                 });
@@ -3472,7 +3499,7 @@ impl AccountsDb {
                 }
 
                 let mut account_accessor =
-                    self.get_account_accessor(slot, &account_info.storage_location());
+                    self.get_account_accessor(slot, pubkey, &account_info.storage_location());
 
                 let account_slot = account_accessor.get_loaded_account(|loaded_account| {
                     (pubkey, loaded_account.take_account(), slot)
@@ -3685,7 +3712,7 @@ impl AccountsDb {
             .get_with_and_then(pubkey, ancestors, true, |(slot, account_info)| {
                 let storage_location = account_info.storage_location();
                 let account_accessor =
-                    clone_in_lock.then(|| self.get_account_accessor(slot, &storage_location));
+                    clone_in_lock.then(|| self.get_account_accessor(slot, pubkey, &storage_location));
                 (slot, storage_location, account_accessor)
             })
     }
@@ -3808,10 +3835,15 @@ impl AccountsDb {
         // Failsafe for potential race conditions with other subsystems
         let mut num_acceptable_failed_iterations = 0;
         loop {
-            let account_accessor = self.get_account_accessor(slot, &storage_location);
+            let account_accessor = self.get_account_accessor(slot, pubkey, &storage_location);
             match account_accessor {
                 LoadedAccountAccessor::Stored(Some(_)) => {
                     // Great! There was no race, just return :) This is the most usual situation
+                    return Some((account_accessor, slot));
+                }
+                LoadedAccountAccessor::ZeroLamport(_) => {
+                    // Reproduced from the index without touching storage, so there is no race
+                    // to lose to clean/shrink. Return immediately.
                     return Some((account_accessor, slot));
                 }
                 LoadedAccountAccessor::Stored(None) => {
@@ -4010,10 +4042,17 @@ impl AccountsDb {
     fn get_account_accessor(
         &self,
         slot: Slot,
+        pubkey: &Pubkey,
         storage_location: &StorageLocation,
     ) -> LoadedAccountAccessor {
         match storage_location {
-            StorageLocation::AppendVec(store_id, offset) => {
+            StorageLocation::AppendVec(store_id, offset, is_zero_lamport) => {
+                if *is_zero_lamport {
+                    // A zero-lamport account is fully determined by the index entry; reproduce it
+                    // without reading storage. This also sidesteps the retry loop's zero-lamport
+                    // clean race, since no storage entry is consulted.
+                    return LoadedAccountAccessor::ZeroLamport(*pubkey);
+                }
                 let maybe_storage_entry = self
                     .storage
                     .get_account_storage_entry(slot, *store_id)
@@ -4805,6 +4844,7 @@ impl AccountsDb {
                                 (!account_info.is_zero_lamport()).then(|| {
                                     self.get_account_accessor(
                                         slot,
+                                        &pubkey,
                                         &account_info.storage_location(),
                                     )
                                     .get_loaded_account(|loaded_account| {
@@ -4837,7 +4877,7 @@ impl AccountsDb {
                     ancestors,
                     false,
                     |(slot, account_info)| {
-                        self.get_account_accessor(slot, &account_info.storage_location())
+                        self.get_account_accessor(slot, pubkey, &account_info.storage_location())
                             .get_loaded_account(|loaded_account| {
                                 cache_lt_hash
                                     .mix_out(&Self::lt_hash_account(&loaded_account, pubkey).0);
@@ -4874,7 +4914,7 @@ impl AccountsDb {
             self.accounts_index
                 .get_with_and_then(pubkey, ancestors, false, |(slot, account_info)| {
                     (!account_info.is_zero_lamport()).then(|| {
-                        self.get_account_accessor(slot, &account_info.storage_location())
+                        self.get_account_accessor(slot, pubkey, &account_info.storage_location())
                             .get_loaded_account(|loaded_account| loaded_account.lamports())
                             // SAFETY: The index said this pubkey exists, so
                             // there must be an account to load.
@@ -5807,10 +5847,11 @@ impl AccountsDb {
 
             let store_id = storage.id();
             for (i, offset) in stored_accounts_info.offsets.iter().enumerate() {
-                infos.push(AccountInfo::new(
-                    StorageLocation::AppendVec(store_id, *offset),
+                infos.push(AccountInfo::new(StorageLocation::AppendVec(
+                    store_id,
+                    *offset,
                     accounts_and_meta_to_store.is_zero_lamport(i),
-                ));
+                )));
             }
             storage.add_accounts(
                 stored_accounts_info.offsets.len(),
@@ -6106,10 +6147,11 @@ impl AccountsDb {
                 }
                 keyed_account_infos.push((
                     *account.pubkey,
-                    AccountInfo::new(
-                        StorageLocation::AppendVec(store_id, offset), // will never be cached
+                    AccountInfo::new(StorageLocation::AppendVec(
+                        store_id,
+                        offset, // will never be cached
                         is_account_zero_lamport,
-                    ),
+                    )),
                 ));
 
                 if !self.account_indexes.is_empty() {
@@ -6340,10 +6382,11 @@ impl AccountsDb {
                             for (slot2, account_info2) in slot_list.iter() {
                                 if *slot2 == slot {
                                     count += 1;
-                                    let ai = AccountInfo::new(
-                                        StorageLocation::AppendVec(store_id, offset), // will never be cached
+                                    let ai = AccountInfo::new(StorageLocation::AppendVec(
+                                        store_id,
+                                        offset, // will never be cached
                                         account.is_zero_lamport(),
-                                    );
+                                    ));
                                     assert_eq!(&ai, account_info2);
                                 }
                             }

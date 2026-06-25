@@ -18,22 +18,30 @@ pub type Offset = usize;
 /// specify where account data is located
 #[derive(Debug, PartialEq, Eq)]
 pub enum StorageLocation {
-    AppendVec(AccountsFileId, Offset),
+    /// `is_zero_lamport` lets the load path reproduce a zero-lamport account
+    /// (`AccountSharedData::default()`) without reading the storage at `(store_id, offset)`.
+    /// The location remains valid and is still needed by callers that read the storage.
+    AppendVec(AccountsFileId, Offset, bool),
 }
 
 impl StorageLocation {
     pub fn is_offset_equal(&self, other: &StorageLocation) -> bool {
         match self {
-            StorageLocation::AppendVec(_, offset) => match other {
-                StorageLocation::AppendVec(_, other_offset) => other_offset == offset,
+            StorageLocation::AppendVec(_, offset, _) => match other {
+                StorageLocation::AppendVec(_, other_offset, _) => other_offset == offset,
             },
         }
     }
     pub fn is_store_id_equal(&self, other: &StorageLocation) -> bool {
         match self {
-            StorageLocation::AppendVec(store_id, _) => match other {
-                StorageLocation::AppendVec(other_store_id, _) => other_store_id == store_id,
+            StorageLocation::AppendVec(store_id, _, _) => match other {
+                StorageLocation::AppendVec(other_store_id, _, _) => other_store_id == store_id,
             },
+        }
+    }
+    pub fn is_zero_lamport(&self) -> bool {
+        match self {
+            StorageLocation::AppendVec(_, _, is_zero_lamport) => *is_zero_lamport,
         }
     }
 }
@@ -77,20 +85,20 @@ impl IndexValue for AccountInfo {}
 impl DiskIndexValue for AccountInfo {}
 
 impl AccountInfo {
-    pub fn new(storage_location: StorageLocation, is_zero_lamport: bool) -> Self {
+    pub fn new(storage_location: StorageLocation) -> Self {
         let mut packed_offset_and_flags = PackedOffsetAndFlags::default();
         let store_id = match storage_location {
-            StorageLocation::AppendVec(store_id, offset) => {
+            StorageLocation::AppendVec(store_id, offset, is_zero_lamport) => {
                 packed_offset_and_flags.set_offset_reduced(Self::get_reduced_offset(offset));
                 assert_eq!(
                     Self::reduced_offset_to_offset(packed_offset_and_flags.offset_reduced()),
                     offset,
                     "illegal offset"
                 );
+                packed_offset_and_flags.set_is_zero_lamport(is_zero_lamport);
                 store_id
             }
         };
-        packed_offset_and_flags.set_is_zero_lamport(is_zero_lamport);
         Self {
             store_id,
             account_offset_and_flags: packed_offset_and_flags,
@@ -114,7 +122,7 @@ impl AccountInfo {
     }
 
     pub fn storage_location(&self) -> StorageLocation {
-        StorageLocation::AppendVec(self.store_id, self.offset())
+        StorageLocation::AppendVec(self.store_id, self.offset(), self.is_zero_lamport())
     }
 }
 
@@ -134,7 +142,7 @@ mod test {
             ALIGN_BOUNDARY_OFFSET,
             4 * ALIGN_BOUNDARY_OFFSET,
         ] {
-            let info = AccountInfo::new(StorageLocation::AppendVec(0, offset), true);
+            let info = AccountInfo::new(StorageLocation::AppendVec(0, offset, true));
             assert!(info.offset() == offset);
         }
     }
@@ -143,6 +151,6 @@ mod test {
     #[should_panic(expected = "illegal offset")]
     fn test_alignment() {
         let offset = 1; // not aligned
-        AccountInfo::new(StorageLocation::AppendVec(0, offset), true);
+        AccountInfo::new(StorageLocation::AppendVec(0, offset, true));
     }
 }

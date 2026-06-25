@@ -601,10 +601,11 @@ mod tests {
                             let storage_id = 0; // does not matter
                             let offset = 0; // does not matter
                             AccountFromStorage {
-                                index_info: AccountInfo::new(
-                                    StorageLocation::AppendVec(storage_id, offset),
+                                index_info: AccountInfo::new(StorageLocation::AppendVec(
+                                    storage_id,
+                                    offset,
                                     account.is_zero_lamport(),
-                                ),
+                                )),
                                 data_len: account.data.len() as u64,
                                 pubkey: *account.pubkey,
                             }
@@ -642,8 +643,7 @@ mod tests {
                             .zip(offsets.offsets.iter())
                             .for_each(|(account, offset)| {
                                 account.index_info = AccountInfo::new(
-                                    StorageLocation::AppendVec(0, *offset),
-                                    account.is_zero_lamport(),
+                                    StorageLocation::AppendVec(0, *offset, account.is_zero_lamport()),
                                 )
                             });
                     }
@@ -728,10 +728,11 @@ mod tests {
                     let storage_id = 0; // does not matter
                     let offset = 0; // does not matter
                     AccountFromStorage {
-                        index_info: AccountInfo::new(
-                            StorageLocation::AppendVec(storage_id, offset),
+                        index_info: AccountInfo::new(StorageLocation::AppendVec(
+                            storage_id,
+                            offset,
                             account.is_zero_lamport(),
-                        ),
+                        )),
                         data_len: account.data.len() as u64,
                         pubkey: *account.pubkey,
                     }
@@ -768,10 +769,12 @@ mod tests {
                                     {
                                         result.iter_mut().zip(offsets.offsets.iter()).for_each(
                                             |(account, offset)| {
-                                                account.index_info = AccountInfo::new(
-                                                    StorageLocation::AppendVec(0, *offset),
-                                                    account.is_zero_lamport(),
-                                                )
+                                                account.index_info =
+                                                    AccountInfo::new(StorageLocation::AppendVec(
+                                                        0,
+                                                        *offset,
+                                                        account.is_zero_lamport(),
+                                                    ))
                                             },
                                         );
                                     }
@@ -818,10 +821,11 @@ mod tests {
         let offset = 0; // does not matter
         let account = AccountSharedData::default();
         let account_from_storage = AccountFromStorage {
-            index_info: AccountInfo::new(
-                StorageLocation::AppendVec(storage_id, offset),
+            index_info: AccountInfo::new(StorageLocation::AppendVec(
+                storage_id,
+                offset,
                 account.is_zero_lamport(),
-            ),
+            )),
             data_len: account.data().len() as u64,
             pubkey: Pubkey::new_unique(),
         };
@@ -857,8 +861,7 @@ mod tests {
         let accounts_db = AccountsDb::new_single_for_tests();
         let all_accounts: Vec<_> = iter::repeat_with(|| AccountFromStorage {
             index_info: AccountInfo::new(
-                StorageLocation::AppendVec(0, 0), // id and offset do not matter
-                false,
+                StorageLocation::AppendVec(0, 0, false), // id and offset do not matter
             ),
             data_len: 0,
             pubkey: Pubkey::new_unique(),
@@ -884,8 +887,7 @@ mod tests {
         let accounts_db = AccountsDb::new_single_for_tests();
         let all_accounts: Vec<_> = iter::repeat_with(|| AccountFromStorage {
             index_info: AccountInfo::new(
-                StorageLocation::AppendVec(0, 0), // id and offset do not matter
-                false,
+                StorageLocation::AppendVec(0, 0, false), // id and offset do not matter
             ),
             data_len: 0,
             pubkey: Pubkey::new_unique(),

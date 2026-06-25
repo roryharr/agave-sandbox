@@ -275,10 +275,11 @@ pub(crate) fn append_single_account_with_default_hash(
     }
 
     if let Some(index) = add_to_index {
-        let account_info = AccountInfo::new(
-            StorageLocation::AppendVec(storage.id(), stored_accounts_info.offsets[0]),
+        let account_info = AccountInfo::new(StorageLocation::AppendVec(
+            storage.id(),
+            stored_accounts_info.offsets[0],
             account.lamports() == 0,
-        );
+        ));
         index.upsert(
             slot,
             slot,
@@ -2936,10 +2937,10 @@ fn test_delete_dependencies() {
     let key0 = Pubkey::new_from_array([0u8; 32]);
     let key1 = Pubkey::new_from_array([1u8; 32]);
     let key2 = Pubkey::new_from_array([2u8; 32]);
-    let info0 = AccountInfo::new(StorageLocation::AppendVec(0, 0), true);
-    let info1 = AccountInfo::new(StorageLocation::AppendVec(1, 0), true);
-    let info2 = AccountInfo::new(StorageLocation::AppendVec(2, 0), true);
-    let info3 = AccountInfo::new(StorageLocation::AppendVec(3, 0), true);
+    let info0 = AccountInfo::new(StorageLocation::AppendVec(0, 0, true));
+    let info1 = AccountInfo::new(StorageLocation::AppendVec(1, 0, true));
+    let info2 = AccountInfo::new(StorageLocation::AppendVec(2, 0, true));
+    let info3 = AccountInfo::new(StorageLocation::AppendVec(3, 0, true));
     let mut reclaims = ReclaimsSlotList::new();
     accounts_index.upsert(
         0,
@@ -3836,7 +3837,7 @@ impl AccountsDb {
                 assert_eq!(slot_found, slot);
 
                 let storage_location = account_info.storage_location();
-                let mut accessor = self.get_account_accessor(slot, &storage_location);
+                let mut accessor = self.get_account_accessor(slot, pubkey, &storage_location);
 
                 accessor.check_and_get_loaded_account_shared_data()
             },
@@ -5375,7 +5376,7 @@ fn test_filter_zero_lamport_clean_for_incremental_snapshots() {
     }
 
     let do_test = |test_params: TestParameters| {
-        let account_info = AccountInfo::new(StorageLocation::AppendVec(42, 128), true);
+        let account_info = AccountInfo::new(StorageLocation::AppendVec(42, 128, true));
         let pubkey = solana_pubkey::new_rand();
         let mut key_set = HashSet::default();
         key_set.insert(pubkey);
@@ -6337,10 +6338,11 @@ fn populate_index(db: &AccountsDb, slots: Range<Slot>) {
             storage
                 .accounts
                 .scan_accounts(&mut reader, |offset, account| {
-                    let info = AccountInfo::new(
-                        StorageLocation::AppendVec(storage.id(), offset),
+                    let info = AccountInfo::new(StorageLocation::AppendVec(
+                        storage.id(),
+                        offset,
                         account.is_zero_lamport(),
-                    );
+                    ));
                     db.accounts_index.upsert(
                         slot,
                         slot,
