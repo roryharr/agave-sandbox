@@ -46,9 +46,9 @@ use {
         accounts_file::{AccountsFile, AccountsFileProvider},
         accounts_hash::{AccountLtHash, AccountsLtHash, ZERO_LAMPORT_ACCOUNT_LT_HASH},
         accounts_index::{
-            AccountSecondaryIndexes, AccountsIndex, AccountsIndexRootsStats,
-            AccountsIndexScanResult, IndexKey, ReclaimsSlotList, RefCount, ScanFilter, SlotList,
-            Startup, UpsertReclaim, in_mem_accounts_index::StartupStats,
+            AccountSecondaryIndexes, AccountsIndex, AccountsIndexScanResult, IndexKey,
+            ReclaimsSlotList, RefCount, ScanFilter, SlotList, Startup, UpsertReclaim,
+            in_mem_accounts_index::StartupStats,
         },
         accounts_scan::{ScanConfig, ScanError, ScanGuard, ScanResult, ScanTracker},
         accounts_update_notifier_interface::{AccountForGeyser, AccountsUpdateNotifier},
@@ -2190,8 +2190,24 @@ impl AccountsDb {
                 i64
             ),
             (
-                "roots_added",
-                self.accounts_index.roots_added.swap(0, Ordering::Relaxed),
+                "clean_unref_from_storage_us",
+                self.clean_accounts_stats
+                    .clean_unref_from_storage_us
+                    .swap(0, Ordering::Relaxed),
+                i64
+            ),
+            (
+                "append_vecs_open",
+                append_vec::APPEND_VEC_STATS
+                    .files_open
+                    .load(Ordering::Relaxed),
+                i64
+            ),
+            (
+                "append_vecs_dirty",
+                append_vec::APPEND_VEC_STATS
+                    .files_dirty
+                    .load(Ordering::Relaxed),
                 i64
             ),
             (
@@ -2199,11 +2215,6 @@ impl AccountsDb {
                 self.accounts_index
                     .purge_older_root_entries_one_slot_list
                     .swap(0, Ordering::Relaxed),
-                i64
-            ),
-            (
-                "roots_removed",
-                self.accounts_index.roots_removed.swap(0, Ordering::Relaxed),
                 i64
             ),
             (
@@ -4172,23 +4183,6 @@ impl AccountsDb {
         removed_slots: impl Iterator<Item = &'a Slot> + Clone,
         purge_stats: &PurgeStats,
     ) {
-        // Check all slots `removed_slots` are no longer "relevant" roots.
-        // Note that the slots here could have been rooted slots, but if they're passed here
-        // for removal it means:
-        // 1) All updates in that old root have been outdated by updates in newer roots
-        // 2) Those slots/roots should have already been purged from the accounts index root
-        // tracking metadata via `accounts_index.clean_dead_slot()`.
-        let mut safety_checks_elapsed = Measure::start("safety_checks_elapsed");
-        assert!(
-            self.accounts_index
-                .get_rooted_from_list(removed_slots.clone())
-                .is_empty()
-        );
-        safety_checks_elapsed.stop();
-        purge_stats
-            .safety_checks_elapsed
-            .fetch_add(safety_checks_elapsed.as_us(), Ordering::Relaxed);
-
         let mut total_removed_stored_bytes = 0;
         let mut all_removed_slot_storages = vec![];
 
@@ -5463,7 +5457,6 @@ impl AccountsDb {
         };
 
         //Unref the accounts from storage
-        let mut accounts_index_root_stats = AccountsIndexRootsStats::default();
         let mut measure_unref = Measure::start("unref_from_storage");
 
         if let Some(purged_account_slots) = purged_account_slots {
@@ -5474,11 +5467,9 @@ impl AccountsDb {
             );
         }
         measure_unref.stop();
-        accounts_index_root_stats.clean_unref_from_storage_us += measure_unref.as_us();
-
         self.clean_accounts_stats
-            .latest_accounts_index_roots_stats
-            .update(&accounts_index_root_stats);
+            .clean_unref_from_storage_us
+            .fetch_add(measure_unref.as_us(), Ordering::Relaxed);
 
         measure.stop();
         self.clean_accounts_stats
@@ -5592,8 +5583,6 @@ impl AccountsDb {
         let slot = accounts.target_slot();
         let num_accounts_stored = accounts.len();
         let stats = &self.store_accounts_for_shrink_stats;
-
-        debug_assert!(self.accounts_index.is_alive_root(slot));
 
         // Write the accounts to storage
         let write_accounts_time = Measure::start("write_accounts");

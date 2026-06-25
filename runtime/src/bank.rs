@@ -5326,9 +5326,7 @@ impl Bank {
     pub fn run_final_hash_calc(&self) {
         self.force_flush_accounts_cache();
         // note that this slot may not be a root
-        _ = self.verify_accounts(
-            None,
-        );
+        _ = self.verify_accounts(None);
     }
 
     /// Verify the account state as part of startup, typically from a snapshot.
@@ -5547,9 +5545,7 @@ impl Bank {
         let (verified_accounts, verify_accounts_time_us) = measure_us!({
             let should_verify_accounts = !self.rc.accounts.accounts_db.skip_initial_hash_calc;
             if should_verify_accounts {
-                self.verify_accounts(
-                    calculated_accounts_lt_hash,
-                )
+                self.verify_accounts(calculated_accounts_lt_hash)
             } else {
                 info!("Verifying accounts... Skipped.");
                 true

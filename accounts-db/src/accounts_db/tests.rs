@@ -4153,7 +4153,6 @@ fn test_accounts_db_cache_clean_dead_slots() {
     }
 }
 
-
 #[test]
 fn test_accounts_db_cache_clean() {
     let (accounts_db, keys, slots, _) = setup_accounts_db_cache_clean(10, None, None);

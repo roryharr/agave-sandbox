@@ -3,10 +3,7 @@
 //! Old key values are removed from the lesser values and do not accumulate.
 
 mod iterators;
-use {
-    bv::BitVec, iterators::RollingBitFieldOnesIter,
-    solana_nohash_hasher::IntSet,
-};
+use {bv::BitVec, iterators::RollingBitFieldOnesIter, solana_nohash_hasher::IntSet};
 
 #[cfg_attr(feature = "frozen-abi", derive(AbiExample))]
 #[derive(Clone)]
@@ -308,7 +305,10 @@ impl RollingBitField {
 
 #[cfg(test)]
 mod tests {
-    use {super::*, log::*, solana_measure::measure::Measure, std::collections::HashSet, solana_clock::Slot,};
+    use {
+        super::*, log::*, solana_clock::Slot, solana_measure::measure::Measure,
+        std::collections::HashSet,
+    };
 
     impl RollingBitField {
         pub fn clear(&mut self) {
