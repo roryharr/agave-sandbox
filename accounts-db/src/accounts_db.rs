@@ -4273,16 +4273,6 @@ impl AccountsDb {
             ("write_accounts_us", flush_stats.write_accounts_us.0, i64),
             ("update_index_us", flush_stats.update_index_us.0, i64),
             ("handle_reclaims_us", flush_stats.handle_reclaims_us.0, i64),
-            (
-                "mark_zero_lamport_single_ref_accounts_us",
-                flush_stats.mark_zero_lamport_single_ref_accounts_us.0,
-                i64
-            ),
-            (
-                "num_zero_lamport_single_ref_accounts_marked",
-                flush_stats.num_zero_lamport_single_ref_accounts_marked.0,
-                i64
-            ),
             ("num_reclaims", flush_stats.num_reclaims.0, i64),
             (
                 "num_obsolete_slots_removed",
@@ -4505,8 +4495,9 @@ impl AccountsDb {
 
             // If the above sizing function is correct, just one AppendVec is enough to hold
             // all the data for the slot
-            assert!(self.storage.get_slot_storage_entry(slot).is_some());
-            self.reopen_storage_as_readonly_shrinking_in_progress_ok(slot);
+            if self.storage.get_slot_storage_entry(slot).is_some() {
+                self.reopen_storage_as_readonly_shrinking_in_progress_ok(slot);
+            }
         }
 
         // Remove this slot from the cache, which will to AccountsDb's new readers should look like an
@@ -4528,18 +4519,17 @@ impl AccountsDb {
         let (_, disk_index_write_through_us) =
             measure_us!(self.accounts_index.write_through_pubkeys(pubkeys_removed));
         flush_stats.disk_index_write_through_us = Saturating(disk_index_write_through_us);
-        // Add `accounts` to uncleaned_pubkeys since they were written to storage
-        // and should be visited by `clean`.
-        // If old slots were reclaimed, accounts were already cleaned,
-        // but zero lamports need to be visited during clean for full removal.
         if reclaim_method == UpsertReclaim::ReclaimOldSlots {
-            self.uncleaned_pubkeys.entry(slot).or_default().extend(
+            // Zero lamport accounts were deleted from the index by update_index_for_flush, so
+            // their secondary index entries may be purgeable.
+            self.purge_secondary_indexes_for_dead_keys(
                 accounts
-                    .into_iter()
-                    .filter(|(_pubkey, account)| account.is_zero_lamport())
-                    .map(|(pubkey, _account)| pubkey),
+                    .iter()
+                    .filter_map(|(pubkey, account)| account.is_zero_lamport().then_some(*pubkey)),
             );
         } else {
+            // Add `accounts` to uncleaned_pubkeys since they were written to storage
+            // without cleaning and should be visited by `clean`.
             self.uncleaned_pubkeys
                 .entry(slot)
                 .or_default()
@@ -4873,8 +4863,16 @@ impl AccountsDb {
 
             (start..end).for_each(|i| {
                 let info: AccountInfo = infos[i];
-                let old_slot = accounts.slot(i);
                 let pubkey = accounts.pubkey(i);
+                if info.is_zero_lamport() && reclaim == UpsertReclaim::ReclaimOldSlots {
+                    self.accounts_index.delete(pubkey, &mut reclaims);
+                    // The account's own newest entry: a reclaim at the flushed slot,
+                    // which handle_reclaims records as a tombstone in the flushed
+                    // storage instead of marking it obsolete
+                    reclaims.push((target_slot, info));
+                    return;
+                }
+                let old_slot = accounts.slot(i);
                 self.accounts_index.upsert(
                     target_slot,
                     old_slot,
@@ -5338,11 +5336,6 @@ impl AccountsDb {
         let infos = self.write_accounts_to_storage(slot, storage, &accounts);
         let write_accounts_us = write_accounts_time.end_as_us();
 
-        let mark_zero_lamport_time = Measure::start("mark_zero_lamport");
-        let num_zero_lamport_single_ref_accounts_marked =
-            self.mark_zero_lamport_single_ref_accounts_for_flush(&infos, storage, reclaim_handling);
-        let mark_zero_lamport_us = mark_zero_lamport_time.end_as_us();
-
         let update_index_time = Measure::start("update_index");
         let reclaims = self.update_index_for_flush(infos, &accounts, reclaim_handling);
         let update_index_us = update_index_time.end_as_us();
@@ -5376,8 +5369,6 @@ impl AccountsDb {
             write_accounts_us,
             update_index_us,
             handle_reclaims_us,
-            mark_zero_lamport_single_ref_accounts_us: mark_zero_lamport_us,
-            num_zero_lamport_single_ref_accounts_marked,
             num_reclaims,
             num_obsolete_slots_removed,
             num_obsolete_bytes_removed,
@@ -5501,44 +5492,6 @@ impl AccountsDb {
         );
 
         infos
-    }
-
-    /// Marks zero lamport single reference accounts in the storage during store_accounts_for_flush
-    ///
-    /// Returns the number of accounts marked.
-    fn mark_zero_lamport_single_ref_accounts_for_flush(
-        &self,
-        account_infos: &[AccountInfo],
-        storage: &AccountStorageEntry,
-        reclaim_handling: UpsertReclaim,
-    ) -> u64 {
-        let mut num_marked = 0;
-        // If the reclaim handling is `ReclaimOldSlots`, then all zero lamport accounts are single
-        // ref accounts and they need to be inserted into the storages zero lamport single ref
-        // accounts list
-        // For other values of reclaim handling, there are no zero lamport single ref accounts
-        // so nothing needs to be done in this function
-        if reclaim_handling == UpsertReclaim::ReclaimOldSlots {
-            for account_info in account_infos {
-                if account_info.is_zero_lamport() {
-                    storage.insert_zero_lamport_single_ref_account_offset(account_info.offset());
-                    num_marked += 1;
-                }
-            }
-
-            // If any zero lamport accounts were marked, the storage may be valid for shrinking
-            if num_marked > 0
-                && self.is_candidate_for_shrink(storage)
-                && self.is_shrinking_productive(storage)
-            {
-                self.shrink_candidate_slots
-                    .lock()
-                    .unwrap()
-                    .insert(storage.slot);
-            }
-        }
-
-        num_marked
     }
 
     fn report_store_timings(&self) {
