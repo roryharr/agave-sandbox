@@ -72,7 +72,7 @@ use {
     rayon::{ThreadPool, prelude::*},
     seqlock::SeqLock,
     smallvec::SmallVec,
-    solana_account::{Account, AccountSharedData, ReadableAccount},
+    solana_account::{Account, AccountSharedData, DataChunks, ReadableAccount},
     solana_clock::{BankId, Epoch, Slot},
     solana_epoch_schedule::EpochSchedule,
     solana_lattice_hash::lt_hash::LtHash,
@@ -784,6 +784,18 @@ impl ReadableAccount for LoadedAccount<'_> {
         match self {
             LoadedAccount::Stored(stored_account) => stored_account.data(),
             LoadedAccount::Cached(cached_account) => cached_account.account.data(),
+        }
+    }
+    fn data_len(&self) -> usize {
+        match self {
+            LoadedAccount::Stored(stored_account) => stored_account.data_len(),
+            LoadedAccount::Cached(cached_account) => cached_account.account.data_len(),
+        }
+    }
+    fn data_chunks(&self) -> DataChunks<'_> {
+        match self {
+            LoadedAccount::Stored(stored_account) => stored_account.data_chunks(),
+            LoadedAccount::Cached(cached_account) => cached_account.account.data_chunks(),
         }
     }
     fn owner(&self) -> &Pubkey {
@@ -4417,17 +4429,19 @@ impl AccountsDb {
         // collect lamports into buffer to hash
         buffer.extend_from_slice(&account.lamports().to_le_bytes());
 
-        let data = account.data();
-        if data.len() > DATA_SIZE {
+        if account.data_len() > DATA_SIZE {
             // For larger accounts whose data can't fit into the buffer, update the hash now.
             hasher.update(&buffer);
             buffer.clear();
 
-            // hash account's data
-            hasher.update(data);
+            // hash account's data, chunk by chunk so a chunked underlying
+            // representation doesn't have to materialize a contiguous slice
+            for chunk in account.data_chunks() {
+                hasher.update(chunk);
+            }
         } else {
             // For small accounts whose data can fit into the buffer, append it to the buffer.
-            buffer.extend_from_slice(data);
+            buffer.extend_from_slice(account.data());
         }
 
         // collect executable, owner, and pubkey into buffer to hash

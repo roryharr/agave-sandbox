@@ -174,6 +174,12 @@ impl AccountData {
         self.data.is_empty()
     }
 
+    /// Iterates the bytes as contiguous chunks whose concatenation is
+    /// `as_slice()`, without requiring the whole range to be contiguous.
+    pub fn data_chunks(&self) -> DataChunks<'_> {
+        DataChunks::single(self.as_slice())
+    }
+
     /// Returns true if the underlying bytes are shared with another clone.
     pub fn is_shared(&self) -> bool {
         Arc::strong_count(&self.data) > 1
@@ -290,6 +296,32 @@ impl From<Arc<Vec<u8>>> for AccountData {
     }
 }
 
+/// Iterator over account data as contiguous chunks.
+///
+/// The concatenation of the chunks is the account data. Consumers that can
+/// process the data incrementally (hashing, writing to a file) should iterate
+/// chunks instead of requiring one contiguous slice, so that a chunked
+/// underlying representation doesn't have to materialize.
+#[derive(Debug)]
+pub struct DataChunks<'a> {
+    chunk: Option<&'a [u8]>,
+}
+
+impl<'a> DataChunks<'a> {
+    /// A single contiguous chunk.
+    pub fn single(data: &'a [u8]) -> Self {
+        Self { chunk: Some(data) }
+    }
+}
+
+impl<'a> Iterator for DataChunks<'a> {
+    type Item = &'a [u8];
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.chunk.take()
+    }
+}
+
 /// Compares two ReadableAccounts
 ///
 /// Returns true if accounts are essentially equivalent as in all fields are equivalent.
@@ -359,6 +391,15 @@ pub trait WritableAccount: ReadableAccount {
 pub trait ReadableAccount: Sized {
     fn lamports(&self) -> u64;
     fn data(&self) -> &[u8];
+    /// The length of the account data, without requiring it to be contiguous.
+    fn data_len(&self) -> usize {
+        self.data().len()
+    }
+    /// Iterates the account data as contiguous chunks whose concatenation is
+    /// `data()`, without requiring the whole range to be contiguous.
+    fn data_chunks(&self) -> DataChunks<'_> {
+        DataChunks::single(self.data())
+    }
     fn owner(&self) -> &Pubkey;
     fn executable(&self) -> bool;
     fn rent_epoch(&self) -> Epoch;
@@ -374,6 +415,12 @@ where
     }
     fn data(&self) -> &[u8] {
         self.deref().data()
+    }
+    fn data_len(&self) -> usize {
+        self.deref().data_len()
+    }
+    fn data_chunks(&self) -> DataChunks<'_> {
+        self.deref().data_chunks()
     }
     fn owner(&self) -> &Pubkey {
         self.deref().owner()
@@ -452,6 +499,12 @@ impl ReadableAccount for AccountSharedData {
     }
     fn data(&self) -> &[u8] {
         self.data.as_slice()
+    }
+    fn data_len(&self) -> usize {
+        self.data.len()
+    }
+    fn data_chunks(&self) -> DataChunks<'_> {
+        self.data.data_chunks()
     }
     fn owner(&self) -> &Pubkey {
         &self.owner

@@ -30,6 +30,7 @@ use {
     },
     log::*,
     meta::{AccountMeta, StoredAccountNoData, StoredMeta},
+    smallvec::SmallVec,
     solana_account::{AccountSharedData, ReadableAccount},
     solana_pubkey::Pubkey,
     solana_system_interface::MAX_PERMITTED_DATA_LENGTH,
@@ -997,19 +998,26 @@ impl AppendVec {
 
                 let stored_meta = StoredMeta {
                     pubkey: *account.pubkey(),
-                    data_len: account.data().len() as u64,
+                    data_len: account.data_len() as u64,
                     write_version_obsolete: 0,
                 };
                 let stored_meta_ptr = ptr::from_ref(&stored_meta).cast();
                 let account_meta_ptr = ptr::from_ref(&account_meta).cast();
                 let hash_ptr = ObsoleteAccountHash::ZEROED.0.as_ptr();
-                let data_ptr = account.data().as_ptr();
-                let ptrs = [
+                let mut ptrs = SmallVec::<[(*const u8, usize); 4]>::from_slice(&[
                     (stored_meta_ptr, mem::size_of::<StoredMeta>()),
                     (account_meta_ptr, mem::size_of::<AccountMeta>()),
                     (hash_ptr, mem::size_of::<ObsoleteAccountHash>()),
-                    (data_ptr, stored_meta.data_len as usize),
-                ];
+                ]);
+                for chunk in account.data_chunks() {
+                    // append_ptrs_locked u64-aligns before each entry, so a
+                    // non-final chunk whose length isn't a multiple of 8 would
+                    // get padding inserted after it, corrupting the data.
+                    debug_assert!(
+                        ptrs.len() == 3 || ptrs.last().unwrap().1 % mem::size_of::<u64>() == 0
+                    );
+                    ptrs.push((chunk.as_ptr(), chunk.len()));
+                }
                 if let Some(start_offset) = self
                     .append_ptrs_locked(&mut offset, &ptrs)
                     .expect("must append data to append_vec")

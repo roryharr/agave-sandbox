@@ -7,7 +7,7 @@ use {
         is_zero_lamport::IsZeroLamport,
         utils::create_account_shared_data,
     },
-    solana_account::{AccountSharedData, ReadableAccount},
+    solana_account::{AccountSharedData, DataChunks, ReadableAccount},
     solana_clock::{Epoch, Slot},
     solana_pubkey::Pubkey,
     std::{
@@ -68,6 +68,18 @@ impl ReadableAccount for AccountForStorage<'_> {
         match self {
             AccountForStorage::AddressAndAccount((_pubkey, account)) => account.data(),
             AccountForStorage::StoredAccountInfo(account) => account.data(),
+        }
+    }
+    fn data_len(&self) -> usize {
+        match self {
+            AccountForStorage::AddressAndAccount((_pubkey, account)) => account.data_len(),
+            AccountForStorage::StoredAccountInfo(account) => account.data_len(),
+        }
+    }
+    fn data_chunks(&self) -> DataChunks<'_> {
+        match self {
+            AccountForStorage::AddressAndAccount((_pubkey, account)) => account.data_chunks(),
+            AccountForStorage::StoredAccountInfo(account) => account.data_chunks(),
         }
     }
     fn owner(&self) -> &Pubkey {

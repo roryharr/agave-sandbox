@@ -2436,6 +2436,24 @@ fn test_hash_stored_account() {
         expected_account_hash,
         "Account-based hashing must be consistent with StoredAccountInfo-based one."
     );
+
+    // Data larger than the hasher's stack buffer is hashed through
+    // data_chunks; it must produce the same hash as the contiguous path.
+    let data = vec![0x69; 1024];
+    let stored_account = StoredAccountInfo {
+        data: &data,
+        ..stored_account
+    };
+    let account = create_account_shared_data(&stored_account);
+    assert_eq!(
+        AccountsDb::lt_hash_account(&stored_account, stored_account.pubkey())
+            .0
+            .checksum(),
+        AccountsDb::lt_hash_account(&account, stored_account.pubkey())
+            .0
+            .checksum(),
+        "chunked hashing of large accounts must be consistent with contiguous hashing"
+    );
 }
 
 #[test]
