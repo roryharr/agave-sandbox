@@ -2795,10 +2795,13 @@ mod tests {
 
         assert_eq!(actual_hit_account.as_ref().unwrap().0, expected_hit_account);
         assert_eq!(actual_hit_account.as_ref().unwrap().1, 1);
-        assert!(Arc::ptr_eq(
-            &actual_hit_account.unwrap().0.data_clone(),
-            &expected_hit_account.data_clone()
-        ));
+        assert!(
+            actual_hit_account
+                .unwrap()
+                .0
+                .data_clone()
+                .ptr_eq(&expected_hit_account.data_clone())
+        );
 
         // reload doesn't affect this
         account_loader.load_account(&hit_address);
@@ -2806,10 +2809,13 @@ mod tests {
 
         assert_eq!(actual_hit_account.as_ref().unwrap().0, expected_hit_account);
         assert_eq!(actual_hit_account.as_ref().unwrap().1, 1);
-        assert!(Arc::ptr_eq(
-            &actual_hit_account.unwrap().0.data_clone(),
-            &expected_hit_account.data_clone()
-        ));
+        assert!(
+            actual_hit_account
+                .unwrap()
+                .0
+                .data_clone()
+                .ptr_eq(&expected_hit_account.data_clone())
+        );
 
         // load misses accounts-db, placeholder is inserted
         account_loader.load_account(&miss_address);
@@ -2819,19 +2825,24 @@ mod tests {
             .unwrap()
             .clone();
 
-        assert!(!Arc::ptr_eq(
-            &expected_miss_account.0.data_clone(),
-            &expected_hit_account.data_clone()
-        ));
+        assert!(
+            !expected_miss_account
+                .0
+                .data_clone()
+                .ptr_eq(&expected_hit_account.data_clone())
+        );
 
         // reload keeps the same placeholder
         account_loader.load_account(&miss_address);
         let actual_miss_account = account_loader.loaded_accounts.get(&miss_address);
 
         assert_eq!(actual_miss_account, Some(&expected_miss_account));
-        assert!(Arc::ptr_eq(
-            &actual_miss_account.unwrap().0.data_clone(),
-            &expected_miss_account.0.data_clone()
-        ));
+        assert!(
+            actual_miss_account
+                .unwrap()
+                .0
+                .data_clone()
+                .ptr_eq(&expected_miss_account.0.data_clone())
+        );
     }
 }

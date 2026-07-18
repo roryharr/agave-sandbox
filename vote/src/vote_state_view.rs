@@ -12,10 +12,10 @@ use {
     core::fmt::Debug,
     field_frames::{CommissionFrame, CommissionView},
     frame_v4::VoteStateFrameV4,
+    solana_account::AccountData,
     solana_clock::{Epoch, Slot},
     solana_pubkey::Pubkey,
     solana_vote_interface::state::{BLS_PUBLIC_KEY_COMPRESSED_SIZE, BlockTimestamp, Lockout},
-    std::sync::Arc,
 };
 #[cfg(feature = "dev-context-only-utils")]
 use {
@@ -69,20 +69,21 @@ enum Simd185Field {
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "frozen-abi", derive(AbiExample))]
 pub struct VoteStateView {
-    data: Arc<Vec<u8>>,
+    data: AccountData,
     frame: VoteStateFrame,
 }
 
 impl VoteStateView {
-    pub fn try_new(data: Arc<Vec<u8>>) -> Result<Self> {
-        let frame = VoteStateFrame::try_new(data.as_ref())?;
+    pub fn try_new(data: impl Into<AccountData>) -> Result<Self> {
+        let data = data.into();
+        let frame = VoteStateFrame::try_new(data.as_slice())?;
         Ok(Self { data, frame })
     }
 
     pub fn node_pubkey(&self) -> &Pubkey {
         let offset = self.frame.offset(Field::NodePubkey);
         // SAFETY: `frame` was created from `data`.
-        unsafe { &*(self.data.as_ptr().add(offset) as *const Pubkey) }
+        unsafe { &*(self.data.as_slice().as_ptr().add(offset) as *const Pubkey) }
     }
 
     pub fn commission(&self) -> u8 {
@@ -95,7 +96,7 @@ impl VoteStateView {
             .frame
             .simd185_field_offset(Simd185Field::BlockRevenueCollector)?;
         // SAFETY: `frame` was created from `data`.
-        unsafe { Some(&*(self.data.as_ptr().add(offset) as *const Pubkey)) }
+        unsafe { Some(&*(self.data.as_slice().as_ptr().add(offset) as *const Pubkey)) }
     }
 
     pub fn inflation_rewards_collector(&self) -> Option<&Pubkey> {
@@ -103,7 +104,7 @@ impl VoteStateView {
             .frame
             .simd185_field_offset(Simd185Field::InflationRewardsCollector)?;
         // SAFETY: `frame` was created from `data`.
-        unsafe { Some(&*(self.data.as_ptr().add(offset) as *const Pubkey)) }
+        unsafe { Some(&*(self.data.as_slice().as_ptr().add(offset) as *const Pubkey)) }
     }
 
     pub fn inflation_rewards_commission(&self) -> u16 {
@@ -174,7 +175,7 @@ impl VoteStateView {
     pub fn last_timestamp(&self) -> BlockTimestamp {
         let offset = self.frame.offset(Field::LastTimestamp);
         // SAFETY: `frame` was created from `data`.
-        let buffer = &self.data[offset..];
+        let buffer = &self.data.as_slice()[offset..];
         let mut cursor = std::io::Cursor::new(buffer);
         BlockTimestamp {
             slot: solana_serialize_utils::cursor::read_u64(&mut cursor).unwrap(),
@@ -185,7 +186,10 @@ impl VoteStateView {
     fn inflation_rewards_commission_view(&self) -> CommissionView<'_> {
         let offset = self.frame.offset(Field::Commission);
         // SAFETY: `frame` was created from `data`.
-        CommissionView::new(self.frame.commission_frame(), &self.data[offset..])
+        CommissionView::new(
+            self.frame.commission_frame(),
+            &self.data.as_slice()[offset..],
+        )
     }
 
     fn block_revenue_commission_view(&self) -> Option<CommissionView<'_>> {
@@ -195,7 +199,7 @@ impl VoteStateView {
         // SAFETY: `frame` was created from `data`.
         Some(CommissionView::new(
             CommissionFrame::new_bps(),
-            &self.data[offset..],
+            &self.data.as_slice()[offset..],
         ))
     }
 
@@ -204,7 +208,9 @@ impl VoteStateView {
             .frame
             .simd185_field_offset(Simd185Field::PendingDelegatorRewards)?;
         // SAFETY: `frame` was created from `data`.
-        Some(PendingDelegatorRewardsView::new(&self.data[offset..]))
+        Some(PendingDelegatorRewardsView::new(
+            &self.data.as_slice()[offset..],
+        ))
     }
 
     fn bls_pubkey_compressed_view(&self) -> Option<BlsPubkeyCompressedView<'_>> {
@@ -213,31 +219,43 @@ impl VoteStateView {
             .simd185_field_offset(Simd185Field::BlsPubkeyCompressed)?;
         let frame = self.frame.bls_pubkey_compressed_frame()?;
         // SAFETY: `frame` was created from `data`.
-        Some(BlsPubkeyCompressedView::new(frame, &self.data[offset..]))
+        Some(BlsPubkeyCompressedView::new(
+            frame,
+            &self.data.as_slice()[offset..],
+        ))
     }
 
     fn votes_view(&self) -> ListView<'_, VotesFrame> {
         let offset = self.frame.offset(Field::Votes);
         // SAFETY: `frame` was created from `data`.
-        ListView::new(self.frame.votes_frame(), &self.data[offset..])
+        ListView::new(self.frame.votes_frame(), &self.data.as_slice()[offset..])
     }
 
     fn root_slot_view(&self) -> RootSlotView<'_> {
         let offset = self.frame.offset(Field::RootSlot);
         // SAFETY: `frame` was created from `data`.
-        RootSlotView::new(self.frame.root_slot_frame(), &self.data[offset..])
+        RootSlotView::new(
+            self.frame.root_slot_frame(),
+            &self.data.as_slice()[offset..],
+        )
     }
 
     fn authorized_voters_view(&self) -> ListView<'_, AuthorizedVotersListFrame> {
         let offset = self.frame.offset(Field::AuthorizedVoters);
         // SAFETY: `frame` was created from `data`.
-        ListView::new(self.frame.authorized_voters_frame(), &self.data[offset..])
+        ListView::new(
+            self.frame.authorized_voters_frame(),
+            &self.data.as_slice()[offset..],
+        )
     }
 
     fn epoch_credits_view(&self) -> ListView<'_, EpochCreditsListFrame> {
         let offset = self.frame.offset(Field::EpochCredits);
         // SAFETY: `frame` was created from `data`.
-        ListView::new(self.frame.epoch_credits_frame(), &self.data[offset..])
+        ListView::new(
+            self.frame.epoch_credits_frame(),
+            &self.data.as_slice()[offset..],
+        )
     }
 }
 
@@ -245,7 +263,7 @@ impl VoteStateView {
 impl From<VoteStateV3> for VoteStateView {
     fn from(vote_state: VoteStateV3) -> Self {
         let vote_account_data = bincode::serialize(&VoteStateVersions::new_v3(vote_state)).unwrap();
-        VoteStateView::try_new(Arc::new(vote_account_data)).unwrap()
+        VoteStateView::try_new(vote_account_data).unwrap()
     }
 }
 
@@ -253,7 +271,7 @@ impl From<VoteStateV3> for VoteStateView {
 impl From<VoteStateV4> for VoteStateView {
     fn from(vote_state: VoteStateV4) -> Self {
         let vote_account_data = bincode::serialize(&VoteStateVersions::new_v4(vote_state)).unwrap();
-        VoteStateView::try_new(Arc::new(vote_account_data)).unwrap()
+        VoteStateView::try_new(vote_account_data).unwrap()
     }
 }
 
@@ -428,7 +446,7 @@ mod tests {
         let target_vote_state = new_test_vote_state_v4();
         let target_vote_state_versions = VoteStateVersions::new_v4(target_vote_state.clone());
         let vote_state_buf = bincode::serialize(&target_vote_state_versions).unwrap();
-        let vote_state_view = VoteStateView::try_new(Arc::new(vote_state_buf)).unwrap();
+        let vote_state_view = VoteStateView::try_new(vote_state_buf).unwrap();
         assert_eq_vote_state_v4(&vote_state_view, &target_vote_state);
     }
 
@@ -437,7 +455,7 @@ mod tests {
         let target_vote_state = VoteStateV4::default();
         let target_vote_state_versions = VoteStateVersions::new_v4(target_vote_state.clone());
         let vote_state_buf = bincode::serialize(&target_vote_state_versions).unwrap();
-        let vote_state_view = VoteStateView::try_new(Arc::new(vote_state_buf)).unwrap();
+        let vote_state_view = VoteStateView::try_new(vote_state_buf).unwrap();
         assert_eq_vote_state_v4(&vote_state_view, &target_vote_state);
     }
 
@@ -461,7 +479,7 @@ mod tests {
 
             let target_vote_state_versions = VoteStateVersions::new_v4(target_vote_state.clone());
             let vote_state_buf = bincode::serialize(&target_vote_state_versions).unwrap();
-            let vote_state_view = VoteStateView::try_new(Arc::new(vote_state_buf)).unwrap();
+            let vote_state_view = VoteStateView::try_new(vote_state_buf).unwrap();
             assert_eq_vote_state_v4(&vote_state_view, &target_vote_state);
         }
     }
@@ -470,7 +488,7 @@ mod tests {
         let target_vote_state = new_test_vote_state_v3();
         let target_vote_state_versions = VoteStateVersions::V3(Box::new(target_vote_state.clone()));
         let vote_state_buf = bincode::serialize(&target_vote_state_versions).unwrap();
-        let vote_state_view = VoteStateView::try_new(Arc::new(vote_state_buf)).unwrap();
+        let vote_state_view = VoteStateView::try_new(vote_state_buf).unwrap();
         assert_eq_vote_state_v3(&vote_state_view, &target_vote_state);
     }
 
@@ -479,7 +497,7 @@ mod tests {
         let target_vote_state = VoteStateV3::default();
         let target_vote_state_versions = VoteStateVersions::V3(Box::new(target_vote_state.clone()));
         let vote_state_buf = bincode::serialize(&target_vote_state_versions).unwrap();
-        let vote_state_view = VoteStateView::try_new(Arc::new(vote_state_buf)).unwrap();
+        let vote_state_view = VoteStateView::try_new(vote_state_buf).unwrap();
         assert_eq_vote_state_v3(&vote_state_view, &target_vote_state);
     }
 
@@ -504,7 +522,7 @@ mod tests {
             let target_vote_state_versions =
                 VoteStateVersions::V3(Box::new(target_vote_state.clone()));
             let vote_state_buf = bincode::serialize(&target_vote_state_versions).unwrap();
-            let vote_state_view = VoteStateView::try_new(Arc::new(vote_state_buf)).unwrap();
+            let vote_state_view = VoteStateView::try_new(vote_state_buf).unwrap();
             assert_eq_vote_state_v3(&vote_state_view, &target_vote_state);
         }
     }
@@ -515,7 +533,7 @@ mod tests {
         let target_vote_state_versions =
             VoteStateVersions::V1_14_11(Box::new(target_vote_state.clone()));
         let vote_state_buf = bincode::serialize(&target_vote_state_versions).unwrap();
-        let vote_state_view = VoteStateView::try_new(Arc::new(vote_state_buf)).unwrap();
+        let vote_state_view = VoteStateView::try_new(vote_state_buf).unwrap();
         assert_eq_vote_state_1_14_11(&vote_state_view, &target_vote_state);
     }
 
@@ -525,7 +543,7 @@ mod tests {
         let target_vote_state_versions =
             VoteStateVersions::V1_14_11(Box::new(target_vote_state.clone()));
         let vote_state_buf = bincode::serialize(&target_vote_state_versions).unwrap();
-        let vote_state_view = VoteStateView::try_new(Arc::new(vote_state_buf)).unwrap();
+        let vote_state_view = VoteStateView::try_new(vote_state_buf).unwrap();
         assert_eq_vote_state_1_14_11(&vote_state_view, &target_vote_state);
     }
 
@@ -555,7 +573,7 @@ mod tests {
             let target_vote_state_versions =
                 VoteStateVersions::V1_14_11(Box::new(target_vote_state.clone()));
             let vote_state_buf = bincode::serialize(&target_vote_state_versions).unwrap();
-            let vote_state_view = VoteStateView::try_new(Arc::new(vote_state_buf)).unwrap();
+            let vote_state_view = VoteStateView::try_new(vote_state_buf).unwrap();
             assert_eq_vote_state_1_14_11(&vote_state_view, &target_vote_state);
         }
     }
@@ -744,7 +762,7 @@ mod tests {
     #[test]
     fn test_vote_state_view_too_small() {
         for i in 0..4 {
-            let vote_data = Arc::new(vec![0; i]);
+            let vote_data = vec![0; i];
             let vote_state_view_err = VoteStateView::try_new(vote_data).unwrap_err();
             assert_eq!(vote_state_view_err, VoteStateViewError::AccountDataTooSmall);
         }
@@ -752,14 +770,14 @@ mod tests {
 
     #[test]
     fn test_vote_state_view_old_version() {
-        let vote_data = Arc::new(0u32.to_le_bytes().to_vec());
+        let vote_data = 0u32.to_le_bytes().to_vec();
         let vote_state_view_err = VoteStateView::try_new(vote_data).unwrap_err();
         assert_eq!(vote_state_view_err, VoteStateViewError::OldVersion);
     }
 
     #[test]
     fn test_vote_state_view_unsupported_version() {
-        let vote_data = Arc::new(4u32.to_le_bytes().to_vec());
+        let vote_data = 4u32.to_le_bytes().to_vec();
         let vote_state_view_err = VoteStateView::try_new(vote_data).unwrap_err();
         assert_eq!(vote_state_view_err, VoteStateViewError::UnsupportedVersion);
     }
@@ -779,7 +797,7 @@ mod tests {
                     ..Default::default()
                 };
                 let versioned = VoteStateVersions::V1_14_11(Box::new(state));
-                let buf = Arc::new(bincode::serialize(&versioned).unwrap());
+                let buf = bincode::serialize(&versioned).unwrap();
                 let view = VoteStateView::try_new(buf).unwrap();
                 assert_eq!(view.commission(), commission_pct);
                 assert_eq!(view.inflation_rewards_commission(), expected_bps);
@@ -797,7 +815,7 @@ mod tests {
                     &Clock::default(),
                 );
                 let versioned = VoteStateVersions::V3(Box::new(state));
-                let buf = Arc::new(bincode::serialize(&versioned).unwrap());
+                let buf = bincode::serialize(&versioned).unwrap();
                 let view = VoteStateView::try_new(buf).unwrap();
                 assert_eq!(view.commission(), commission_pct);
                 assert_eq!(view.inflation_rewards_commission(), expected_bps);
@@ -810,7 +828,7 @@ mod tests {
                     ..VoteStateV4::default()
                 };
                 let versioned = VoteStateVersions::new_v4(state);
-                let buf = Arc::new(bincode::serialize(&versioned).unwrap());
+                let buf = bincode::serialize(&versioned).unwrap();
                 let view = VoteStateView::try_new(buf).unwrap();
                 assert_eq!(
                     view.commission(),
@@ -837,7 +855,7 @@ mod tests {
                 ..VoteStateV4::default()
             };
             let versioned = VoteStateVersions::new_v4(state);
-            let buf = Arc::new(bincode::serialize(&versioned).unwrap());
+            let buf = bincode::serialize(&versioned).unwrap();
             let view = VoteStateView::try_new(buf).unwrap();
             assert_eq!(view.commission(), expected);
         }
@@ -851,7 +869,7 @@ mod tests {
         let versioned = VoteStateVersions::new_v4(target_vote_state.clone());
         let mut buf = bincode::serialize(&versioned).unwrap();
         buf.extend_from_slice(&[0xAB; 100]);
-        let view = VoteStateView::try_new(Arc::new(buf)).unwrap();
+        let view = VoteStateView::try_new(buf).unwrap();
         assert_eq_vote_state_v4(&view, &target_vote_state);
     }
 
@@ -865,11 +883,11 @@ mod tests {
 
         let mut buf_zero = base.clone();
         buf_zero.extend_from_slice(&[0x00; 100]);
-        let view_zero = VoteStateView::try_new(Arc::new(buf_zero)).unwrap();
+        let view_zero = VoteStateView::try_new(buf_zero).unwrap();
 
         let mut buf_garbage = base;
         buf_garbage.extend_from_slice(&[0xFF; 100]);
-        let view_garbage = VoteStateView::try_new(Arc::new(buf_garbage)).unwrap();
+        let view_garbage = VoteStateView::try_new(buf_garbage).unwrap();
 
         assert_eq!(view_zero.node_pubkey(), view_garbage.node_pubkey());
         assert_eq!(view_zero.commission(), view_garbage.commission());

@@ -6,14 +6,12 @@ use {
         vm_addresses::{GUEST_ACCOUNT_PAYLOAD_BASE_ADDRESS, GUEST_REGION_SIZE},
         vm_slice::VmSlice,
     },
-    solana_account::{AccountSharedData, ReadableAccount, WritableAccount},
+    solana_account::{AccountData, AccountSharedData, ReadableAccount, WritableAccount},
     solana_instruction::error::InstructionError,
     solana_pubkey::Pubkey,
     std::{
         cell::{Cell, UnsafeCell},
         ops::{Deref, DerefMut},
-        ptr,
-        sync::Arc,
     },
 };
 
@@ -34,7 +32,7 @@ struct AccountSharedFields {
 struct AccountPrivateFields {
     rent_epoch: u64,
     executable: bool,
-    payload: Arc<Vec<u8>>,
+    payload: AccountData,
 }
 
 #[cfg(not(any(target_arch = "bpf", target_arch = "sbf")))]
@@ -94,81 +92,35 @@ pub struct TransactionAccountViewMut<'a> {
 
 #[cfg(not(any(target_arch = "bpf", target_arch = "sbf")))]
 impl TransactionAccountViewMut<'_> {
-    fn data_mut(&mut self) -> &mut Vec<u8> {
-        Arc::make_mut(&mut self.private_fields.payload)
-    }
-
     pub(crate) fn raw_mut_data_slice(&mut self) -> *mut [u8] {
-        &raw mut self.data_mut()[..]
+        &raw mut self.private_fields.payload.as_mut_slice()[..]
     }
 
     pub(crate) fn resize(&mut self, new_len: usize, value: u8) {
-        self.data_mut().resize(new_len, value);
+        self.private_fields.payload.resize(new_len, value);
         self.abi_account.payload.set_len(new_len as u64);
     }
 
     #[cfg_attr(feature = "dev-context-only-utils", qualifiers(pub))]
     pub(crate) fn set_data_from_slice(&mut self, new_data: &[u8]) {
-        // If the buffer isn't shared, we're going to memcpy in place.
-        let Some(data) = Arc::get_mut(&mut self.private_fields.payload) else {
-            // If the buffer is shared, the cheapest thing to do is to clone the
-            // incoming slice and replace the buffer.
-            self.private_fields.payload = Arc::new(new_data.to_vec());
-            self.abi_account.payload.set_len(new_data.len() as u64);
-            return;
-        };
-
-        let new_len = new_data.len();
-
-        // Reserve additional capacity if needed. Here we make the assumption
-        // that growing the current buffer is cheaper than doing a whole new
-        // allocation to make `new_data` owned.
-        //
-        // This assumption holds true during CPI, especially when the account
-        // size doesn't change but the account is only changed in place. And
-        // it's also true when the account is grown by a small margin (the
-        // realloc limit is quite low), in which case the allocator can just
-        // update the allocation metadata without moving.
-        //
-        // Shrinking and copying in place is always faster than making
-        // `new_data` owned, since shrinking boils down to updating the Vec's
-        // length.
-
-        data.reserve(new_len.saturating_sub(data.len()));
-
-        // Safety:
-        // We just reserved enough capacity. We set data::len to 0 to avoid
-        // possible UB on panic (dropping uninitialized elements), do the copy,
-        // finally set the new length once everything is initialized.
-        unsafe {
-            data.set_len(0);
-            ptr::copy_nonoverlapping(new_data.as_ptr(), data.as_mut_ptr(), new_len);
-            data.set_len(new_len);
-            self.abi_account.payload.set_len(new_len as u64);
-        };
+        self.private_fields.payload.set_data_from_slice(new_data);
+        self.abi_account.payload.set_len(new_data.len() as u64);
     }
 
     pub(crate) fn extend_from_slice(&mut self, data: &[u8]) {
-        self.data_mut().extend_from_slice(data);
+        self.private_fields.payload.extend_from_slice(data);
         self.abi_account
             .payload
             .set_len(self.private_fields.payload_len() as u64);
     }
 
     pub(crate) fn reserve(&mut self, additional: usize) {
-        if let Some(data) = Arc::get_mut(&mut self.private_fields.payload) {
-            data.reserve(additional)
-        } else {
-            let mut data =
-                Vec::with_capacity(self.private_fields.payload_len().saturating_add(additional));
-            data.extend_from_slice(self.private_fields.payload.as_slice());
-            self.private_fields.payload = Arc::new(data);
-        }
+        self.private_fields.payload.reserve(additional)
     }
 
     #[cfg_attr(feature = "dev-context-only-utils", qualifiers(pub))]
     pub(crate) fn is_shared(&self) -> bool {
-        Arc::strong_count(&self.private_fields.payload) > 1
+        self.private_fields.payload.is_shared()
     }
 }
 
@@ -202,7 +154,7 @@ impl WritableAccount for TransactionAccountViewMut<'_> {
     }
 
     fn data_as_mut_slice(&mut self) -> &mut [u8] {
-        Arc::make_mut(&mut self.private_fields.payload).as_mut_slice()
+        self.private_fields.payload.as_mut_slice()
     }
 
     fn set_owner(&mut self, owner: Pubkey) {

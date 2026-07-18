@@ -45,9 +45,7 @@ pub struct Account {
     #[cfg_attr(feature = "serde", serde(with = "serde_bytes"))]
     #[cfg_attr(
         feature = "frozen-abi",
-        stable_abi_sample(
-            with = "(0..rng.random_range(0..=1000)).map(|_| rng.random()).collect()"
-        )
+        stable_abi_sample(with = "(0..rng.random_range(0..=1000)).map(|_| rng.random()).collect()")
     )]
     pub data: Vec<u8>,
     /// the program that owns this account. If executable, the program that loads this account.
@@ -141,13 +139,155 @@ pub struct AccountSharedData {
     /// lamports in the account
     lamports: u64,
     /// data held in this account
-    data: Arc<Vec<u8>>,
+    data: AccountData,
     /// the program that owns this account. If executable, the program that loads this account.
     owner: Pubkey,
     /// this account's data contains a loaded program (and is now read-only)
     executable: bool,
     /// the epoch at which this account will next owe rent
     rent_epoch: Epoch,
+}
+
+/// The data held in an [`AccountSharedData`].
+///
+/// Opaque handle to the account's data bytes. Cloning is O(1): clones share
+/// the underlying bytes. Mutating methods copy the bytes first if they are
+/// shared (copy-on-write).
+#[cfg_attr(feature = "frozen-abi", derive(AbiExample, StableAbi, StableAbiSample))]
+#[cfg_attr(feature = "wincode", derive(wincode::SchemaRead, wincode::SchemaWrite))]
+#[derive(PartialEq, Eq, Clone, Default)]
+#[repr(transparent)]
+pub struct AccountData {
+    data: Arc<Vec<u8>>,
+}
+
+impl AccountData {
+    pub fn as_slice(&self) -> &[u8] {
+        &self.data
+    }
+
+    pub fn len(&self) -> usize {
+        self.data.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.data.is_empty()
+    }
+
+    /// Returns true if the underlying bytes are shared with another clone.
+    pub fn is_shared(&self) -> bool {
+        Arc::strong_count(&self.data) > 1
+    }
+
+    /// Returns true if `self` and `other` share the same underlying bytes,
+    /// i.e. they are clones of each other.
+    pub fn ptr_eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.data, &other.data)
+    }
+
+    pub fn capacity(&self) -> usize {
+        self.data.capacity()
+    }
+
+    fn make_mut(&mut self) -> &mut Vec<u8> {
+        Arc::make_mut(&mut self.data)
+    }
+
+    /// Returns a mutable view of the bytes, copying them first if shared.
+    pub fn as_mut_slice(&mut self) -> &mut [u8] {
+        self.make_mut().as_mut_slice()
+    }
+
+    pub fn reserve(&mut self, additional: usize) {
+        if let Some(data) = Arc::get_mut(&mut self.data) {
+            data.reserve(additional)
+        } else {
+            // Allocate the final capacity up front so the bytes are copied
+            // once, instead of make_mut's copy followed by a reallocation.
+            let mut data = Vec::with_capacity(self.data.len().saturating_add(additional));
+            data.extend_from_slice(&self.data);
+            self.data = Arc::new(data);
+        }
+    }
+
+    pub fn resize(&mut self, new_len: usize, value: u8) {
+        self.make_mut().resize(new_len, value)
+    }
+
+    pub fn extend_from_slice(&mut self, data: &[u8]) {
+        self.make_mut().extend_from_slice(data)
+    }
+
+    pub fn set_data_from_slice(&mut self, new_data: &[u8]) {
+        // If the buffer isn't shared, we're going to memcpy in place.
+        let Some(data) = Arc::get_mut(&mut self.data) else {
+            // If the buffer is shared, the cheapest thing to do is to clone the
+            // incoming slice and replace the buffer.
+            self.data = Arc::new(new_data.to_vec());
+            return;
+        };
+
+        let new_len = new_data.len();
+
+        // Reserve additional capacity if needed. Here we make the assumption
+        // that growing the current buffer is cheaper than doing a whole new
+        // allocation to make `new_data` owned.
+        //
+        // This assumption holds true during CPI, especially when the account
+        // size doesn't change but the account is only changed in place. And
+        // it's also true when the account is grown by a small margin (the
+        // realloc limit is quite low), in which case the allocator can just
+        // update the allocation metadata without moving.
+        //
+        // Shrinking and copying in place is always faster than making
+        // `new_data` owned, since shrinking boils down to updating the Vec's
+        // length.
+
+        data.reserve(new_len.saturating_sub(data.len()));
+
+        // Safety:
+        // We just reserved enough capacity. We set data::len to 0 to avoid
+        // possible UB on panic (dropping uninitialized elements), do the copy,
+        // finally set the new length once everything is initialized.
+        #[allow(clippy::uninit_vec)]
+        // this is a false positive, the lint doesn't currently special case set_len(0)
+        unsafe {
+            data.set_len(0);
+            ptr::copy_nonoverlapping(new_data.as_ptr(), data.as_mut_ptr(), new_len);
+            data.set_len(new_len);
+        };
+    }
+
+    pub fn spare_capacity_mut(&mut self) -> &mut [MaybeUninit<u8>] {
+        self.make_mut().spare_capacity_mut()
+    }
+
+    fn into_vec(mut self) -> Vec<u8> {
+        std::mem::take(self.make_mut())
+    }
+}
+
+impl fmt::Debug for AccountData {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut f = f.debug_struct("AccountData");
+        f.field("len", &self.len());
+        debug_account_data(self.as_slice(), &mut f);
+        f.finish()
+    }
+}
+
+impl From<Vec<u8>> for AccountData {
+    fn from(data: Vec<u8>) -> Self {
+        Self {
+            data: Arc::new(data),
+        }
+    }
+}
+
+impl From<Arc<Vec<u8>>> for AccountData {
+    fn from(data: Arc<Vec<u8>>) -> Self {
+        Self { data }
+    }
 }
 
 /// Compares two ReadableAccounts
@@ -162,11 +302,10 @@ pub fn accounts_equal<T: ReadableAccount, U: ReadableAccount>(me: &T, other: &U)
 }
 
 impl From<AccountSharedData> for Account {
-    fn from(mut other: AccountSharedData) -> Self {
-        let account_data = Arc::make_mut(&mut other.data);
+    fn from(other: AccountSharedData) -> Self {
         Self {
             lamports: other.lamports,
-            data: std::mem::take(account_data),
+            data: other.data.into_vec(),
             owner: other.owner,
             executable: other.executable,
             rent_epoch: other.rent_epoch,
@@ -178,7 +317,7 @@ impl From<Account> for AccountSharedData {
     fn from(other: Account) -> Self {
         Self {
             lamports: other.lamports,
-            data: Arc::new(other.data),
+            data: AccountData::from(other.data),
             owner: other.owner,
             executable: other.executable,
             rent_epoch: other.rent_epoch,
@@ -291,7 +430,7 @@ impl WritableAccount for AccountSharedData {
         self.lamports = lamports;
     }
     fn data_as_mut_slice(&mut self) -> &mut [u8] {
-        &mut self.data_mut()[..]
+        self.data.as_mut_slice()
     }
     fn set_owner(&mut self, owner: Pubkey) {
         self.owner = owner;
@@ -312,7 +451,7 @@ impl ReadableAccount for AccountSharedData {
         self.lamports
     }
     fn data(&self) -> &[u8] {
-        &self.data
+        self.data.as_slice()
     }
     fn owner(&self) -> &Pubkey {
         &self.owner
@@ -445,91 +584,46 @@ impl Account {
 
 impl AccountSharedData {
     pub fn is_shared(&self) -> bool {
-        Arc::strong_count(&self.data) > 1
+        self.data.is_shared()
     }
 
     pub fn reserve(&mut self, additional: usize) {
-        if let Some(data) = Arc::get_mut(&mut self.data) {
-            data.reserve(additional)
-        } else {
-            let mut data = Vec::with_capacity(self.data.len().saturating_add(additional));
-            data.extend_from_slice(&self.data);
-            self.data = Arc::new(data);
-        }
+        self.data.reserve(additional)
     }
 
     pub fn capacity(&self) -> usize {
         self.data.capacity()
     }
 
-    pub fn data_clone(&self) -> Arc<Vec<u8>> {
-        Arc::clone(&self.data)
-    }
-
-    fn data_mut(&mut self) -> &mut Vec<u8> {
-        Arc::make_mut(&mut self.data)
+    pub fn data_clone(&self) -> AccountData {
+        self.data.clone()
     }
 
     pub fn resize(&mut self, new_len: usize, value: u8) {
-        self.data_mut().resize(new_len, value)
+        self.data.resize(new_len, value)
     }
 
     pub fn extend_from_slice(&mut self, data: &[u8]) {
-        self.data_mut().extend_from_slice(data)
+        self.data.extend_from_slice(data)
     }
 
     pub fn set_data_from_slice(&mut self, new_data: &[u8]) {
-        // If the buffer isn't shared, we're going to memcpy in place.
-        let Some(data) = Arc::get_mut(&mut self.data) else {
-            // If the buffer is shared, the cheapest thing to do is to clone the
-            // incoming slice and replace the buffer.
-            return self.set_data(new_data.to_vec());
-        };
-
-        let new_len = new_data.len();
-
-        // Reserve additional capacity if needed. Here we make the assumption
-        // that growing the current buffer is cheaper than doing a whole new
-        // allocation to make `new_data` owned.
-        //
-        // This assumption holds true during CPI, especially when the account
-        // size doesn't change but the account is only changed in place. And
-        // it's also true when the account is grown by a small margin (the
-        // realloc limit is quite low), in which case the allocator can just
-        // update the allocation metadata without moving.
-        //
-        // Shrinking and copying in place is always faster than making
-        // `new_data` owned, since shrinking boils down to updating the Vec's
-        // length.
-
-        data.reserve(new_len.saturating_sub(data.len()));
-
-        // Safety:
-        // We just reserved enough capacity. We set data::len to 0 to avoid
-        // possible UB on panic (dropping uninitialized elements), do the copy,
-        // finally set the new length once everything is initialized.
-        #[allow(clippy::uninit_vec)]
-        // this is a false positive, the lint doesn't currently special case set_len(0)
-        unsafe {
-            data.set_len(0);
-            ptr::copy_nonoverlapping(new_data.as_ptr(), data.as_mut_ptr(), new_len);
-            data.set_len(new_len);
-        };
+        self.data.set_data_from_slice(new_data)
     }
 
     #[cfg_attr(feature = "dev-context-only-utils", qualifiers(pub))]
     fn set_data(&mut self, data: Vec<u8>) {
-        self.data = Arc::new(data);
+        self.data = AccountData::from(data);
     }
 
     pub fn spare_data_capacity_mut(&mut self) -> &mut [MaybeUninit<u8>] {
-        self.data_mut().spare_capacity_mut()
+        self.data.spare_capacity_mut()
     }
 
     pub fn new(lamports: u64, space: usize, owner: &Pubkey) -> Self {
         AccountSharedData {
             lamports,
-            data: Arc::new(vec![0u8; space]),
+            data: AccountData::from(vec![0u8; space]),
             owner: *owner,
             executable: false,
             rent_epoch: Epoch::default(),
@@ -547,7 +641,7 @@ impl AccountSharedData {
         let data = bincode::serialize(state)?;
         Ok(Self::create_from_existing_shared_data(
             lamports,
-            Arc::new(data),
+            data,
             *owner,
             false,
             Epoch::default(),
@@ -584,7 +678,7 @@ impl AccountSharedData {
     pub fn new_rent_epoch(lamports: u64, space: usize, owner: &Pubkey, rent_epoch: Epoch) -> Self {
         AccountSharedData {
             lamports,
-            data: Arc::new(vec![0; space]),
+            data: AccountData::from(vec![0; space]),
             owner: *owner,
             executable: false,
             rent_epoch,
@@ -601,14 +695,14 @@ impl AccountSharedData {
 
     pub fn create_from_existing_shared_data(
         lamports: u64,
-        data: Arc<Vec<u8>>,
+        data: impl Into<AccountData>,
         owner: Pubkey,
         executable: bool,
         rent_epoch: Epoch,
     ) -> AccountSharedData {
         AccountSharedData {
             lamports,
-            data,
+            data: data.into(),
             owner,
             executable,
             rent_epoch,
@@ -962,7 +1056,7 @@ pub mod tests {
                         account1.data[0] += 1;
                     } else if pass == 1 {
                         account_expected.data[0] += 1;
-                        account2.data_as_mut_slice()[0] = account2.data[0] + 1;
+                        account2.data_as_mut_slice()[0] = account2.data()[0] + 1;
                     } else if pass == 2 {
                         account1.data_as_mut_slice()[0] = account1.data[0] + 1;
                     } else if pass == 3 {
