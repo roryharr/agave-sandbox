@@ -132,3 +132,6 @@ default-features = false
 [dev-dependencies.solana-account]
 path = "."
 features = ["dev-context-only-utils"]
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"

@@ -29,6 +29,11 @@ use {
 #[cfg(feature = "bincode")]
 pub mod state_traits;
 
+#[cfg(target_os = "linux")]
+mod gather;
+mod write;
+pub use write::AccountDataWrite;
+
 /// An Account with data that is stored on chain
 #[repr(C)]
 #[cfg_attr(
@@ -200,13 +205,21 @@ struct Segment {
 /// Backing bytes shared by segments, potentially across many [`AccountData`]s.
 #[derive(Clone, Debug)]
 enum SegmentSource {
+    /// Plain heap bytes: readable but not gather-mappable. Only built by
+    /// the dev-context test constructor today.
+    #[cfg_attr(not(feature = "dev-context-only-utils"), allow(dead_code))]
     Owned(Arc<Vec<u8>>),
+    /// Memfd-backed and page-aligned: mappable into a kernel-COW gather.
+    #[cfg(target_os = "linux")]
+    Memfd(Arc<gather::MemfdSource>),
 }
 
 impl Segment {
     fn as_slice(&self) -> &[u8] {
         match &self.source {
             SegmentSource::Owned(bytes) => &bytes[self.offset..self.offset + self.len],
+            #[cfg(target_os = "linux")]
+            SegmentSource::Memfd(source) => &source.as_slice()[self.offset..self.offset + self.len],
         }
     }
 }
@@ -917,6 +930,7 @@ impl AccountSharedData {
     }
 
     #[cfg_attr(feature = "dev-context-only-utils", qualifiers(pub))]
+    #[cfg_attr(not(feature = "dev-context-only-utils"), allow(dead_code))]
     fn set_data(&mut self, data: Vec<u8>) {
         self.data = AccountData::from(data);
     }

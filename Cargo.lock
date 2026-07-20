@@ -7055,6 +7055,7 @@ name = "solana-account"
 version = "4.3.1"
 dependencies = [
  "bincode",
+ "libc",
  "qualifier_attr",
  "serde",
  "serde_bytes",
