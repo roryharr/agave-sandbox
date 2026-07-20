@@ -58,7 +58,9 @@ pub struct Account {
     #[cfg_attr(feature = "serde", serde(with = "serde_bytes"))]
     #[cfg_attr(
         feature = "frozen-abi",
-        stable_abi_sample(with = "(0..rng.random_range(0..=1000)).map(|_| rng.random()).collect()")
+        stable_abi_sample(
+            with = "(0..rng.random_range(0..=1000)).map(|_| rng.random()).collect()"
+        )
     )]
     pub data: Vec<u8>,
     /// the program that owns this account. If executable, the program that loads this account.
@@ -281,6 +283,15 @@ impl AccountData {
         match &self.repr {
             Repr::Contiguous(data) => Arc::strong_count(data) > 1,
             Repr::Fragmented(_) => true,
+        }
+    }
+
+    /// True when `as_slice` would assemble (and cache) a contiguous copy of
+    /// the bytes instead of returning a view of existing memory.
+    pub fn as_slice_would_copy(&self) -> bool {
+        match &self.repr {
+            Repr::Contiguous(_) => false,
+            Repr::Fragmented(list) => list.segments.len() > 1 && list.contiguous.get().is_none(),
         }
     }
 

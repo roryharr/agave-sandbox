@@ -34,6 +34,20 @@ enum WriteInner {
 }
 
 impl AccountData {
+    /// Whether `begin_write` will attempt the zero-copy kernel gather path
+    /// rather than copying into a fresh contiguous buffer. Lets callers skip
+    /// opening a session that would just be a copy.
+    pub fn begin_write_would_gather(&self) -> bool {
+        #[cfg(target_os = "linux")]
+        {
+            self.len() >= GATHER_MIN_DATA_LEN
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            false
+        }
+    }
+
     /// Opens a write session on a snapshot of `self`, with at least
     /// `reserve_extra` bytes of growth headroom. `self` is unaffected;
     /// [`AccountDataWrite::commit`] returns the successor data.
@@ -127,6 +141,21 @@ impl AccountDataWrite {
     #[cfg(all(test, target_os = "linux"))]
     pub(crate) fn is_gather_for_tests(&self) -> bool {
         matches!(self.inner, WriteInner::Gather(_))
+    }
+}
+
+impl std::fmt::Debug for AccountDataWrite {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let variant = match &self.inner {
+            WriteInner::Contiguous { .. } => "Contiguous",
+            #[cfg(target_os = "linux")]
+            WriteInner::Gather(_) => "Gather",
+        };
+        f.debug_struct("AccountDataWrite")
+            .field("variant", &variant)
+            .field("len", &self.len())
+            .field("reserved_len", &self.reserved_len())
+            .finish()
     }
 }
 

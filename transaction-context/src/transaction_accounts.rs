@@ -6,7 +6,9 @@ use {
         vm_addresses::{GUEST_ACCOUNT_PAYLOAD_BASE_ADDRESS, GUEST_REGION_SIZE},
         vm_slice::VmSlice,
     },
-    solana_account::{AccountData, AccountSharedData, ReadableAccount, WritableAccount},
+    solana_account::{
+        AccountData, AccountDataWrite, AccountSharedData, ReadableAccount, WritableAccount,
+    },
     solana_instruction::error::InstructionError,
     solana_pubkey::Pubkey,
     std::{
@@ -27,18 +29,161 @@ struct AccountSharedFields {
     payload: VmSlice<u8>,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug)]
 #[cfg(not(any(target_arch = "bpf", target_arch = "sbf")))]
 struct AccountPrivateFields {
     rent_epoch: u64,
     executable: bool,
+    /// The account data as loaded; the pre-session state while a write
+    /// session is open.
     payload: AccountData,
+    /// Write session holding the account's working bytes. While open, all
+    /// data reads and writes go through it and `into_data` folds it back
+    /// into one `AccountData`. Opened on the first write to shared payload
+    /// bytes when the kernel-COW gather path applies, and eagerly when a
+    /// contiguous view of fragmented payload bytes would otherwise copy.
+    write_session: Option<AccountDataWrite>,
+}
+
+/// Headroom for a write session. The session's base pointer must stay put
+/// for the rest of the transaction (memory regions point into it), so cover
+/// any legal growth; gather reservations are virtual address space only, so
+/// the headroom is free.
+#[cfg(not(any(target_arch = "bpf", target_arch = "sbf")))]
+fn session_reserve_extra(len: usize) -> usize {
+    (MAX_ACCOUNT_DATA_LEN as usize).saturating_sub(len)
 }
 
 #[cfg(not(any(target_arch = "bpf", target_arch = "sbf")))]
 impl AccountPrivateFields {
+    fn new(account: &AccountSharedData) -> Self {
+        let payload = account.data_clone();
+        // A gather session is the only contiguous view of fragmented data
+        // that does not copy the bytes, so open it up front.
+        let write_session = payload
+            .as_slice_would_copy()
+            .then(|| payload.begin_write(session_reserve_extra(payload.len())));
+        Self {
+            rent_epoch: account.rent_epoch(),
+            executable: account.executable(),
+            payload,
+            write_session,
+        }
+    }
+
     fn payload_len(&self) -> usize {
-        self.payload.len()
+        match &self.write_session {
+            Some(session) => session.len(),
+            None => self.payload.len(),
+        }
+    }
+
+    fn data(&self) -> &[u8] {
+        match &self.write_session {
+            Some(session) => session.as_slice(),
+            None => self.payload.as_slice(),
+        }
+    }
+
+    /// Opens the write session mutations are routed through, so that shared
+    /// payload bytes are copied per touched page instead of wholesale. Small
+    /// payloads keep the plain copy-on-write of `AccountData` itself.
+    fn ensure_write_session(&mut self) {
+        if self.write_session.is_none()
+            && self.payload.is_shared()
+            && self.payload.begin_write_would_gather()
+        {
+            self.write_session = Some(
+                self.payload
+                    .begin_write(session_reserve_extra(self.payload.len())),
+            );
+        }
+    }
+
+    /// Folds an open write session back into `payload`. Only for growth past
+    /// the session reservation, which no length-checked runtime path reaches
+    /// (the reservation covers `MAX_ACCOUNT_DATA_LEN`); callers of a resize
+    /// already re-point any memory region at the account afterwards.
+    fn materialize_write_session(&mut self) {
+        if let Some(session) = self.write_session.take() {
+            self.payload = session.commit();
+        }
+    }
+
+    fn data_as_mut_slice(&mut self) -> &mut [u8] {
+        self.ensure_write_session();
+        match &mut self.write_session {
+            Some(session) => session.as_mut_slice(),
+            None => self.payload.as_mut_slice(),
+        }
+    }
+
+    fn resize(&mut self, new_len: usize, value: u8) {
+        self.ensure_write_session();
+        if let Some(session) = &mut self.write_session {
+            if session.resize(new_len, value) {
+                return;
+            }
+            self.materialize_write_session();
+        }
+        self.payload.resize(new_len, value);
+    }
+
+    fn set_data_from_slice(&mut self, new_data: &[u8]) {
+        // With no session open this replaces the payload without copying the
+        // old bytes, so there is nothing for a session to save; only route
+        // through one that already exists.
+        if let Some(session) = &mut self.write_session {
+            if session.resize(new_data.len(), 0) {
+                session.as_mut_slice().copy_from_slice(new_data);
+                return;
+            }
+            self.materialize_write_session();
+        }
+        self.payload.set_data_from_slice(new_data);
+    }
+
+    fn extend_from_slice(&mut self, data: &[u8]) {
+        self.ensure_write_session();
+        if let Some(session) = &mut self.write_session {
+            let old_len = session.len();
+            if session.resize(old_len.saturating_add(data.len()), 0) {
+                session
+                    .as_mut_slice()
+                    .get_mut(old_len..)
+                    .expect("within the resized session length")
+                    .copy_from_slice(data);
+                return;
+            }
+            self.materialize_write_session();
+        }
+        self.payload.extend_from_slice(data);
+    }
+
+    fn reserve(&mut self, additional: usize) {
+        self.ensure_write_session();
+        // An open session's reservation already covers any legal growth.
+        if self.write_session.is_none() {
+            self.payload.reserve(additional);
+        }
+    }
+
+    /// Closes the account's working state into one `AccountData`, committing
+    /// the write session if one is open.
+    fn into_data(self) -> AccountData {
+        match self.write_session {
+            Some(session) => session.commit(),
+            None => self.payload,
+        }
+    }
+}
+
+#[cfg(not(any(target_arch = "bpf", target_arch = "sbf")))]
+impl PartialEq for AccountPrivateFields {
+    fn eq(&self, other: &Self) -> bool {
+        self.rent_epoch == other.rent_epoch
+            && self.executable == other.executable
+            && self.data() == other.data()
     }
 }
 
@@ -56,7 +201,7 @@ impl ReadableAccount for TransactionAccountView<'_> {
     }
 
     fn data(&self) -> &[u8] {
-        self.private_fields.payload.as_slice()
+        self.private_fields.data()
     }
 
     fn owner(&self) -> &Pubkey {
@@ -93,29 +238,29 @@ pub struct TransactionAccountViewMut<'a> {
 #[cfg(not(any(target_arch = "bpf", target_arch = "sbf")))]
 impl TransactionAccountViewMut<'_> {
     pub(crate) fn raw_mut_data_slice(&mut self) -> *mut [u8] {
-        &raw mut self.private_fields.payload.as_mut_slice()[..]
+        &raw mut self.private_fields.data_as_mut_slice()[..]
     }
 
     pub(crate) fn resize(&mut self, new_len: usize, value: u8) {
-        self.private_fields.payload.resize(new_len, value);
+        self.private_fields.resize(new_len, value);
         self.abi_account.payload.set_len(new_len as u64);
     }
 
     #[cfg_attr(feature = "dev-context-only-utils", qualifiers(pub))]
     pub(crate) fn set_data_from_slice(&mut self, new_data: &[u8]) {
-        self.private_fields.payload.set_data_from_slice(new_data);
+        self.private_fields.set_data_from_slice(new_data);
         self.abi_account.payload.set_len(new_data.len() as u64);
     }
 
     pub(crate) fn extend_from_slice(&mut self, data: &[u8]) {
-        self.private_fields.payload.extend_from_slice(data);
+        self.private_fields.extend_from_slice(data);
         self.abi_account
             .payload
             .set_len(self.private_fields.payload_len() as u64);
     }
 
     pub(crate) fn reserve(&mut self, additional: usize) {
-        self.private_fields.payload.reserve(additional)
+        self.private_fields.reserve(additional)
     }
 
     #[cfg_attr(feature = "dev-context-only-utils", qualifiers(pub))]
@@ -131,7 +276,7 @@ impl ReadableAccount for TransactionAccountViewMut<'_> {
     }
 
     fn data(&self) -> &[u8] {
-        self.private_fields.payload.as_slice()
+        self.private_fields.data()
     }
 
     fn owner(&self) -> &Pubkey {
@@ -154,7 +299,7 @@ impl WritableAccount for TransactionAccountViewMut<'_> {
     }
 
     fn data_as_mut_slice(&mut self) -> &mut [u8] {
-        self.private_fields.payload.as_mut_slice()
+        self.private_fields.data_as_mut_slice()
     }
 
     fn set_owner(&mut self, owner: Pubkey) {
@@ -212,11 +357,7 @@ impl TransactionAccounts {
                             item.1.data().len() as u64,
                         ),
                     }),
-                    UnsafeCell::new(AccountPrivateFields {
-                        rent_epoch: item.1.rent_epoch(),
-                        executable: item.1.executable(),
-                        payload: item.1.data_clone(),
-                    }),
+                    UnsafeCell::new(AccountPrivateFields::new(&item.1)),
                 )
             })
             .collect::<(
@@ -378,14 +519,16 @@ impl TransactionAccounts {
             .map(|(shared_fields_cell, private_fields_cell)| {
                 let shared_fields = shared_fields_cell.into_inner();
                 let private_fields = private_fields_cell.into_inner();
+                let executable = private_fields.executable;
+                let rent_epoch = private_fields.rent_epoch;
                 (
                     shared_fields.key,
                     AccountSharedData::create_from_existing_shared_data(
                         shared_fields.lamports,
-                        private_fields.payload.clone(),
+                        private_fields.into_data(),
                         shared_fields.owner,
-                        private_fields.executable,
-                        private_fields.rent_epoch,
+                        executable,
+                        rent_epoch,
                     ),
                 )
             })
@@ -401,12 +544,14 @@ impl TransactionAccounts {
             .map(|(shared_fields_cell, private_fields_cell)| {
                 let shared_fields = shared_fields_cell.into_inner();
                 let private_fields = private_fields_cell.into_inner();
+                let executable = private_fields.executable;
+                let rent_epoch = private_fields.rent_epoch;
                 AccountSharedData::create_from_existing_shared_data(
                     shared_fields.lamports,
-                    private_fields.payload.clone(),
+                    private_fields.into_data(),
                     shared_fields.owner,
-                    private_fields.executable,
-                    private_fields.rent_epoch,
+                    executable,
+                    rent_epoch,
                 )
             })
             .collect()
@@ -549,11 +694,113 @@ impl DerefMut for AccountRefMut<'_> {
 }
 
 #[cfg(all(test, not(target_arch = "sbf"), not(target_arch = "bpf")))]
+#[allow(clippy::indexing_slicing)]
 mod tests {
     use {
-        crate::transaction_accounts::TransactionAccounts, solana_account::AccountSharedData,
-        solana_instruction::error::InstructionError, solana_pubkey::Pubkey,
+        crate::{MAX_ACCOUNT_DATA_LEN, transaction_accounts::TransactionAccounts},
+        solana_account::{AccountData, AccountSharedData, ReadableAccount, WritableAccount},
+        solana_instruction::error::InstructionError,
+        solana_pubkey::Pubkey,
     };
+
+    const PAGE_SIZE: usize = 4096;
+
+    fn account_with_data(data: AccountData) -> AccountSharedData {
+        AccountSharedData::create_from_existing_shared_data(1, data, Pubkey::new_unique(), false, 0)
+    }
+
+    fn deconstruct(mut tx_accounts: TransactionAccounts) -> Vec<AccountSharedData> {
+        tx_accounts.deconstruct_into_account_shared_data()
+    }
+
+    #[test]
+    fn test_write_session_routes_large_shared_account() {
+        let mut expected: Vec<u8> = (0..3 * PAGE_SIZE).map(|i| (i % 251) as u8).collect();
+        let account = account_with_data(AccountData::from(expected.clone()));
+        // keep a clone alive so the payload is shared, like a freshly
+        // loaded account sharing bytes with the accounts-db cache
+        let original = account.clone();
+        let tx_accounts = TransactionAccounts::new(vec![(Pubkey::new_unique(), account)]);
+
+        {
+            // the first in-place write opens the session; the following
+            // overwrite must route through it
+            let mut borrowed = tx_accounts.try_borrow_mut(0).unwrap();
+            borrowed.data_as_mut_slice()[PAGE_SIZE + 10] = 0xAB;
+            expected[PAGE_SIZE + 10] = 0xAB;
+            expected.truncate(2 * PAGE_SIZE);
+            borrowed.set_data_from_slice(&expected);
+        }
+        assert_eq!(tx_accounts.try_borrow(0).unwrap().data(), &expected[..]);
+
+        let committed = deconstruct(tx_accounts);
+        assert_eq!(committed[0].data(), &expected[..]);
+        // the shared original is isolated from the writes
+        assert_ne!(original.data()[PAGE_SIZE + 10], 0xAB);
+        assert_eq!(original.data().len(), 3 * PAGE_SIZE);
+    }
+
+    #[test]
+    fn test_fragmented_payload_reads_and_writes_through_session() {
+        let first = vec![7u8; PAGE_SIZE];
+        let second = vec![9u8; PAGE_SIZE + 100];
+        let mut expected = [first.as_slice(), second.as_slice()].concat();
+        let account = account_with_data(AccountData::from_chunks_for_tests(&[&first, &second]));
+        let tx_accounts = TransactionAccounts::new(vec![(Pubkey::new_unique(), account)]);
+
+        // reads see the concatenation through the eager session
+        assert_eq!(tx_accounts.try_borrow(0).unwrap().data(), &expected[..]);
+
+        {
+            let mut borrowed = tx_accounts.try_borrow_mut(0).unwrap();
+            borrowed.data_as_mut_slice()[0] = 42;
+            borrowed.extend_from_slice(&[1, 2, 3]);
+        }
+        expected[0] = 42;
+        expected.extend_from_slice(&[1, 2, 3]);
+
+        let committed = deconstruct(tx_accounts);
+        assert_eq!(committed[0].data(), &expected[..]);
+    }
+
+    #[test]
+    fn test_resize_within_session_and_past_reservation() {
+        let expected = vec![5u8; 2 * PAGE_SIZE];
+        let account = account_with_data(AccountData::from_chunks_for_tests(&[
+            &expected[..PAGE_SIZE],
+            &expected[PAGE_SIZE..],
+        ]));
+        let tx_accounts = TransactionAccounts::new(vec![(Pubkey::new_unique(), account)]);
+
+        {
+            let mut borrowed = tx_accounts.try_borrow_mut(0).unwrap();
+            // grow and shrink within the session reservation
+            borrowed.resize(2 * PAGE_SIZE + 100, 3);
+            borrowed.resize(PAGE_SIZE, 0);
+            // growth past the reservation falls back to a materialized payload
+            borrowed.resize(MAX_ACCOUNT_DATA_LEN as usize + PAGE_SIZE, 8);
+        }
+
+        let committed = deconstruct(tx_accounts);
+        let data = committed[0].data();
+        assert_eq!(data.len(), MAX_ACCOUNT_DATA_LEN as usize + PAGE_SIZE);
+        assert_eq!(&data[..PAGE_SIZE], &expected[..PAGE_SIZE]);
+        assert!(data[PAGE_SIZE..].iter().all(|&byte| byte == 8));
+    }
+
+    #[test]
+    fn test_untouched_account_keeps_identity() {
+        let account = account_with_data(AccountData::from(vec![1u8; 2 * PAGE_SIZE]));
+        let original = account.clone();
+        let tx_accounts = TransactionAccounts::new(vec![(Pubkey::new_unique(), account)]);
+        assert_eq!(
+            tx_accounts.try_borrow(0).unwrap().data().len(),
+            2 * PAGE_SIZE
+        );
+
+        let committed = deconstruct(tx_accounts);
+        assert!(committed[0].data_clone().ptr_eq(&original.data_clone()));
+    }
 
     #[test]
     fn test_missing_account() {

@@ -38,6 +38,7 @@ solana-sdk-ids = { workspace = true }
 solana-signature = { workspace = true, optional = true }
 
 [dev-dependencies]
+solana-account = { workspace = true, features = ["dev-context-only-utils"] }
 solana-account-info = { workspace = true }
 solana-program-entrypoint = { workspace = true }
 solana-pubkey = { workspace = true, features = ["rand"] }
