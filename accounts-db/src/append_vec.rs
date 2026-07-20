@@ -1190,6 +1190,31 @@ mod tests {
         truncate_and_test(av, index);
     }
 
+    #[test]
+    fn test_append_vec_fragmented_data() {
+        let path = get_append_vec_path("test_append_fragmented");
+        let av = AppendVec::new(&path.path, 1024 * 1024);
+        let (pubkey, contiguous) = create_test_account_with(1024);
+        let data = contiguous.data().to_vec();
+        // non-final chunks must be multiples of 8 (see append_accounts);
+        // page-sized production chunks always are
+        let fragmented = AccountSharedData::create_from_existing_shared_data(
+            contiguous.lamports(),
+            solana_account::AccountData::from_chunks_for_tests(&[
+                &data[..16],
+                &data[16..640],
+                &data[640..],
+            ]),
+            *contiguous.owner(),
+            contiguous.executable(),
+            contiguous.rent_epoch(),
+        );
+        let account = (pubkey, fragmented);
+        let index = av.append_account_test(&account).unwrap();
+        // the stored bytes must read back equal to the contiguous original
+        assert_eq!(av.get_account_test(index).unwrap(), (pubkey, contiguous));
+    }
+
     /// truncate `av` and make sure that we fail to get an account. This verifies that the eof
     /// code is working correctly.
     fn truncate_and_test(av: AppendVec, index: usize) {

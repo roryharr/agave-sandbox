@@ -16,7 +16,15 @@ use {
     solana_instruction_error::LamportsError,
     solana_pubkey::Pubkey,
     solana_sdk_ids::{bpf_loader, bpf_loader_deprecated, bpf_loader_upgradeable, loader_v4},
-    std::{cell::RefCell, fmt, mem::MaybeUninit, ops::Deref, ptr, rc::Rc, sync::Arc},
+    std::{
+        cell::RefCell,
+        fmt,
+        mem::MaybeUninit,
+        ops::Deref,
+        ptr,
+        rc::Rc,
+        sync::{Arc, OnceLock},
+    },
 };
 #[cfg(feature = "bincode")]
 pub mod state_traits;
@@ -153,50 +161,151 @@ pub struct AccountSharedData {
 /// Opaque handle to the account's data bytes. Cloning is O(1): clones share
 /// the underlying bytes. Mutating methods copy the bytes first if they are
 /// shared (copy-on-write).
-#[cfg_attr(feature = "frozen-abi", derive(AbiExample, StableAbi, StableAbiSample))]
-#[cfg_attr(feature = "wincode", derive(wincode::SchemaRead, wincode::SchemaWrite))]
-#[derive(PartialEq, Eq, Clone, Default)]
-#[repr(transparent)]
+///
+/// The bytes are either one contiguous buffer or a sequence of segments
+/// referencing shared sources. Fragmented data reads zero-copy through
+/// `data_chunks()`; callers that need one contiguous slice (`as_slice()`)
+/// cause a lazily-cached materialization. All mutating methods produce
+/// contiguous data, copying the segments together first if needed.
+#[derive(Clone)]
 pub struct AccountData {
-    data: Arc<Vec<u8>>,
+    repr: Repr,
+}
+
+#[derive(Clone)]
+enum Repr {
+    /// One contiguous heap buffer holding all the data.
+    Contiguous(Arc<Vec<u8>>),
+    /// The data split across segments referencing shared sources.
+    Fragmented(Arc<SegmentList>),
+}
+
+/// Ordered segments whose concatenation is the account data.
+struct SegmentList {
+    /// Non-empty segments; their lengths sum to `len`.
+    segments: Vec<Segment>,
+    len: usize,
+    /// Lazily materialized contiguous copy, for callers that need one slice.
+    contiguous: OnceLock<Box<[u8]>>,
+}
+
+/// A byte range into a shared source.
+#[derive(Clone, Debug)]
+struct Segment {
+    source: SegmentSource,
+    offset: usize,
+    len: usize,
+}
+
+/// Backing bytes shared by segments, potentially across many [`AccountData`]s.
+#[derive(Clone, Debug)]
+enum SegmentSource {
+    Owned(Arc<Vec<u8>>),
+}
+
+impl Segment {
+    fn as_slice(&self) -> &[u8] {
+        match &self.source {
+            SegmentSource::Owned(bytes) => &bytes[self.offset..self.offset + self.len],
+        }
+    }
+}
+
+impl SegmentList {
+    /// The whole logical byte range as one slice, materializing it on first
+    /// use if there is more than one segment.
+    fn as_contiguous_slice(&self) -> &[u8] {
+        match self.segments.as_slice() {
+            [] => &[],
+            [segment] => segment.as_slice(),
+            _ => self.contiguous.get_or_init(|| {
+                let mut bytes = Vec::with_capacity(self.len);
+                for segment in &self.segments {
+                    bytes.extend_from_slice(segment.as_slice());
+                }
+                bytes.into_boxed_slice()
+            }),
+        }
+    }
 }
 
 impl AccountData {
     pub fn as_slice(&self) -> &[u8] {
-        &self.data
+        match &self.repr {
+            Repr::Contiguous(data) => data,
+            Repr::Fragmented(list) => list.as_contiguous_slice(),
+        }
     }
 
     pub fn len(&self) -> usize {
-        self.data.len()
+        match &self.repr {
+            Repr::Contiguous(data) => data.len(),
+            Repr::Fragmented(list) => list.len,
+        }
     }
 
     pub fn is_empty(&self) -> bool {
-        self.data.is_empty()
+        self.len() == 0
     }
 
     /// Iterates the bytes as contiguous chunks whose concatenation is
     /// `as_slice()`, without requiring the whole range to be contiguous.
     pub fn data_chunks(&self) -> DataChunks<'_> {
-        DataChunks::single(self.as_slice())
+        match &self.repr {
+            Repr::Contiguous(data) => DataChunks::single(data),
+            Repr::Fragmented(list) => DataChunks {
+                inner: DataChunksInner::Segments(list.segments.iter()),
+            },
+        }
     }
 
-    /// Returns true if the underlying bytes are shared with another clone.
+    /// Returns true if mutating will copy the bytes: they are either shared
+    /// with another clone or not held in one contiguous buffer.
+    ///
+    /// Serialization relies on this to never map a buffer writable into the
+    /// VM while other clones can observe it.
     pub fn is_shared(&self) -> bool {
-        Arc::strong_count(&self.data) > 1
+        match &self.repr {
+            Repr::Contiguous(data) => Arc::strong_count(data) > 1,
+            Repr::Fragmented(_) => true,
+        }
     }
 
     /// Returns true if `self` and `other` share the same underlying bytes,
     /// i.e. they are clones of each other.
     pub fn ptr_eq(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.data, &other.data)
+        match (&self.repr, &other.repr) {
+            (Repr::Contiguous(left), Repr::Contiguous(right)) => Arc::ptr_eq(left, right),
+            (Repr::Fragmented(left), Repr::Fragmented(right)) => Arc::ptr_eq(left, right),
+            _ => false,
+        }
     }
 
+    /// The size of the contiguous buffer, i.e. `len()` plus any spare
+    /// capacity usable without reallocating. Fragmented data has none.
     pub fn capacity(&self) -> usize {
-        self.data.capacity()
+        match &self.repr {
+            Repr::Contiguous(data) => data.capacity(),
+            Repr::Fragmented(list) => list.len,
+        }
+    }
+
+    fn to_contiguous_vec(&self, additional_capacity: usize) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(self.len().saturating_add(additional_capacity));
+        for chunk in self.data_chunks() {
+            bytes.extend_from_slice(chunk);
+        }
+        bytes
     }
 
     fn make_mut(&mut self) -> &mut Vec<u8> {
-        Arc::make_mut(&mut self.data)
+        if let Repr::Fragmented(_) = &self.repr {
+            self.repr = Repr::Contiguous(Arc::new(self.to_contiguous_vec(0)));
+        }
+        match &mut self.repr {
+            Repr::Contiguous(data) => Arc::make_mut(data),
+            Repr::Fragmented(_) => unreachable!("made contiguous above"),
+        }
     }
 
     /// Returns a mutable view of the bytes, copying them first if shared.
@@ -205,15 +314,15 @@ impl AccountData {
     }
 
     pub fn reserve(&mut self, additional: usize) {
-        if let Some(data) = Arc::get_mut(&mut self.data) {
-            data.reserve(additional)
-        } else {
-            // Allocate the final capacity up front so the bytes are copied
-            // once, instead of make_mut's copy followed by a reallocation.
-            let mut data = Vec::with_capacity(self.data.len().saturating_add(additional));
-            data.extend_from_slice(&self.data);
-            self.data = Arc::new(data);
+        if let Repr::Contiguous(data) = &mut self.repr {
+            if let Some(data) = Arc::get_mut(data) {
+                data.reserve(additional);
+                return;
+            }
         }
+        // Allocate the final capacity up front so the bytes are copied
+        // once, instead of make_mut's copy followed by a reallocation.
+        self.repr = Repr::Contiguous(Arc::new(self.to_contiguous_vec(additional)));
     }
 
     pub fn resize(&mut self, new_len: usize, value: u8) {
@@ -226,10 +335,14 @@ impl AccountData {
 
     pub fn set_data_from_slice(&mut self, new_data: &[u8]) {
         // If the buffer isn't shared, we're going to memcpy in place.
-        let Some(data) = Arc::get_mut(&mut self.data) else {
+        let Repr::Contiguous(data) = &mut self.repr else {
+            self.repr = Repr::Contiguous(Arc::new(new_data.to_vec()));
+            return;
+        };
+        let Some(data) = Arc::get_mut(data) else {
             // If the buffer is shared, the cheapest thing to do is to clone the
             // incoming slice and replace the buffer.
-            self.data = Arc::new(new_data.to_vec());
+            self.repr = Repr::Contiguous(Arc::new(new_data.to_vec()));
             return;
         };
 
@@ -271,6 +384,79 @@ impl AccountData {
     fn into_vec(mut self) -> Vec<u8> {
         std::mem::take(self.make_mut())
     }
+
+    /// Builds fragmented data with one segment per chunk, for testing the
+    /// fragmented paths. Production fragmented data is only created by the
+    /// paged copy-on-write machinery.
+    #[cfg(feature = "dev-context-only-utils")]
+    pub fn from_chunks_for_tests(chunks: &[&[u8]]) -> Self {
+        let segments: Vec<_> = chunks
+            .iter()
+            .filter(|chunk| !chunk.is_empty())
+            .map(|chunk| Segment {
+                source: SegmentSource::Owned(Arc::new(chunk.to_vec())),
+                offset: 0,
+                len: chunk.len(),
+            })
+            .collect();
+        let len = segments.iter().map(|segment| segment.len).sum();
+        Self {
+            repr: Repr::Fragmented(Arc::new(SegmentList {
+                segments,
+                len,
+                contiguous: OnceLock::new(),
+            })),
+        }
+    }
+}
+
+impl PartialEq for AccountData {
+    fn eq(&self, other: &Self) -> bool {
+        if self.ptr_eq(other) {
+            return true;
+        }
+        if self.len() != other.len() {
+            return false;
+        }
+        // Compare chunkwise; the two sides may be chunked differently, so
+        // advance through both chunk sequences comparing the overlap.
+        let mut left_chunks = self.data_chunks();
+        let mut right_chunks = other.data_chunks();
+        let mut left: &[u8] = &[];
+        let mut right: &[u8] = &[];
+        loop {
+            while left.is_empty() {
+                match left_chunks.next() {
+                    Some(chunk) => left = chunk,
+                    // Chunk lengths sum to the (equal) data lengths on both
+                    // sides, so the right side is exhausted too.
+                    None => return true,
+                }
+            }
+            while right.is_empty() {
+                match right_chunks.next() {
+                    Some(chunk) => right = chunk,
+                    None => return true,
+                }
+            }
+            let overlap = left.len().min(right.len());
+            if left[..overlap] != right[..overlap] {
+                return false;
+            }
+            left = &left[overlap..];
+            right = &right[overlap..];
+        }
+    }
+}
+
+impl Eq for AccountData {}
+
+impl Default for AccountData {
+    fn default() -> Self {
+        Self {
+            repr: Repr::Contiguous(Arc::default()),
+        }
+    }
 }
 
 impl fmt::Debug for AccountData {
@@ -285,14 +471,69 @@ impl fmt::Debug for AccountData {
 impl From<Vec<u8>> for AccountData {
     fn from(data: Vec<u8>) -> Self {
         Self {
-            data: Arc::new(data),
+            repr: Repr::Contiguous(Arc::new(data)),
         }
     }
 }
 
 impl From<Arc<Vec<u8>>> for AccountData {
     fn from(data: Arc<Vec<u8>>) -> Self {
-        Self { data }
+        Self {
+            repr: Repr::Contiguous(data),
+        }
+    }
+}
+
+#[cfg(feature = "wincode")]
+// SAFETY: TYPE_META is left Dynamic; size_of and write delegate to the
+// slice schema, which writes exactly the bytes it sizes.
+unsafe impl<C: wincode::config::Config> wincode::SchemaWrite<C> for AccountData {
+    type Src = Self;
+
+    // The wire format is the plain byte-vector schema (length prefix plus
+    // bytes), independent of the in-memory representation. It must not
+    // change: snapshots serialize accounts through this.
+    fn size_of(src: &Self::Src) -> wincode::WriteResult<usize> {
+        <[u8] as wincode::SchemaWrite<C>>::size_of(src.as_slice())
+    }
+
+    fn write(writer: impl wincode::io::Writer, src: &Self::Src) -> wincode::WriteResult<()> {
+        <[u8] as wincode::SchemaWrite<C>>::write(writer, src.as_slice())
+    }
+}
+
+#[cfg(feature = "wincode")]
+// SAFETY: TYPE_META is left Dynamic; read initializes dst exactly when it
+// returns Ok, delegating to the byte-vector schema.
+unsafe impl<'de, C: wincode::config::Config> wincode::SchemaRead<'de, C> for AccountData {
+    type Dst = Self;
+
+    fn read(
+        reader: impl wincode::io::Reader<'de>,
+        dst: &mut MaybeUninit<Self::Dst>,
+    ) -> wincode::ReadResult<()> {
+        let bytes = <Vec<u8> as wincode::SchemaRead<'de, C>>::get(reader)?;
+        dst.write(Self::from(bytes));
+        Ok(())
+    }
+}
+
+#[cfg(feature = "frozen-abi")]
+impl solana_frozen_abi::abi_example::AbiExample for AccountData {
+    fn example() -> Self {
+        Self::from(<Arc<Vec<u8>> as solana_frozen_abi::abi_example::AbiExample>::example())
+    }
+}
+
+#[cfg(feature = "frozen-abi")]
+impl solana_frozen_abi::stable_abi::StableAbi for AccountData {
+    // Sample exactly like the previous `Arc<Vec<u8>>` representation so the
+    // abi digests of containing types don't change.
+    fn random_with_context(
+        rng: &mut (impl solana_frozen_abi::rand::RngCore + ?Sized),
+        _ctx: (),
+    ) -> Self {
+        Self::from(<Arc<Vec<u8>> as solana_frozen_abi::stable_abi::StableAbi>::random(rng))
     }
 }
 
@@ -304,13 +545,21 @@ impl From<Arc<Vec<u8>>> for AccountData {
 /// underlying representation doesn't have to materialize.
 #[derive(Debug)]
 pub struct DataChunks<'a> {
-    chunk: Option<&'a [u8]>,
+    inner: DataChunksInner<'a>,
+}
+
+#[derive(Debug)]
+enum DataChunksInner<'a> {
+    Single(Option<&'a [u8]>),
+    Segments(std::slice::Iter<'a, Segment>),
 }
 
 impl<'a> DataChunks<'a> {
     /// A single contiguous chunk.
     pub fn single(data: &'a [u8]) -> Self {
-        Self { chunk: Some(data) }
+        Self {
+            inner: DataChunksInner::Single(Some(data)),
+        }
     }
 }
 
@@ -318,7 +567,10 @@ impl<'a> Iterator for DataChunks<'a> {
     type Item = &'a [u8];
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.chunk.take()
+        match &mut self.inner {
+            DataChunksInner::Single(chunk) => chunk.take(),
+            DataChunksInner::Segments(segments) => segments.next().map(Segment::as_slice),
+        }
     }
 }
 
@@ -860,6 +1112,117 @@ pub const PROGRAM_OWNERS: &[Pubkey] = &[
 #[cfg(test)]
 pub mod tests {
     use super::*;
+
+    fn fragmented(chunks: &[&[u8]]) -> AccountData {
+        let account_data = AccountData::from_chunks_for_tests(chunks);
+        assert!(matches!(account_data.repr, Repr::Fragmented(_)));
+        account_data
+    }
+
+    #[test]
+    fn test_fragmented_read() {
+        let account_data = fragmented(&[b"hello", b" ", b"world"]);
+        assert_eq!(account_data.len(), 11);
+        assert!(!account_data.is_empty());
+        assert_eq!(
+            account_data.data_chunks().collect::<Vec<_>>(),
+            [b"hello".as_slice(), b" ", b"world"]
+        );
+        // as_slice materializes (and caches) one contiguous copy
+        assert_eq!(account_data.as_slice(), b"hello world");
+        assert_eq!(
+            account_data.as_slice().as_ptr(),
+            account_data.as_slice().as_ptr()
+        );
+    }
+
+    #[test]
+    fn test_fragmented_single_segment_reads_without_materializing() {
+        let account_data = fragmented(&[b"hello"]);
+        let Repr::Fragmented(list) = &account_data.repr else {
+            unreachable!()
+        };
+        assert_eq!(account_data.as_slice(), b"hello");
+        assert!(list.contiguous.get().is_none());
+    }
+
+    #[test]
+    fn test_fragmented_eq() {
+        let contiguous = AccountData::from(b"hello world".to_vec());
+        assert_eq!(fragmented(&[b"hello", b" ", b"world"]), contiguous);
+        assert_eq!(contiguous, fragmented(&[b"hello", b" ", b"world"]));
+        // same bytes, different chunk boundaries
+        assert_eq!(
+            fragmented(&[b"hel", b"lo world"]),
+            fragmented(&[b"hello ", b"world"])
+        );
+        assert_ne!(
+            fragmented(&[b"hello", b" ", "worlD".as_bytes()]),
+            contiguous
+        );
+        // same length, difference within a chunk overlap
+        assert_ne!(
+            fragmented(&[b"hel", b"lo world"]),
+            fragmented(&[b"hellO ", b"world"])
+        );
+        assert_ne!(
+            fragmented(&[b"hello"]),
+            AccountData::from(b"hello world".to_vec())
+        );
+    }
+
+    #[test]
+    fn test_fragmented_is_shared_and_mutation_materializes() {
+        let account_data = fragmented(&[b"hello", b" ", b"world"]);
+        // fragmented data always copies on mutation, so it reports shared
+        assert!(account_data.is_shared());
+
+        let mut resized = account_data.clone();
+        resized.resize(13, b'!');
+        assert!(matches!(resized.repr, Repr::Contiguous(_)));
+        assert!(!resized.is_shared());
+        assert_eq!(resized.as_slice(), b"hello world!!");
+
+        let mut extended = account_data.clone();
+        extended.extend_from_slice(b"!!");
+        assert_eq!(extended.as_slice(), b"hello world!!");
+
+        let mut mutated = account_data.clone();
+        mutated.as_mut_slice()[0] = b'H';
+        assert_eq!(mutated.as_slice(), b"Hello world");
+
+        let mut replaced = account_data.clone();
+        replaced.set_data_from_slice(b"bye");
+        assert_eq!(replaced.as_slice(), b"bye");
+
+        let mut reserved = account_data.clone();
+        reserved.reserve(100);
+        assert!(reserved.capacity() >= 111);
+        assert_eq!(reserved.as_slice(), b"hello world");
+
+        // the original is untouched throughout
+        assert_eq!(account_data.as_slice(), b"hello world");
+    }
+
+    #[test]
+    fn test_fragmented_ptr_eq() {
+        let account_data = fragmented(&[b"hello", b" ", b"world"]);
+        let clone = account_data.clone();
+        assert!(account_data.ptr_eq(&clone));
+        assert!(!account_data.ptr_eq(&fragmented(&[b"hello", b" ", b"world"])));
+        // equal bytes, different representation
+        let contiguous = AccountData::from(b"hello world".to_vec());
+        assert!(!account_data.ptr_eq(&contiguous));
+        assert_eq!(account_data, contiguous);
+    }
+
+    #[test]
+    fn test_fragmented_into_vec() {
+        let mut account = AccountSharedData::new(1, 0, &Pubkey::new_unique());
+        account.data = fragmented(&[b"hello", b" ", b"world"]);
+        let converted = Account::from(account);
+        assert_eq!(converted.data, b"hello world");
+    }
 
     fn make_two_accounts(key: &Pubkey) -> (Account, AccountSharedData) {
         let mut account1 = Account::new(1, 2, key);

@@ -13,8 +13,8 @@ use {
     itertools::Itertools,
     rand::{Rng, prelude::SliceRandom, rng},
     solana_account::{
-        Account, AccountSharedData, DUMMY_INHERITABLE_ACCOUNT_FIELDS, InheritableAccountFields,
-        ReadableAccount, WritableAccount, accounts_equal,
+        Account, AccountData, AccountSharedData, DUMMY_INHERITABLE_ACCOUNT_FIELDS,
+        InheritableAccountFields, ReadableAccount, WritableAccount, accounts_equal,
     },
     solana_lattice_hash::lt_hash::Checksum as LtHashChecksum,
     solana_pubkey::PUBKEY_BYTES,
@@ -2453,6 +2453,25 @@ fn test_hash_stored_account() {
             .0
             .checksum(),
         "chunked hashing of large accounts must be consistent with contiguous hashing"
+    );
+
+    // An account with fragmented data must hash identically to the same
+    // bytes held contiguously.
+    let fragmented_account = AccountSharedData::create_from_existing_shared_data(
+        account.lamports(),
+        AccountData::from_chunks_for_tests(&[&data[..512], &data[512..]]),
+        *account.owner(),
+        account.executable(),
+        account.rent_epoch(),
+    );
+    assert_eq!(
+        AccountsDb::lt_hash_account(&fragmented_account, stored_account.pubkey())
+            .0
+            .checksum(),
+        AccountsDb::lt_hash_account(&account, stored_account.pubkey())
+            .0
+            .checksum(),
+        "hashing fragmented data must be consistent with contiguous hashing"
     );
 }
 
