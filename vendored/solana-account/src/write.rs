@@ -9,11 +9,15 @@
 
 use crate::AccountData;
 
-/// Minimum data length for the kernel-COW gather path. Below this the fixed
-/// syscall cost of building and committing a gather (a few mmaps, a memfd,
-/// a pagemap read: ~15-20us measured) exceeds just copying the bytes.
+/// Minimum data length for the kernel-COW gather path.
+///
+/// Set to one page while the machinery is being proven, so every multi-page
+/// account exercises it. For production this wants raising to roughly the
+/// break-even point where the fixed syscall cost of a gather session (a few
+/// mmaps, a memfd, a pagemap read: ~15-20us measured) matches copying the
+/// bytes instead — around 256KiB-1MiB; tune from replay benchmarks.
 #[cfg(target_os = "linux")]
-const GATHER_MIN_DATA_LEN: usize = 1024 * 1024;
+const GATHER_MIN_DATA_LEN: usize = 4096;
 
 /// An open write session on account data. The view is contiguous and its
 /// base pointer is stable for the session's lifetime; `resize` within the

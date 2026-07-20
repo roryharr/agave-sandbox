@@ -527,6 +527,35 @@ mod tests {
         write.is_gather_for_tests()
     }
 
+    #[test]
+    fn test_threshold_boundary() {
+        // one byte under a page: contiguous session
+        let under = AccountData::from(vec![1; PAGE_SIZE - 1]);
+        assert!(!is_gather(&under.begin_write(RESERVE)));
+
+        // exactly one page: gather, including partial-page growth and a
+        // second COW cycle on single-page data
+        let base = AccountData::from(pattern(PAGE_SIZE));
+        let mut write = base.begin_write(RESERVE);
+        assert!(is_gather(&write));
+        write.as_mut_slice()[17] = 0xAB;
+        assert!(write.resize(PAGE_SIZE + 100, 3));
+        let committed = write.commit();
+        let mut expected = pattern(PAGE_SIZE);
+        expected[17] = 0xAB;
+        expected.resize(PAGE_SIZE + 100, 3);
+        assert_eq!(committed.as_slice(), expected.as_slice());
+
+        let mut write = committed.begin_write(RESERVE);
+        assert!(is_gather(&write));
+        write.as_mut_slice()[PAGE_SIZE + 50] = 0xCD;
+        expected[PAGE_SIZE + 50] = 0xCD;
+        let again = write.commit();
+        assert_eq!(again.as_slice(), expected.as_slice());
+        // the first version is isolated from the second's writes
+        assert_ne!(committed.as_slice()[PAGE_SIZE + 50], 0xCD);
+    }
+
     fn pattern(len: usize) -> Vec<u8> {
         (0..len)
             .map(|i| (i / PAGE_SIZE) as u8 ^ (i % 251) as u8)
