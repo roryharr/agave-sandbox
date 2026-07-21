@@ -1128,6 +1128,55 @@ fn test_clean_reclaim_marks_zero_lamport_single_ref() {
 }
 
 #[test]
+fn test_clean_reclaim_dead_slots_with_gated_candidate() {
+    // Exercises clean's main reclaim path assertion `dead_slots == expected_dead_slots` when
+    // one candidate is purged while another, sharing the same older storage, is gated behind
+    // the full snapshot. The gated candidate must be excluded from the reclaim set (never added
+    // to pubkey_to_slot_set), otherwise its slot would land in expected_dead_slots without dying.
+    let accounts = AccountsDb::default_for_tests();
+    let pubkey1 = Pubkey::new_unique();
+    let pubkey2 = Pubkey::new_unique();
+    let account = AccountSharedData::new(1, 0, &Pubkey::default());
+    let zero_lamport_account = AccountSharedData::new(0, 0, &Pubkey::default());
+
+    // pubkey1 and pubkey2 share slot 10; pubkey1 is deleted (zero lamport) in slot 11 and
+    // pubkey2 in slot 12.
+    accounts.store_for_tests((10, [(&pubkey1, &account), (&pubkey2, &account)].as_slice()));
+    accounts.add_root(10);
+    accounts.store_for_tests((11, [(&pubkey1, &zero_lamport_account)].as_slice()));
+    accounts.add_root(11);
+    accounts.store_for_tests((12, [(&pubkey2, &zero_lamport_account)].as_slice()));
+    accounts.add_root(12);
+
+    // Flush without cleaning, so slot 10's superseded versions survive for clean to reclaim.
+    accounts.flush_rooted_accounts_cache_without_clean();
+
+    // Gate zero-lamport purging above slot 11: pubkey1's deletion (slot 11) can be purged now,
+    // pubkey2's (slot 12) is covered by the full snapshot and must be deferred.
+    accounts.set_latest_full_snapshot_slot(11);
+    accounts.clean_accounts(Some(12), false);
+
+    // pubkey1 is fully purged; slot 11's storage, left with no live accounts, is dropped. This
+    // is the reclaim whose slot must appear in both dead_slots and expected_dead_slots.
+    assert!(!accounts.accounts_index.contains(&pubkey1));
+    assert_no_storages_at_slot(&accounts, 11);
+
+    // pubkey2's purge is gated, so it survives as a zero-lamport single-ref in slot 12 and is
+    // queued for the post-full-snapshot sweep rather than reclaimed here.
+    assert_eq!(accounts.accounts_index.ref_count_from_storage(&pubkey2), 1);
+    let storage = accounts.storage.get_slot_storage_entry(12).unwrap();
+    assert_eq!(storage.num_zero_lamport_single_ref_accounts(), 1);
+    assert!(
+        accounts
+            .zero_lamport_accounts_to_purge_after_full_snapshot
+            .contains(&(12, pubkey2))
+    );
+
+    // The shared older slot 10 is emptied by the older-root reclaim and dropped.
+    assert_no_storages_at_slot(&accounts, 10);
+}
+
+#[test]
 fn test_clean_dead_slot_with_obsolete_accounts() {
     // This test is triggering a scenario in reclaim_accounts where the entire slot is reclaimed
     // When an entire slot is reclaimed, it normally unrefs the pubkeys, while when individual
@@ -1187,37 +1236,6 @@ fn test_clean_dead_slot_with_obsolete_accounts() {
 }
 
 #[test]
-#[should_panic(expected = "ref count expected to be zero")]
-fn test_remove_zero_lamport_multi_ref_accounts_panic() {
-    let accounts = AccountsDb::new_for_tests_with_config(Vec::new(), DEFAULT_ACCOUNTS_DB_CONFIG);
-    let pubkey_zero = Pubkey::from([1; 32]);
-    let one_lamport_account = AccountSharedData::new(1, 0, AccountSharedData::default().owner());
-
-    let zero_lamport_account = AccountSharedData::new(0, 0, AccountSharedData::default().owner());
-    let slot = 1;
-
-    accounts.store_for_tests((slot, [(&pubkey_zero, &one_lamport_account)].as_slice()));
-
-    // Flush without cleaning to avoid reclaiming pubkey_zero early
-    accounts.add_root(1);
-    accounts.flush_rooted_accounts_cache_without_clean();
-
-    accounts.store_for_tests((slot + 1, [(&pubkey_zero, &zero_lamport_account)].as_slice()));
-
-    // Flush without cleaning to avoid reclaiming pubkey_zero early
-    accounts.add_root(2);
-    accounts.flush_rooted_accounts_cache_without_clean();
-
-    // This should panic because there are 2 refs for pubkey_zero.
-    accounts.remove_zero_lamport_single_ref_accounts_after_shrink(
-        &[&pubkey_zero],
-        slot,
-        &ShrinkStats::default(),
-        true,
-    );
-}
-
-#[test]
 fn test_remove_zero_lamport_single_ref_accounts_after_shrink() {
     for pass in 0..3 {
         let accounts =
@@ -1271,7 +1289,6 @@ fn test_remove_zero_lamport_single_ref_accounts_after_shrink() {
             &zero_lamport_single_ref_pubkeys,
             slot,
             &ShrinkStats::default(),
-            true,
         );
 
         accounts.accounts_index.get_and_then(&pubkey_zero, |entry| {
@@ -1560,7 +1577,6 @@ fn test_shrink_converts_zero_lamport_single_ref_account_to_tombstone() {
             .unwrap();
         accounts_db.remove_dead_accounts(
             [account_info].iter(),
-            None,
             MarkAccountsObsolete::Yes(slot1),
         );
     }
@@ -2815,14 +2831,6 @@ fn test_exhaustively_verify_refcounts_small_dataset_detects_mismatch() {
     });
 
     accounts.exhaustively_verify_refcounts(Some(slot));
-}
-
-#[test]
-fn test_clean_stored_dead_slots_empty() {
-    let accounts = AccountsDb::new_for_tests_with_config(Vec::new(), DEFAULT_ACCOUNTS_DB_CONFIG);
-    let mut dead_slots = IntSet::default();
-    dead_slots.insert(10);
-    accounts.clean_stored_dead_slots(&dead_slots, None, &HashSet::default());
 }
 
 #[test]
@@ -4293,7 +4301,6 @@ fn test_alive_bytes() {
             num_obsolete_accounts += reclaims.len();
             accounts_db.remove_dead_accounts(
                 reclaims.iter(),
-                None,
                 MarkAccountsObsolete::Yes(slot),
             );
             let after_size = storage0.alive_bytes();
@@ -5931,166 +5938,6 @@ fn test_filter_zero_lamport_clean_for_incremental_snapshots() {
 }
 
 #[test]
-/// test 'unref' parameter 'pubkeys_removed_from_accounts_index'
-fn test_unref_pubkeys_removed_from_accounts_index() {
-    let slot1 = 1;
-    let pk1 = Pubkey::from([1; 32]);
-    for already_removed in [false, true] {
-        let mut pubkeys_removed_from_accounts_index = PubkeysRemovedFromAccountsIndex::default();
-        if already_removed {
-            pubkeys_removed_from_accounts_index.insert(pk1);
-        }
-        // pk1 in slot1, purge it
-        let db = AccountsDb::new_for_tests_with_config(Vec::new(), DEFAULT_ACCOUNTS_DB_CONFIG);
-        let mut purged_slot_pubkeys = HashSet::default();
-        purged_slot_pubkeys.insert((slot1, pk1));
-        let mut reclaims = ReclaimsSlotList::default();
-        db.accounts_index.upsert(
-            slot1,
-            slot1,
-            &pk1,
-            AccountInfo::default(),
-            &mut reclaims,
-            UpsertReclaim::IgnoreReclaims,
-        );
-
-        let mut purged_stored_account_slots = AccountSlots::default();
-        db.unref_accounts(
-            purged_slot_pubkeys,
-            &mut purged_stored_account_slots,
-            &pubkeys_removed_from_accounts_index,
-        );
-        assert_eq!(
-            vec![(pk1, vec![slot1].into_iter().collect::<IntSet<_>>())],
-            purged_stored_account_slots.into_iter().collect::<Vec<_>>()
-        );
-        let expected = RefCount::from(already_removed);
-        assert_eq!(db.accounts_index.ref_count_from_storage(&pk1), expected);
-    }
-}
-
-#[test]
-fn test_unref_accounts() {
-    let pubkeys_removed_from_accounts_index = PubkeysRemovedFromAccountsIndex::default();
-
-    {
-        let db = AccountsDb::new_for_tests_with_config(Vec::new(), DEFAULT_ACCOUNTS_DB_CONFIG);
-        let mut purged_stored_account_slots = AccountSlots::default();
-
-        db.unref_accounts(
-            HashSet::default(),
-            &mut purged_stored_account_slots,
-            &pubkeys_removed_from_accounts_index,
-        );
-        assert!(purged_stored_account_slots.is_empty());
-    }
-
-    let slot1 = 1;
-    let slot2 = 2;
-    let pk1 = Pubkey::from([1; 32]);
-    let pk2 = Pubkey::from([2; 32]);
-    {
-        // pk1 in slot1, purge it
-        let db = AccountsDb::new_for_tests_with_config(Vec::new(), DEFAULT_ACCOUNTS_DB_CONFIG);
-        let mut purged_slot_pubkeys = HashSet::default();
-        purged_slot_pubkeys.insert((slot1, pk1));
-        let mut reclaims = ReclaimsSlotList::default();
-        db.accounts_index.upsert(
-            slot1,
-            slot1,
-            &pk1,
-            AccountInfo::default(),
-            &mut reclaims,
-            UpsertReclaim::IgnoreReclaims,
-        );
-
-        let mut purged_stored_account_slots = AccountSlots::default();
-        db.unref_accounts(
-            purged_slot_pubkeys,
-            &mut purged_stored_account_slots,
-            &pubkeys_removed_from_accounts_index,
-        );
-        assert_eq!(
-            vec![(pk1, vec![slot1].into_iter().collect::<IntSet<_>>())],
-            purged_stored_account_slots.into_iter().collect::<Vec<_>>()
-        );
-        assert_eq!(db.accounts_index.ref_count_from_storage(&pk1), 0);
-    }
-    {
-        let db = AccountsDb::new_for_tests_with_config(Vec::new(), DEFAULT_ACCOUNTS_DB_CONFIG);
-        let mut purged_stored_account_slots = AccountSlots::default();
-        let mut purged_slot_pubkeys = HashSet::default();
-        let mut reclaims = ReclaimsSlotList::default();
-        // pk1 and pk2 both in slot1 and slot2, so each has refcount of 2
-        for slot in [slot1, slot2] {
-            for pk in [pk1, pk2] {
-                db.accounts_index.upsert(
-                    slot,
-                    slot,
-                    &pk,
-                    AccountInfo::default(),
-                    &mut reclaims,
-                    UpsertReclaim::IgnoreReclaims,
-                );
-            }
-        }
-        // purge pk1 from both 1 and 2 and pk2 from slot 1
-        let purges = vec![(slot1, pk1), (slot1, pk2), (slot2, pk1)];
-        purges.into_iter().for_each(|(slot, pk)| {
-            purged_slot_pubkeys.insert((slot, pk));
-        });
-        db.unref_accounts(
-            purged_slot_pubkeys,
-            &mut purged_stored_account_slots,
-            &pubkeys_removed_from_accounts_index,
-        );
-        for (pk, slots) in [(pk1, vec![slot1, slot2]), (pk2, vec![slot1])] {
-            let result = purged_stored_account_slots.remove(&pk).unwrap();
-            assert_eq!(result, slots.into_iter().collect::<IntSet<_>>());
-        }
-        assert!(purged_stored_account_slots.is_empty());
-        assert_eq!(db.accounts_index.ref_count_from_storage(&pk1), 0);
-        assert_eq!(db.accounts_index.ref_count_from_storage(&pk2), 1);
-    }
-}
-
-#[test]
-fn test_many_unrefs() {
-    let db = AccountsDb::new_for_tests_with_config(Vec::new(), DEFAULT_ACCOUNTS_DB_CONFIG);
-    let mut purged_stored_account_slots = AccountSlots::default();
-    let mut reclaims = ReclaimsSlotList::default();
-    let pk1 = Pubkey::from([1; 32]);
-    // make sure we have > 1 batch. Bigger numbers cost more in test time here.
-    let n = (UNREF_ACCOUNTS_BATCH_SIZE + 1) as Slot;
-    // put the pubkey into the acct idx in 'n' slots
-    let purged_slot_pubkeys = (0..n)
-        .map(|slot| {
-            db.accounts_index.upsert(
-                slot,
-                slot,
-                &pk1,
-                AccountInfo::default(),
-                &mut reclaims,
-                UpsertReclaim::IgnoreReclaims,
-            );
-            (slot, pk1)
-        })
-        .collect::<HashSet<_>>();
-
-    assert_eq!(
-        db.accounts_index.ref_count_from_storage(&pk1),
-        n as RefCount,
-    );
-    // unref all 'n' slots
-    db.unref_accounts(
-        purged_slot_pubkeys,
-        &mut purged_stored_account_slots,
-        &HashSet::default(),
-    );
-    assert_eq!(db.accounts_index.ref_count_from_storage(&pk1), 0);
-}
-
-#[test]
 fn test_mark_dirty_dead_stores_empty() {
     let db = AccountsDb::new_for_tests_with_config(Vec::new(), DEFAULT_ACCOUNTS_DB_CONFIG);
     let slot = 0;
@@ -6155,15 +6002,6 @@ fn test_mark_dirty_dead_stores() {
         }
         assert!(db.storage.get_slot_storage_entry(slot).is_some());
     }
-}
-
-#[test]
-fn test_add_uncleaned_pubkeys_after_shrink() {
-    let db = AccountsDb::new_for_tests_with_config(Vec::new(), DEFAULT_ACCOUNTS_DB_CONFIG);
-    let slot = 0;
-    let pubkey = Pubkey::from([1; 32]);
-    db.add_uncleaned_pubkeys_after_shrink(slot, vec![pubkey].into_iter());
-    assert_eq!(&*db.uncleaned_pubkeys.get(&slot).unwrap(), &vec![pubkey]);
 }
 
 #[test]
@@ -6453,15 +6291,30 @@ fn test_shrink_collect_simple() {
                                 }
                             }
                             db.add_root_and_flush_write_cache(slot5);
+                            let storage = db.get_storage_for_slot(slot5).unwrap();
+                            // mark dead accounts obsolete and remove them from the index, as
+                            // clean does when it reclaims an account
                             to_purge.iter().for_each(|pubkey| {
+                                let account_info = db
+                                    .accounts_index
+                                    .get_with_and_then(
+                                        pubkey,
+                                        &Ancestors::from(vec![slot5]),
+                                        false,
+                                        |(_slot, account_info)| account_info,
+                                    )
+                                    .unwrap();
+                                let data_len = if is_zero_lamport(pubkey) { 0 } else { space };
+                                storage.obsolete_accounts.write().unwrap().mark_accounts_obsolete(
+                                    std::iter::once((account_info.offset(), data_len)),
+                                    slot5,
+                                );
                                 db.accounts_index.purge_exact(
                                     pubkey,
                                     [slot5].into_iter().collect::<HashSet<_>>(),
                                     &mut ReclaimsSlotList::new(),
                                 );
                             });
-
-                            let storage = db.get_storage_for_slot(slot5).unwrap();
                             let mut unique_accounts = db
                                 .get_unique_accounts_from_storage_for_shrink(
                                     &storage,
@@ -6513,16 +6366,6 @@ fn test_shrink_collect_simple() {
                                     .collect::<Vec<_>>()
                             };
 
-                            let expected_unrefed = if alive {
-                                expect_single_opposite_alive_account.clone()
-                            } else {
-                                pubkeys[..normal_account_count]
-                                    .iter()
-                                    .sorted()
-                                    .cloned()
-                                    .collect::<Vec<_>>()
-                            };
-
                             assert_eq!(shrink_collect.slot, slot5);
 
                             assert_eq!(
@@ -6555,16 +6398,6 @@ fn test_shrink_collect_simple() {
                                     .sorted()
                                     .collect::<Vec<_>>(),
                                 expected_tombstones
-                            );
-                            assert_eq!(
-                                shrink_collect
-                                    .pubkeys_to_unref
-                                    .iter()
-                                    .sorted()
-                                    .cloned()
-                                    .cloned()
-                                    .collect::<Vec<_>>(),
-                                expected_unrefed
                             );
 
                             let alive_total_one_account = AppendVec::calculate_stored_size(space);
@@ -6617,7 +6450,7 @@ fn test_shrink_collect_with_obsolete_accounts() {
 
     let mut regular_pubkeys = Vec::new();
     let mut obsolete_pubkeys = Vec::new();
-    let mut unref_pubkeys = Vec::new();
+    let mut purged_pubkeys = Vec::new();
 
     for (i, pubkey) in pubkeys.iter().enumerate() {
         if i % 3 == 0 {
@@ -6651,20 +6484,26 @@ fn test_shrink_collect_with_obsolete_accounts() {
                 .get_with_and_then(pubkey, &ancestors, false, |account_info| {
                     db.remove_dead_accounts(
                         [account_info].iter(),
-                        None,
                         MarkAccountsObsolete::Yes(slot),
                     );
                 });
 
             obsolete_pubkeys.push(*pubkey);
         } else if i % 4 == 0 {
-            // Purge accounts via clean and ensure that they will be unreffed.
+            // Mark obsolete and remove from the index, as clean does when it reclaims an account
+            db.accounts_index
+                .get_with_and_then(pubkey, &ancestors, false, |account_info| {
+                    db.remove_dead_accounts(
+                        [account_info].iter(),
+                        MarkAccountsObsolete::Yes(slot),
+                    );
+                });
             db.accounts_index.purge_exact(
                 pubkey,
                 [slot].into_iter().collect::<HashSet<_>>(),
                 &mut ReclaimsSlotList::new(),
             );
-            unref_pubkeys.push(*pubkey);
+            purged_pubkeys.push(*pubkey);
         }
     }
 
@@ -6679,16 +6518,7 @@ fn test_shrink_collect_with_obsolete_accounts() {
 
     assert_eq!(shrink_collect.slot, slot);
 
-    // Ensure that the keys to unref does not include the obsolete accounts and only includes the unreferenced accounts
-    assert_eq!(
-        shrink_collect
-            .pubkeys_to_unref
-            .into_iter()
-            .collect::<HashSet<_>>(),
-        unref_pubkeys.iter().clone().collect::<HashSet<_>>()
-    );
-
-    // Ensure that the obsolete accounts and accounts to unref are not in the alive list
+    // Ensure that the obsolete and purged accounts are not in the alive list
     assert_eq!(
         shrink_collect
             .alive_accounts
@@ -6699,7 +6529,7 @@ fn test_shrink_collect_with_obsolete_accounts() {
             .collect::<Vec<Pubkey>>(),
         regular_pubkeys
             .into_iter()
-            .filter(|account| !unref_pubkeys.contains(account))
+            .filter(|account| !purged_pubkeys.contains(account))
             .filter(|account| !obsolete_pubkeys.contains(account))
             .sorted()
             .collect::<Vec<Pubkey>>()

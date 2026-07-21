@@ -294,14 +294,12 @@ impl FlushStats {
 #[derive(Debug, Default)]
 pub struct CleanAccountsStats {
     pub purge_stats: PurgeStats,
-    pub clean_unref_from_storage_us: AtomicU64,
 
     // stats held here and reported by clean_accounts
     pub clean_old_root_us: AtomicU64,
     pub clean_old_root_reclaim_us: AtomicU64,
     pub remove_dead_accounts_remove_us: AtomicU64,
     pub remove_dead_accounts_shrink_us: AtomicU64,
-    pub clean_stored_dead_slots_us: AtomicU64,
     pub get_account_sizes_us: AtomicU64,
     pub slots_cleaned: AtomicU64,
 }
@@ -388,7 +386,6 @@ pub struct ShrinkStats {
     pub bytes_removed: AtomicU64,
     pub bytes_written: AtomicU64,
     pub skipped_shrink: AtomicU64,
-    pub dead_accounts: AtomicU64,
     pub alive_accounts: AtomicU64,
     pub index_scan_returned_none: AtomicU64,
     pub index_scan_returned_some: AtomicU64,
@@ -565,11 +562,6 @@ impl ShrinkStats {
                 (
                     "alive_accounts",
                     self.alive_accounts.swap(0, Ordering::Relaxed),
-                    i64
-                ),
-                (
-                    "dead_accounts",
-                    self.dead_accounts.swap(0, Ordering::Relaxed),
                     i64
                 ),
                 (
@@ -783,11 +775,6 @@ impl ShrinkAncientStats {
             (
                 "alive_accounts",
                 self.shrink_stats.alive_accounts.swap(0, Ordering::Relaxed),
-                i64
-            ),
-            (
-                "dead_accounts",
-                self.shrink_stats.dead_accounts.swap(0, Ordering::Relaxed),
                 i64
             ),
             (

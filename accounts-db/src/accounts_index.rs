@@ -193,12 +193,6 @@ pub enum AccountsIndexScanResult {
     OnlyKeepInMemoryIfDirty,
     /// keep the entry in the in-memory index
     KeepInMemory,
-    /// reduce refcount by 1
-    Unref,
-    /// reduce refcount by 1 and assert that ref_count = 0 after unref
-    UnrefAssert0,
-    /// reduce refcount by 1 and log if ref_count != 0 after unref
-    UnrefLog0,
 }
 
 #[derive(Debug)]
@@ -533,36 +527,6 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> AccountsIndex<T, U> {
                             callback(pubkey, Some((slot_list.as_ref(), locked_entry.ref_count())))
                         };
                         cache = match result {
-                            AccountsIndexScanResult::Unref => {
-                                locked_entry.unref();
-                                true
-                            }
-                            AccountsIndexScanResult::UnrefAssert0 => {
-                                assert_eq!(
-                                    locked_entry.unref(),
-                                    1,
-                                    "ref count expected to be zero, but is {}! {pubkey}, {:?}",
-                                    locked_entry.ref_count(),
-                                    locked_entry.slot_list_read_lock(),
-                                );
-                                true
-                            }
-                            AccountsIndexScanResult::UnrefLog0 => {
-                                let old_ref = locked_entry.unref();
-                                if old_ref != 1 {
-                                    info!(
-                                        "Unexpected unref {pubkey} with {old_ref} {:?}, expect \
-                                         old_ref to be 1",
-                                        locked_entry.slot_list_read_lock()
-                                    );
-                                    datapoint_warn!(
-                                        "accounts_db-unexpected-unref-zero",
-                                        ("old_ref", old_ref, i64),
-                                        ("pubkey", pubkey.to_string(), String),
-                                    );
-                                }
-                                true
-                            }
                             AccountsIndexScanResult::KeepInMemory => true,
                             AccountsIndexScanResult::OnlyKeepInMemoryIfDirty => false,
                         };
