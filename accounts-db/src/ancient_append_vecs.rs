@@ -1132,7 +1132,7 @@ mod tests {
                     remove_account_for_tests,
                 },
             },
-            accounts_index::ReclaimsSlotList,
+            accounts_index::{ReclaimsSlotList, UpsertReclaim},
             append_vec::{self, AppendVec},
             storable_accounts::StorableAccountsBySlot,
             utils::create_account_shared_data,
@@ -1177,6 +1177,29 @@ mod tests {
             slot1..(slot1 + slots as Slot),
             slot_infos,
         )
+    }
+
+    /// Give every account backing `storages` a second index entry at slot 0. Sample-storage
+    /// slots start at 1, so slot 0 is older than all of them: each account ends up with
+    /// slot_list.len() == 2 while its storage slot stays newest, i.e. a genuine
+    /// `many_refs_this_is_newest_alive` account. Replaces the old `addref` shortcut, which
+    /// fabricated a ref_count with no matching slot (meaningless now that ref_count == len).
+    fn add_older_ref(db: &AccountsDb, storages: &[Arc<AccountStorageEntry>]) {
+        storages.iter().for_each(|storage| {
+            db.get_unique_accounts_from_storage(storage)
+                .stored_accounts
+                .iter()
+                .for_each(|account| {
+                    db.accounts_index.upsert(
+                        0,
+                        0,
+                        account.pubkey(),
+                        AccountInfo::new(StorageLocation::AppendVec(0, 0), false),
+                        &mut ReclaimsSlotList::new(),
+                        UpsertReclaim::IgnoreReclaims,
+                    );
+                });
+        });
     }
 
     fn unique_to_accounts<'a>(
@@ -1635,18 +1658,8 @@ mod tests {
                             infos = infos.into_iter().rev().collect();
                         }
 
-                        let original_results = storages
-                            .iter()
-                            .map(|store| db.get_unique_accounts_from_storage(store))
-                            .collect::<Vec<_>>();
                         if two_refs {
-                            original_results.iter().for_each(|results| {
-                                results.stored_accounts.iter().for_each(|account| {
-                                    db.accounts_index.get_and_then(account.pubkey(), |entry| {
-                                        (false, entry.unwrap().addref())
-                                    });
-                                })
-                            });
+                            add_older_ref(&db, &storages);
                         }
 
                         let original_results = storages
@@ -1743,19 +1756,8 @@ mod tests {
                                     slots_vec = slots.collect::<Vec<_>>()
                                 }
 
-                                let original_results = storages
-                                    .iter()
-                                    .map(|store| db.get_unique_accounts_from_storage(store))
-                                    .collect::<Vec<_>>();
                                 if two_refs {
-                                    original_results.iter().for_each(|results| {
-                                        results.stored_accounts.iter().for_each(|account| {
-                                            db.accounts_index
-                                                .get_and_then(account.pubkey(), |entry| {
-                                                    (false, entry.unwrap().addref())
-                                                });
-                                        })
-                                    });
+                                    add_older_ref(&db, &storages);
                                 }
 
                                 if add_dead_account {
@@ -2162,6 +2164,12 @@ mod tests {
             let pk_with_2_refs = account_with_2_refs.pubkey();
             let mut account_with_1_ref = account_shared_data_with_2_refs.clone();
             _ = account_with_1_ref.checked_add_lamports(1);
+
+            // Give the original account a second, older index entry so it is genuinely 2-ref
+            // (newest copy still here). Do this before appending pk_with_1_ref, so only the
+            // original account is affected.
+            add_older_ref(&db, &storages);
+
             append_single_account_with_default_hash(
                 &storage,
                 &pk_with_1_ref,
@@ -2169,12 +2177,6 @@ mod tests {
                 true,
                 Some(&db.accounts_index),
             );
-            original_results.iter().for_each(|results| {
-                results.stored_accounts.iter().for_each(|account| {
-                    db.accounts_index
-                        .get_and_then(account.pubkey(), |entry| (true, entry.unwrap().addref()));
-                })
-            });
 
             // update to get both accounts in the storage
             let original_results = storages
@@ -3596,16 +3598,19 @@ mod tests {
                 let account = AccountFromStorage::new(offset, &stored_account);
                 let slot = 1;
                 let capacity = 0;
-                for i in 0..4usize {
+                for i in 0..3usize {
                     let mut alive_accounts =
                         ShrinkCollectAliveSeparatedByRefs::with_capacity(capacity, slot);
                     let lamports = 1;
 
                     match i {
                         0 => {
-                            // empty slot list (ignored anyway) because ref_count = 1
-                            let slot_list = vec![];
-                            alive_accounts.add(1, &account, &slot_list);
+                            // single slot in the index (ref_count == 1) => one_ref
+                            let slot_list = vec![(
+                                slot,
+                                AccountInfo::new(StorageLocation::AppendVec(0, 0), lamports == 0),
+                            )];
+                            alive_accounts.add(&account, &slot_list);
                             assert!(!alive_accounts.one_ref.accounts.is_empty());
                             assert!(alive_accounts.many_refs_old_alive.accounts.is_empty());
                             assert!(
@@ -3616,23 +3621,7 @@ mod tests {
                             );
                         }
                         1 => {
-                            // non-empty slot list (but ignored) because slot_list = 1
-                            let slot_list = vec![(
-                                slot,
-                                AccountInfo::new(StorageLocation::AppendVec(0, 0), lamports == 0),
-                            )];
-                            alive_accounts.add(2, &account, &slot_list);
-                            assert!(alive_accounts.one_ref.accounts.is_empty());
-                            assert!(alive_accounts.many_refs_old_alive.accounts.is_empty());
-                            assert!(
-                                !alive_accounts
-                                    .many_refs_this_is_newest_alive
-                                    .accounts
-                                    .is_empty()
-                            );
-                        }
-                        2 => {
-                            // multiple slot list, ref_count=2, this is NOT newest alive, so many_refs_old_alive
+                            // multiple slots and this slot is NOT the newest => many_refs_old_alive
                             let slot_list = vec![
                                 (
                                     slot,
@@ -3642,14 +3631,14 @@ mod tests {
                                     ),
                                 ),
                                 (
-                                    slot + 1,
+                                    slot + 1, // newer than `slot`
                                     AccountInfo::new(
                                         StorageLocation::AppendVec(0, 0),
                                         lamports == 0,
                                     ),
                                 ),
                             ];
-                            alive_accounts.add(2, &account, &slot_list);
+                            alive_accounts.add(&account, &slot_list);
                             assert!(alive_accounts.one_ref.accounts.is_empty());
                             assert!(!alive_accounts.many_refs_old_alive.accounts.is_empty());
                             assert!(
@@ -3659,8 +3648,8 @@ mod tests {
                                     .is_empty()
                             );
                         }
-                        3 => {
-                            // multiple slot list, ref_count=2, this is newest
+                        2 => {
+                            // multiple slots and this slot IS the newest => many_refs_this_is_newest_alive
                             let slot_list = vec![
                                 (
                                     slot,
@@ -3677,7 +3666,7 @@ mod tests {
                                     ),
                                 ),
                             ];
-                            alive_accounts.add(2, &account, &slot_list);
+                            alive_accounts.add(&account, &slot_list);
                             assert!(alive_accounts.one_ref.accounts.is_empty());
                             assert!(alive_accounts.many_refs_old_alive.accounts.is_empty());
                             assert!(

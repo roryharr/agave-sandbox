@@ -1271,8 +1271,6 @@ fn test_remove_zero_lamport_single_ref_accounts_after_shrink() {
         }
 
         accounts.accounts_index.get_and_then(&pubkey_zero, |entry| {
-            let expected_ref_count = if pass < 2 { 1 } else { 2 };
-            assert_eq!(entry.unwrap().ref_count(), expected_ref_count, "{pass}");
             // The index holds only flushed writes: one entry at `slot` for passes 0 and 1,
             // and a second at `slot + 1` for pass 2.
             let expected_slot_list = if pass < 2 { 1 } else { 2 };
@@ -1320,12 +1318,6 @@ fn test_remove_zero_lamport_single_ref_accounts_after_shrink() {
                         .cloned()
                         .collect::<Vec<_>>();
                     assert_eq!(slots, vec![slot, slot + 1]);
-                    let expected_ref_count = 2;
-                    assert_eq!(
-                        entry.map(|e| e.ref_count()),
-                        Some(expected_ref_count),
-                        "{pass}"
-                    );
                 }
                 _ => {
                     unreachable!("Shouldn't reach here.")
@@ -1404,7 +1396,7 @@ fn test_shrink_zero_lamport_single_ref_account() {
     // note that 'None' checks the case based on the default value of `latest_full_snapshot_slot` in `AccountsDb`
     for latest_full_snapshot_slot in [None, Some(0), Some(1), Some(2)] {
         // store a zero and non-zero lamport account
-        // make sure clean marks the ref_count=1, zero lamport account dead and removes pubkey from index completely
+        // make sure clean marks zero lamport account dead and removes pubkey from index completely
         let accounts =
             AccountsDb::new_for_tests_with_config(Vec::new(), DEFAULT_ACCOUNTS_DB_CONFIG);
         let pubkey_zero = Pubkey::from([1; 32]);
@@ -2815,25 +2807,6 @@ fn test_full_clean_refcount_first() {
 }
 
 #[test]
-#[should_panic(expected = "exhaustively_verify_refcounts failed")]
-fn test_exhaustively_verify_refcounts_small_dataset_detects_mismatch() {
-    let accounts = AccountsDb::new_for_tests_with_config(Vec::new(), DEFAULT_ACCOUNTS_DB_CONFIG);
-    let slot = 0;
-    let pubkey = Pubkey::new_unique();
-    let account = AccountSharedData::new(1, 0, &Pubkey::default());
-
-    accounts.store_for_tests((slot, [(&pubkey, &account)].as_slice()));
-    accounts.add_root_and_flush_write_cache(slot);
-
-    accounts.accounts_index.get_and_then(&pubkey, |entry| {
-        entry.unwrap().addref();
-        (false, ())
-    });
-
-    accounts.exhaustively_verify_refcounts(Some(slot));
-}
-
-#[test]
 fn test_shrink_all_slots_none() {
     let epoch_schedule = EpochSchedule::default();
     for startup in &[false, true] {
@@ -3387,10 +3360,10 @@ fn test_delete_dependencies() {
         .take(num_bins)
         .collect();
     for key in [&key0, &key1, &key2] {
-        let (rooted_entries, ref_count) = accounts_index.get_and_then(key, |entry| {
+        let rooted_entries = accounts_index.get_and_then(key, |entry| {
             let slot_list_lock = entry.unwrap().slot_list_read_lock();
             let rooted = accounts_index.get_entries_up_to_inclusive(slot_list_lock.as_ref(), None);
-            (false, (rooted, entry.unwrap().ref_count()))
+            (false, (rooted))
         });
         let index = accounts_index.bin_calculator.bin_from_pubkey(key);
         let candidates_bin = &mut candidates[index];
@@ -3398,7 +3371,6 @@ fn test_delete_dependencies() {
             *key,
             CleaningInfo {
                 slot_list: rooted_entries,
-                ref_count,
                 ..Default::default()
             },
         );
@@ -3408,12 +3380,11 @@ fn test_delete_dependencies() {
             key,
             CleaningInfo {
                 slot_list: list,
-                ref_count,
                 ..
             },
         ) in candidates_bin.iter()
         {
-            info!(" purge {key} ref_count {ref_count} =>");
+            info!(" purge {key} =>");
             for x in list {
                 info!("  {x:?}");
             }
@@ -5823,7 +5794,6 @@ fn test_filter_zero_lamport_clean_for_incremental_snapshots() {
             pubkey,
             CleaningInfo {
                 slot_list: SlotList::from([(slot, account_info)]),
-                ref_count: 1,
                 ..Default::default()
             },
         );

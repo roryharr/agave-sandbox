@@ -21,7 +21,6 @@ const STATS_INTERVAL_MS: u64 = 10_000;
 pub struct HeldInMemStats {
     pub clean: AtomicU64,
     pub age: AtomicU64,
-    pub ref_count: AtomicU64,
     pub slot_list_len: AtomicU64,
 }
 
@@ -262,7 +261,6 @@ impl Stats {
             }
             let held_in_mem_clean = self.held_in_mem.clean.swap(0, Ordering::Relaxed);
             let held_in_mem_age = self.held_in_mem.age.swap(0, Ordering::Relaxed);
-            let held_in_mem_ref_count = self.held_in_mem.ref_count.swap(0, Ordering::Relaxed);
             let held_in_mem_slot_list_len =
                 self.held_in_mem.slot_list_len.swap(0, Ordering::Relaxed);
             // If an entry is held in-mem due to ref count or slot list length,
@@ -279,7 +277,7 @@ impl Stats {
                 + count_in_mem * InMemAccountsIndex::<T, U>::size_of_single_entry()
                 // and for entries held in mem due to ref count or slot list length, assume
                 // conservatively a slot list with two entries
-                + (held_in_mem_ref_count + held_in_mem_slot_list_len) as usize
+                + held_in_mem_slot_list_len as usize
                     * size_of::<SlotListItem<T>>() // <-- size of one slot list entry
                     * 2; // <-- and assume there are two entries
             datapoint_info!(
@@ -311,7 +309,6 @@ impl Stats {
                 ),
                 ("num_not_flushed_clean", held_in_mem_clean, i64),
                 ("num_not_flushed_age", held_in_mem_age, i64),
-                ("num_not_flushed_ref_count", held_in_mem_ref_count, i64),
                 (
                     "num_not_flushed_slot_list_len",
                     held_in_mem_slot_list_len,
