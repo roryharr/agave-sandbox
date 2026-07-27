@@ -906,9 +906,9 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> AccountsIndex<T, U> {
         }) == 0
     }
 
-    /// return true if pubkey does not exist in the accounts index.
-    /// This means it should NOT be unref'd later.
-    #[must_use]
+    /// Remove all older rooted entries for `pubkey` from the accounts index, pushing each
+    /// removed entry into `reclaims`.
+    /// Return true if this call removed the pubkey's entry from the accounts index.
     pub fn clean_rooted_entries(
         &self,
         pubkey: &Pubkey,
@@ -916,14 +916,37 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> AccountsIndex<T, U> {
         max_clean_root_inclusive: Option<Slot>,
     ) -> bool {
         let map = self.get_bin(pubkey);
-        map.slot_list_mut_with_entry(pubkey, |mut slot_list, entry| {
-            let reclaims_start = reclaims.len();
-            self.purge_older_root_entries(&mut slot_list, reclaims, max_clean_root_inclusive);
-            // Unref each reclaimed entry. This must happen inside the closure so the
-            // updated ref count is visible to the write-through check.
-            entry.unref_by_count((reclaims.len() - reclaims_start) as RefCount);
-        })
-        .is_none()
+        let Some(slot_list_is_empty) =
+            map.slot_list_mut_with_entry(pubkey, |mut slot_list, entry| {
+                let reclaims_start = reclaims.len();
+                self.purge_older_root_entries(&mut slot_list, reclaims, max_clean_root_inclusive);
+                let mut unref_count = (reclaims.len() - reclaims_start) as RefCount;
+
+                // If reclaiming leaves a single ref zero lamport account, it is safe to delete
+                // the account entirely and mark it as a tombstone. An untouched single-entry
+                // zero-lamport account stays on the classic zero-lamport purge path: its offset
+                // is already marked zero-lamport single-ref at flush or index generation.
+                if unref_count > 0
+                    && entry.ref_count() == unref_count + 1
+                    && let &[(slot, account_info)] = &*slot_list
+                    && account_info.is_zero_lamport()
+                {
+                    reclaims.push(((slot, account_info), slot));
+                    slot_list.clear();
+                    unref_count += 1;
+                }
+                // Unref the reclaimed entries. This must happen inside the closure so the
+                // updated ref count is visible to the write-through check.
+                entry.unref_by_count(unref_count);
+                slot_list.is_empty()
+            })
+        else {
+            // pubkey is not in the index; nothing was removed
+            return false;
+        };
+        // The emptied entry is deleted under the bin's write lock, which re-checks
+        // that the slot list is still empty.
+        slot_list_is_empty && map.remove_if_slot_list_empty(*pubkey)
     }
 
     /// Cleans and unrefs all older rooted entries for each pubkey in the accounts index.
@@ -2580,9 +2603,8 @@ mod tests {
         let slot2 = 2;
 
         let mut gc = ReclaimsWithNewestSlot::new();
-        // return true if we don't know anything about 'key_unknown'
-        // the item did not exist in the accounts index at all, so index is up to date
-        assert!(index.clean_rooted_entries(&key_unknown, &mut gc, None));
+        // an unknown key has no index entry, so nothing is removed
+        assert!(!index.clean_rooted_entries(&key_unknown, &mut gc, None));
 
         index.upsert_simple_test(&key, slot1, value);
 

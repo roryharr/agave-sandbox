@@ -1171,7 +1171,8 @@ impl AccountsDb {
     }
 
     /// While scanning cleaning candidates obtain slots that can be
-    /// reclaimed for each pubkey.
+    /// reclaimed for each pubkey. If the pubkey's entry was removed from the accounts
+    /// index, its secondary index entries are purged with it.
     fn collect_reclaims(
         &self,
         pubkey: &Pubkey,
@@ -1184,10 +1185,13 @@ impl AccountsDb {
             &mut reclaims,
             max_clean_root_inclusive,
         );
-        // Attempting to reclaim version older than the newest rooted version
-        // This should not result in the pubkey being removed from the index
-        assert!(!removed_from_index);
         clean_rooted.stop();
+        if removed_from_index {
+            self.clean_accounts_stats
+                .removed_from_index
+                .fetch_add(1, Ordering::Relaxed);
+            self.purge_secondary_indexes_for_dead_keys(iter::once(pubkey));
+        }
         self.clean_accounts_stats
             .clean_old_root_us
             .fetch_add(clean_rooted.as_us(), Ordering::Relaxed);
@@ -1210,18 +1214,17 @@ impl AccountsDb {
             .expect("candidate ref count covers every reclaimed entry");
         // The reclaimed entries are exactly those below the newest
         // remaining slot at or below the clean root
-        let newest_slot = reclaims[0].1;
-        candidate_info
-            .slot_list
-            .retain(|(slot, _)| *slot >= newest_slot);
-
-        // Mark any ZLSRs
-        if candidate_info.ref_count == 1
-            && let Some((slot, account_info)) = candidate_info.slot_list.first()
-            && account_info.is_zero_lamport()
-        {
-            self.zero_lamport_single_ref_found(*slot, account_info.offset());
-        }
+        let slot_list_len = candidate_info.slot_list.len();
+        candidate_info.slot_list.retain(|(slot, _)| {
+            !reclaims
+                .iter()
+                .any(|((reclaimed_slot, _), _)| reclaimed_slot == slot)
+        });
+        debug_assert_eq!(
+            candidate_info.slot_list.len(),
+            slot_list_len - reclaims.len(),
+            "every reclaimed entry is in the candidate slot list"
+        );
     }
 
     /// Reclaim older states of accounts older than max_clean_root_inclusive for AccountsDb bloat mitigation.
@@ -1233,8 +1236,9 @@ impl AccountsDb {
             return;
         }
         let (_, reclaim_us) = measure_us!({
-            // Each reclaim is marked obsolete at the slot of its account's newest
-            // surviving entry
+            // Each reclaim is marked obsolete at the slot of its account's newest surviving
+            // entry. A reclaim carrying its own slot is the newest entry itself, already
+            // removed from the index, and is created as a tombstone instead
             self.thread_pool_background.install(|| {
                 reclaims
                     .par_iter()
@@ -2196,6 +2200,13 @@ impl AccountsDb {
                 i64
             ),
             (
+                "removed_from_index",
+                self.clean_accounts_stats
+                    .removed_from_index
+                    .swap(0, Ordering::Relaxed),
+                i64
+            ),
+            (
                 "clean_old_root_us",
                 self.clean_accounts_stats
                     .clean_old_root_us
@@ -2733,6 +2744,7 @@ impl AccountsDb {
     }
 
     /// This function handles the case when zero lamport single ref accounts are found during shrink.
+    #[allow(dead_code)]
     pub(crate) fn zero_lamport_single_ref_found(&self, slot: Slot, offset: Offset) {
         // This function can be called when a zero lamport single ref account is
         // found during shrink. Therefore, we can't use the safe version of
@@ -5090,6 +5102,33 @@ impl AccountsDb {
             .fetch_add(reclaimed_offsets.len() as u64, Ordering::Relaxed);
 
         reclaimed_offsets.into_iter().for_each(|(slot, offsets)| {
+            // Special case: if reclaims are being done on the slot itself, then these accounts
+            // are tombstones, not obsolete accounts. Mark them as such.
+            if let MarkAccountsObsolete::Yes(slot_marked_obsolete) = mark_accounts_obsolete
+                && slot == slot_marked_obsolete
+            {
+                let store = self
+                    .storage
+                    .get_slot_storage_entry(slot)
+                    .expect("storage must exist for a slot with an indexed account");
+                store.batch_insert_tombstone_offsets(offsets);
+                if store.has_only_tombstones() {
+                    // Every remaining alive account is a tombstone with no index entry
+                    if self.can_purge_zero_lamport_single_ref_after_shrink(slot) {
+                        // Already covered by the latest full snapshot: the slot is dead
+                        dead_slots.insert(slot);
+                    } else {
+                        // The tombstones must survive until an incremental snapshot
+                        // propagates the deletion; hand the storage to a later clean
+                        self.dirty_stores.insert(slot, store);
+                    }
+                } else if self.is_shrinking_productive(&store)
+                    && self.is_candidate_for_shrink(&store)
+                {
+                    new_shrink_candidates.insert(slot);
+                }
+                return;
+            }
             if let Some(store) = self.storage.get_slot_storage_entry(slot) {
                 assert_eq!(
                     slot,
@@ -6390,7 +6429,10 @@ enum PubkeysToStore {
 
 /// Specify whether obsolete accounts should be marked or not during reclaims
 /// They should only be marked if they are also getting unreffed in the index
-/// Temporarily allow dead code until the feature is implemented
+///
+/// When an account is marked obsolete at the slot it is present in (Eg. if the account is present
+/// in slot 10 and marked obsolete at slot 10), it means the account was deleted rather than
+/// overwritten to a newer copy. These are marked as tombstones rather than obsolete.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 enum MarkAccountsObsolete {
     Yes(Slot),
