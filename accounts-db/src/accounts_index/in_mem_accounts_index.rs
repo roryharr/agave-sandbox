@@ -400,6 +400,50 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
         }
     }
 
+    /// Startup-only. If `pubkey`'s sole surviving index entry is a zero-lamport account, remove it
+    /// from the index (in memory and on disk) and return its `(slot, value)` so the caller can
+    /// record the resulting tombstone offset. Returns `None` if the entry is absent (e.g. it was
+    /// already reclaimed as an obsolete older version) or its surviving version is not a single-ref
+    /// zero-lamport account (e.g. it was revived to non-zero). Unlike `delete`, this emits no
+    /// reclaim: the account stays alive in its storage as a tombstone.
+    pub(crate) fn take_single_ref_zero_lamport_tombstone_on_startup(
+        &self,
+        pubkey: &Pubkey,
+    ) -> Option<(Slot, T)> {
+        let mut map = self.map_internal.write().unwrap();
+        match map.entry(*pubkey) {
+            Entry::Occupied(occupied) => {
+                let tombstone = {
+                    let slot_list = occupied.get().slot_list_read_lock();
+                    (slot_list.len() == 1 && slot_list[0].1.is_zero_lamport())
+                        .then(|| slot_list[0])
+                };
+                if tombstone.is_some() {
+                    self.delete_disk_key(occupied.key());
+                    self.stats().dec_mem_count();
+                    self.stats().inc_delete();
+                    occupied.remove();
+                }
+                tombstone
+            }
+            Entry::Vacant(vacant) => {
+                // Disk-only entry (flushed to disk during startup): load it, and if its sole
+                // version is a zero-lamport account, delete it from disk.
+                let (slot_list, _ref_count) = self.load_from_disk(vacant.key())?;
+                if slot_list.len() != 1 {
+                    return None;
+                }
+                let (slot, disk_value) = slot_list.into_iter().next().unwrap();
+                let value: T = disk_value.into();
+                value.is_zero_lamport().then(|| {
+                    self.delete_disk_key(vacant.key());
+                    self.stats().inc_delete();
+                    (slot, value)
+                })
+            }
+        }
+    }
+
     // If the slot list for pubkey exists in the index and is empty, remove the index entry for pubkey and return true.
     // Return false otherwise.
     pub fn remove_if_slot_list_empty(&self, pubkey: Pubkey) -> bool {

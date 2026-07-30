@@ -447,7 +447,9 @@ mod serde_snapshot_tests {
 
         accounts.print_accounts_stats("reconstructed");
 
-        accounts.assert_load_account(current_slot, pubkey, zero_lamport);
+        // The zero-lamport account is reconstructed as a tombstone: removed from the index (so it
+        // does not load) but retained in storage for incremental snapshots.
+        accounts.assert_not_load_account(current_slot, pubkey);
     }
 
     fn with_chained_zero_lamport_accounts<F>(f: F)
@@ -507,8 +509,8 @@ mod serde_snapshot_tests {
         // The live accounts survive the chained zero-lamport purges and snapshot round-trip.
         accounts.assert_load_account(current_slot, pubkey, some_lamport);
         accounts.assert_load_account(current_slot, dummy_pubkey, dummy_lamport);
-        // Both purged accounts were converted to tombstones at flush; with no full snapshot
-        // taken by then, their tombstone-only storages were purged and neither is in the index.
+        // Both purged accounts are tombstones: removed from the index (so they do not load) but
+        // retained in storage for incremental snapshots. Neither holds any lamports.
         accounts.assert_not_load_account(current_slot, purged_pubkey1);
         accounts.assert_not_load_account(current_slot, purged_pubkey2);
 
@@ -623,8 +625,8 @@ mod serde_snapshot_tests {
         accounts.print_count_and_status("after purge zero");
 
         accounts.assert_load_account(current_slot, pubkey, old_lamport);
-        // Both purged accounts were converted to tombstones at flush; with no full snapshot
-        // taken by then, their tombstone-only storages were purged and neither is in the index.
+        // Both purged accounts are tombstones: removed from the index (so they do not load) but
+        // retained in storage for incremental snapshots. Neither holds any lamports.
         accounts.assert_not_load_account(current_slot, purged_pubkey1);
         accounts.assert_not_load_account(current_slot, purged_pubkey2);
     }
@@ -716,7 +718,9 @@ mod serde_snapshot_tests {
 
         info!("pubkey: {pubkey1}");
         accounts.print_accounts_stats("pre_clean");
-        accounts.assert_load_account(current_slot, pubkey1, zero_lamport);
+        // pubkey1 is reconstructed as a tombstone: removed from the index (so it does not load)
+        // but retained in storage, so the step-A version is not revived.
+        accounts.assert_not_load_account(current_slot, pubkey1);
         accounts.assert_load_account(current_slot, pubkey2, old_lamport);
         accounts.assert_load_account(current_slot, dummy_pubkey, dummy_lamport);
 

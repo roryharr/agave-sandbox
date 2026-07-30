@@ -422,6 +422,10 @@ struct IndexGenerationAccumulator {
     /// The number of accounts in this slot that were skipped when generating the index as they
     /// were already marked obsolete in the account storage entry
     num_obsolete_accounts_skipped: u64,
+    /// Pubkeys of the zero-lamport accounts encountered while scanning. After older versions are
+    /// resolved, those whose surviving entry is still a single-ref zero-lamport are removed from
+    /// the index and recorded as tombstones.
+    zero_lamport_pubkeys: Vec<Pubkey>,
     slot_arena: IndexGenerationSlotArena,
 }
 impl IndexGenerationAccumulator {
@@ -439,6 +443,7 @@ impl IndexGenerationAccumulator {
             lt_hash: LtHash::identity(),
             capitalization: 0,
             num_obsolete_accounts_skipped: 0,
+            zero_lamport_pubkeys: Vec::new(),
             slot_arena: IndexGenerationSlotArena::default(),
         }
     }
@@ -458,6 +463,8 @@ impl IndexGenerationAccumulator {
             .checked_add(other.capitalization)
             .expect("capitalization cannot overflow");
         self.num_obsolete_accounts_skipped += other.num_obsolete_accounts_skipped;
+        self.zero_lamport_pubkeys
+            .append(&mut other.zero_lamport_pubkeys);
         self.storage_info.append(&mut other.storage_info);
     }
 }
@@ -468,14 +475,12 @@ impl IndexGenerationAccumulator {
 #[derive(Debug, Default)]
 struct IndexGenerationSlotArena {
     keyed_account_infos: Vec<(Pubkey, AccountInfo)>,
-    zero_lamport_offsets: Vec<usize>,
 }
 
 impl IndexGenerationSlotArena {
     /// Makes sure no actual items are stored in the allocated data structures
     fn ensure_empty(&mut self) {
         assert!(self.keyed_account_infos.is_empty(), "should be drained");
-        self.zero_lamport_offsets.clear();
     }
 }
 
@@ -513,6 +518,8 @@ struct GenerateIndexTimings {
     pub num_obsolete_accounts_marked: u64,
     pub num_slots_removed_as_obsolete: u64,
     pub num_obsolete_accounts_skipped: u64,
+    pub create_tombstones_us: u64,
+    pub num_tombstones_created: u64,
 }
 
 #[derive(Default, Debug, PartialEq, Eq)]
@@ -595,6 +602,8 @@ impl GenerateIndexTimings {
                 self.num_obsolete_accounts_skipped,
                 i64
             ),
+            ("create_tombstones_us", self.create_tombstones_us, i64),
+            ("num_tombstones_created", self.num_tombstones_created, i64),
         );
     }
 }
@@ -5659,7 +5668,7 @@ impl AccountsDb {
         let mut all_accounts_are_zero_lamports = true;
         accum.slot_arena.ensure_empty();
         let keyed_account_infos = &mut accum.slot_arena.keyed_account_infos;
-        let zero_lamport_offsets = &mut accum.slot_arena.zero_lamport_offsets;
+        let zero_lamport_pubkeys = &mut accum.zero_lamport_pubkeys;
 
         let geyser_notifier = self
             .accounts_update_notifier
@@ -5685,9 +5694,10 @@ impl AccountsDb {
                     accounts_data_len += data_len as u64;
                     all_accounts_are_zero_lamports = false;
                 } else {
-                    // All zero lamport accounts are obsolete or single ref by the end of index
-                    // generation. Store the offsets so they can be batch inserted later
-                    zero_lamport_offsets.push(offset);
+                    // Zero-lamport accounts become tombstones (removed from the index, retained in
+                    // storage) once their older versions are resolved. Collect their pubkeys so the
+                    // tombstone pass after obsolete-marking can find and remove the survivors.
+                    zero_lamport_pubkeys.push(*account.pubkey);
                 }
                 keyed_account_infos.push((
                     *account.pubkey,
@@ -5763,11 +5773,6 @@ impl AccountsDb {
             );
             accum.storage_info.push((store_id, info));
         }
-
-        // Add all zero lamport accounts as zero lamport single refs to avoid having to revisit
-        // them later. This is safe as all zero lamport accounts will be single ref or obsolete
-        // by the end of index generation
-        storage.batch_insert_zero_lamport_single_ref_account_offsets(zero_lamport_offsets);
 
         accum.num_accounts += insert_info.count as u64;
         accum.insert_time_us += insert_time_us;
@@ -6087,6 +6092,16 @@ impl AccountsDb {
         timings.mark_obsolete_accounts_us = mark_obsolete_accounts_time.as_us();
         timings.num_obsolete_accounts_marked = obsolete_account_stats.accounts_marked_obsolete;
         timings.num_slots_removed_as_obsolete = obsolete_account_stats.slots_removed;
+
+        // Now that every older version has been obsolete-marked, each surviving zero-lamport
+        // account is a single-ref entry. Remove those from the index and record them as tombstones
+        // in their storages, so scans skip them and shrink counts them as dead.
+        let mut create_tombstones_time = Measure::start("create_tombstones");
+        timings.num_tombstones_created =
+            self.create_tombstones_at_startup(std::mem::take(&mut total_accum.zero_lamport_pubkeys));
+        create_tombstones_time.stop();
+        timings.create_tombstones_us = create_tombstones_time.as_us();
+
         total_time.stop();
         timings.total_time_us = total_time.as_us();
         timings.report(self.accounts_index.get_startup_stats());
@@ -6162,6 +6177,43 @@ impl AccountsDb {
             })
             .sum();
         stats
+    }
+
+    /// Startup-only. Given the pubkeys of all zero-lamport accounts seen during index generation,
+    /// remove those whose surviving entry is still a single-ref zero-lamport account from the index
+    /// and record them as tombstones on their storages. Must run after older versions have been
+    /// obsolete-marked so that each surviving zero-lamport is genuinely single-ref. Returns the
+    /// number of tombstones created.
+    fn create_tombstones_at_startup(&self, zero_lamport_pubkeys: Vec<Pubkey>) -> u64 {
+        if zero_lamport_pubkeys.is_empty() {
+            return 0;
+        }
+
+        // Group by index bin so each bin's entries are removed while holding that bin's lock once.
+        let mut pubkeys_by_bin: Vec<Vec<Pubkey>> = vec![Vec::new(); self.accounts_index.bins()];
+        for pubkey in zero_lamport_pubkeys {
+            let bin = self.accounts_index.bin_calculator.bin_from_pubkey(&pubkey);
+            pubkeys_by_bin[bin].push(pubkey);
+        }
+
+        pubkeys_by_bin
+            .par_iter()
+            .map(|pubkeys| {
+                let tombstones = self
+                    .accounts_index
+                    .create_zero_lamport_tombstones_by_bin(pubkeys);
+                for (slot, account_info) in &tombstones {
+                    if let Some(storage) = self
+                        .storage
+                        .get_account_storage_entry(*slot, account_info.store_id())
+                    {
+                        storage
+                            .batch_insert_tombstone_offsets(std::iter::once(account_info.offset()));
+                    }
+                }
+                tombstones.len() as u64
+            })
+            .sum()
     }
 
     /// Used during generate_index() to:
