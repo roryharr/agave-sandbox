@@ -1002,8 +1002,7 @@ fn test_clean_dead_slot_unrefs_reclaimed_pubkeys() {
     // Flush both roots without cleaning, so slot 10's version survives and the ref count reaches 2.
     accounts.flush_rooted_accounts_cache_without_clean();
 
-    // Both slots are in pubkey's slot list, each in its own storage, so its ref count is 2.
-    assert_eq!(accounts.accounts_index.ref_count_from_storage(&pubkey), 2);
+    // Both slots are in pubkey's slot list, each in its own storage
     assert!(accounts.storage.get_slot_storage_entry(10).is_some());
     assert!(accounts.storage.get_slot_storage_entry(11).is_some());
 
@@ -1013,9 +1012,6 @@ fn test_clean_dead_slot_unrefs_reclaimed_pubkeys() {
     // Slot 10's storage is gone; slot 11's remains.
     assert!(accounts.storage.get_slot_storage_entry(10).is_none());
     assert!(accounts.storage.get_slot_storage_entry(11).is_some());
-
-    // pubkey is now in one storage (slot 11), so its ref count is 1.
-    assert_eq!(accounts.accounts_index.ref_count_from_storage(&pubkey), 1);
 }
 
 #[test]
@@ -1498,10 +1494,6 @@ fn test_clean_multiple_zero_lamport_slots() {
         .as_slice(),
     ));
     accounts.add_root_and_flush_write_cache(2);
-
-    // Both accounts are zero-lamport, so each was deleted from the index at flush (ref count 0).
-    assert_eq!(accounts.accounts_index.ref_count_from_storage(&pubkey1), 0);
-    assert_eq!(accounts.accounts_index.ref_count_from_storage(&pubkey2), 0);
 
     accounts.clean_accounts_for_tests();
     // Slot 0 is cleared because both of its accounts were reclaimed by the tombstone flushes
@@ -2261,14 +2253,10 @@ fn do_full_clean_refcount(accounts: AccountsDb, store1_first: bool) {
     // B: Test multiple updates to pubkey1 in a single slot/storage
     current_slot += 1;
     assert_eq!(0, accounts.alive_account_count_in_slot(current_slot));
-    assert_eq!(accounts.accounts_index.ref_count_from_storage(&pubkey1), 1);
     accounts.store_for_tests((current_slot, [(&pubkey1, &account2)].as_slice()));
     accounts.store_for_tests((current_slot, [(&pubkey1, &account2)].as_slice()));
     accounts.add_root_and_flush_write_cache(current_slot);
     assert_eq!(1, accounts.alive_account_count_in_slot(current_slot));
-    // Since flush was clean was used, the ref count should still be one as the older entry
-    // was marked obsolete
-    assert_eq!(accounts.accounts_index.ref_count_from_storage(&pubkey1), 1);
     accounts.add_root_and_flush_write_cache(current_slot);
 
     accounts.print_accounts_stats("Post-B pre-clean");
@@ -2280,12 +2268,10 @@ fn do_full_clean_refcount(accounts: AccountsDb, store1_first: bool) {
 
     // C: more updates to trigger clean of previous updates
     current_slot += 1;
-    assert_eq!(accounts.accounts_index.ref_count_from_storage(&pubkey1), 1);
     accounts.store_for_tests((current_slot, [(&pubkey1, &account3)].as_slice()));
     accounts.store_for_tests((current_slot, [(&pubkey2, &account3)].as_slice()));
     accounts.store_for_tests((current_slot, [(&pubkey3, &account4)].as_slice()));
     accounts.add_root_and_flush_write_cache(current_slot);
-    assert_eq!(accounts.accounts_index.ref_count_from_storage(&pubkey1), 1);
 
     info!("post C");
 
@@ -2312,11 +2298,6 @@ fn do_full_clean_refcount(accounts: AccountsDb, store1_first: bool) {
 
     let total_accounts_post_clean: usize = snapshot_stores.iter().map(|s| s.accounts_count()).sum();
     assert_eq!(total_accounts, total_accounts_post_clean);
-
-    // should clean all 3 pubkeys
-    assert_eq!(accounts.accounts_index.ref_count_from_storage(&pubkey1), 0);
-    assert_eq!(accounts.accounts_index.ref_count_from_storage(&pubkey2), 0);
-    assert_eq!(accounts.accounts_index.ref_count_from_storage(&pubkey3), 0);
 }
 
 // Setup 2 scenarios which try to differentiate between pubkey1 being in an
@@ -2336,25 +2317,6 @@ fn test_full_clean_refcount_no_first() {
 fn test_full_clean_refcount_first() {
     let accounts = AccountsDb::new_for_tests_with_config(Vec::new(), DEFAULT_ACCOUNTS_DB_CONFIG);
     do_full_clean_refcount(accounts, true);
-}
-
-#[test]
-#[should_panic(expected = "exhaustively_verify_refcounts failed")]
-fn test_exhaustively_verify_refcounts_small_dataset_detects_mismatch() {
-    let accounts = AccountsDb::new_for_tests_with_config(Vec::new(), DEFAULT_ACCOUNTS_DB_CONFIG);
-    let slot = 0;
-    let pubkey = Pubkey::new_unique();
-    let account = AccountSharedData::new(1, 0, &Pubkey::default());
-
-    accounts.store_for_tests((slot, [(&pubkey, &account)].as_slice()));
-    accounts.add_root_and_flush_write_cache(slot);
-
-    accounts.accounts_index.get_and_then(&pubkey, |entry| {
-        entry.unwrap().addref();
-        (false, ())
-    });
-
-    accounts.exhaustively_verify_refcounts(Some(slot));
 }
 
 #[test]
@@ -2780,7 +2742,6 @@ fn test_store_clean_after_shrink() {
     accounts.clean_accounts_for_tests();
 
     accounts.print_accounts_stats("post-clean");
-    assert_eq!(accounts.accounts_index.ref_count_from_storage(&pubkey1), 0);
 }
 
 #[test]
@@ -3399,18 +3360,6 @@ fn test_flush_cache_dont_clean_zero_lamport_account() {
     // because `accounts_index.uncleaned_roots` should be correct
     db.flush_accounts_cache(true, None);
     db.clean_accounts_for_tests();
-
-    // `zero_lamport_account_key` was deleted from the index at flush, so its ref count is 0.
-    // `other_account_key` stays alive in slot 0 with ref count 1.
-    assert_eq!(
-        db.accounts_index
-            .ref_count_from_storage(&zero_lamport_account_key),
-        0
-    );
-    assert_eq!(
-        db.accounts_index.ref_count_from_storage(&other_account_key),
-        1
-    );
 
     // The zero-lamport tombstone written to slot 2 is newer than the latest full snapshot, so
     // clean must retain its storage rather than dropping it.
@@ -4181,11 +4130,6 @@ fn test_shrink_unref() {
 
     // No stores should exist for slot 0 after clean
     assert_no_storages_at_slot(&db, 0);
-
-    // Ref count for `account_key1` (account removed earlier by shrink)
-    // should be 1, since it was only stored in slot 0 and 1, and slot 0
-    // is now dead
-    assert_eq!(db.accounts_index.ref_count_from_storage(&account_key1), 1);
 }
 
 #[test]
@@ -4247,7 +4191,6 @@ fn test_clean_drop_dead_storage_handle_zero_lamport_single_ref_accounts() {
     // account_key1 is a tombstone in slot 1 (ref count 0). Because slot 1 still has one other
     // alive account, it is not completely dead, so clean won't drop it. Instead it is a candidate
     // for next round shrinking.
-    assert_eq!(db.accounts_index.ref_count_from_storage(&account_key1), 0);
     assert_eq!(db.get_and_assert_single_storage(1).num_tombstones(), 1);
     assert!(db.shrink_candidate_slots.lock().unwrap().contains(&1));
 }
@@ -4292,14 +4235,12 @@ fn test_clean_tombstones_zero_lamport_single_ref_at_reclaim() {
     // The reclaim leaves account_key1 zero-lamport single-ref, so it is tombstoned:
     // removed from the index, and slot 1's storage, now holding only the tombstone and
     // already covered by the full snapshot, is purged in the same pass.
-    assert_eq!(db.accounts_index.ref_count_from_storage(&account_key1), 0);
     assert!(!db.accounts_index.contains(&account_key1));
     assert_no_storages_at_slot(&db, 1);
 
     // account_key3 is likewise tombstoned, but slot 3 is newer than the full snapshot,
     // so its storage keeps the tombstone for an incremental snapshot to propagate the
     // deletion and is queued for a later clean via dirty_stores rather than shrink.
-    assert_eq!(db.accounts_index.ref_count_from_storage(&account_key3), 0);
     assert!(!db.accounts_index.contains(&account_key3));
     assert_eq!(db.get_and_assert_single_storage(3).num_tombstones(), 1);
     assert!(db.dirty_stores.contains_key(&3));
@@ -4327,7 +4268,6 @@ fn test_clean_tombstones_zero_lamport_single_ref_at_reclaim() {
     // slot 4 is flushed; the older accounts are marked obsolete.
     assert_no_storages_at_slot(&db, 0);
     // Store 4 should have a single account.
-    assert_eq!(db.accounts_index.ref_count_from_storage(&account_key2), 1);
     db.get_and_assert_single_storage(4);
 }
 
@@ -5012,23 +4952,11 @@ fn test_purge_alive_unrooted_slots_after_clean() {
     // Simulate adding dirty pubkeys on bank freeze, set root
     accounts.add_root_and_flush_write_cache(slot2);
 
-    // Account is now a tombstone and has a reference count of zero
-    assert_eq!(
-        accounts.accounts_index.ref_count_from_storage(&shared_key),
-        0
-    );
-
     // The later rooted zero-lamport update to 'shared_key' can be purged
     // as there are no rooted ancestors
     // The key itself cannot be purged as it is still contained in the unrooted slot
     accounts.clean_accounts_for_tests();
     assert!(accounts.contains(&shared_key));
-
-    // Account now has a reference count of zero as it is not contained in any storages
-    assert_eq!(
-        accounts.accounts_index.ref_count_from_storage(&shared_key),
-        0
-    );
 
     // Simulate purge_slot() all from AccountsBackgroundService
     accounts.purge_slot(slot1, 0, true);
@@ -6010,12 +5938,6 @@ fn test_mark_obsolete_accounts_at_startup_purge_slot() {
     // Verify that slot 1 has been purged
     assert!(accounts_db.storage.get_slot_storage_entry(1).is_none());
 
-    // Verify that the pubkey ref1's count is 1
-    assert_eq!(
-        accounts_db.accounts_index.ref_count_from_storage(&pubkey1),
-        1
-    );
-
     assert_eq!(obsolete_stats.accounts_marked_obsolete, 2);
 }
 
@@ -6046,16 +5968,6 @@ fn test_mark_obsolete_accounts_at_startup_multiple_bins() {
 
     // Verify that slot 1 has been purged
     assert!(accounts_db.storage.get_slot_storage_entry(1).is_some());
-
-    // Verify that both pubkeys ref_counts are 1
-    assert_eq!(
-        accounts_db.accounts_index.ref_count_from_storage(&pubkey1),
-        1
-    );
-    assert_eq!(
-        accounts_db.accounts_index.ref_count_from_storage(&pubkey2),
-        1
-    );
 
     // Ensure that stats were accumulated correctly
     assert_eq!(obsolete_stats.accounts_marked_obsolete, 2);

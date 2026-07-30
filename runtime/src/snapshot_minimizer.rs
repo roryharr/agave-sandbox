@@ -612,13 +612,6 @@ mod tests {
         // Flush without clean so pubkey_multi keeps both slot list entries
         accounts.flush_rooted_accounts_cache_without_clean();
 
-        assert_eq!(
-            accounts
-                .accounts_index
-                .ref_count_from_storage(&pubkey_multi),
-            2
-        );
-
         let minimized_account_set = DashSet::new();
         minimized_account_set.insert(pubkey_keep);
         let minimizer = SnapshotMinimizer {
@@ -627,15 +620,6 @@ mod tests {
             minimized_account_set,
         };
         minimizer.minimize_accounts_db();
-
-        // filter_storage purged (pubkey_multi, slot 1) from the index, decrementing its
-        // ref count; the other entry keeps it alive
-        assert_eq!(
-            accounts
-                .accounts_index
-                .ref_count_from_storage(&pubkey_multi),
-            1
-        );
     }
 
     /// A dead slot whose storage carries a shrink-produced tombstone must still purge

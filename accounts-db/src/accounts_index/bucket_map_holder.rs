@@ -94,8 +94,7 @@ pub struct BucketMapHolder<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>>
     /// None for Minimal/InMemOnly, Some(threshold_entries_per_bin) for Threshold
     pub(super) threshold_entries_per_bin: Option<ThresholdEntriesPerBin>,
 
-    /// If true, flush dirty entries to disk once `slot_list.len() == 1` and
-    /// `ref_count == 1`, making it evictable
+    /// If true, flush dirty entries to disk once `slot_list.len() == 1`
     should_write_through: bool,
 }
 
