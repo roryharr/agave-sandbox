@@ -415,8 +415,7 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
             Entry::Occupied(occupied) => {
                 let tombstone = {
                     let slot_list = occupied.get().slot_list_read_lock();
-                    (slot_list.len() == 1 && slot_list[0].1.is_zero_lamport())
-                        .then(|| slot_list[0])
+                    (slot_list.len() == 1 && slot_list[0].1.is_zero_lamport()).then(|| slot_list[0])
                 };
                 if tombstone.is_some() {
                     self.delete_disk_key(occupied.key());

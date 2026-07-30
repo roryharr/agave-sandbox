@@ -27,7 +27,6 @@ use {
         },
         thread::{self, Builder, JoinHandle, sleep},
     },
-    tempfile::TempDir,
     test_case::test_case,
 };
 
@@ -75,30 +74,6 @@ fn create_loadable_account_with_fields(
 
 fn create_loadable_account_for_test(name: &str) -> AccountSharedData {
     create_loadable_account_with_fields(name, DUMMY_INHERITABLE_ACCOUNT_FIELDS)
-}
-
-fn create_store_for_shrink_tests(
-    accounts_db: &AccountsDb,
-    slot: Slot,
-    file_size: u64,
-    alive_bytes: usize,
-    num_zero_lamport_single_ref_accounts: usize,
-    accounts_file_provider: AccountsFileProvider,
-) -> (TempDir, Arc<AccountStorageEntry>) {
-    let temp_dir = TempDir::new().unwrap();
-    let store = Arc::new(AccountStorageEntry::new(
-        temp_dir.path(),
-        slot,
-        slot as AccountsFileId,
-        file_size,
-        accounts_file_provider,
-    ));
-    accounts_db.storage.insert(Arc::clone(&store));
-    store.add_accounts(num_zero_lamport_single_ref_accounts.max(1), alive_bytes);
-    for offset in 0..num_zero_lamport_single_ref_accounts {
-        store.insert_zero_lamport_single_ref_account_offset(offset);
-    }
-    (temp_dir, store)
 }
 
 fn run_generate_index_duplicates_within_slot_test(db: AccountsDb, reverse: bool) {
@@ -178,11 +153,8 @@ fn test_generate_index_for_single_ref_zero_lamport_slot() {
     assert_eq!(append_vec.count(), 1);
     assert_eq!(result.accounts_data_len, 0);
     // Tombstones are counted as dead zero-lamport single refs, so shrink still reclaims them.
-    assert_eq!(1, append_vec.num_zero_lamport_single_ref_accounts());
-    assert_eq!(
-        0,
-        append_vec.alive_bytes_exclude_zero_lamport_single_ref_accounts()
-    );
+    assert_eq!(1, append_vec.num_tombstones());
+    assert_eq!(0, append_vec.alive_bytes_exclude_tombstones());
 }
 
 pub(crate) fn append_single_account_with_default_hash(
@@ -1145,145 +1117,6 @@ fn test_clean_reclaim_tombstones_zero_lamport_single_ref() {
     );
 }
 
-#[test]
-fn test_remove_zero_lamport_single_ref_accounts_after_shrink() {
-    for pass in 0..3 {
-        let accounts =
-            AccountsDb::new_for_tests_with_config(Vec::new(), DEFAULT_ACCOUNTS_DB_CONFIG);
-        let pubkey_zero = Pubkey::from([1; 32]);
-        let pubkey2 = Pubkey::from([2; 32]);
-        let account = AccountSharedData::new(1, 0, AccountSharedData::default().owner());
-        let zero_lamport_account =
-            AccountSharedData::new(0, 0, AccountSharedData::default().owner());
-        let slot = 1;
-        store_rooted_nonzero_accounts(&accounts, slot, [&pubkey_zero]);
-        let slot = slot + 1;
-
-        accounts.store_for_tests((
-            slot,
-            [(&pubkey_zero, &zero_lamport_account), (&pubkey2, &account)].as_slice(),
-        ));
-
-        // Root and flush without clean (as during an RPC scan), which upserts the
-        // zero-lamport account into the index instead of tombstoning it
-        accounts.add_root(slot);
-        accounts.flush_rooted_accounts_cache_without_clean();
-
-        // Purge the superseded slot 1 entry directly, leaving pubkey_zero as the
-        // in-index zero-lamport single-ref entry this shrink path handles (a full
-        // clean would convert it to a tombstone)
-        let _ = accounts.purge_keys_exact([(pubkey_zero, slot - 1)]);
-
-        if pass > 0 {
-            // store in write cache
-            accounts
-                .store_for_tests((slot + 1, [(&pubkey_zero, &zero_lamport_account)].as_slice()));
-            if pass == 2 {
-                // This test pass can be removed if all scenarios where flush_write_cache doesn't clean are eliminated.
-                // Currently, flush_write_cache doesn't clean if there is an ongoing RPC scan
-                // add root and flush without clean (causing ref count to increase)
-                accounts.add_root(slot + 1);
-                accounts.flush_rooted_accounts_cache_without_clean();
-            }
-        }
-
-        accounts.accounts_index.get_and_then(&pubkey_zero, |entry| {
-            let expected_ref_count = if pass < 2 { 1 } else { 2 };
-            assert_eq!(entry.unwrap().ref_count(), expected_ref_count, "{pass}");
-            // The index holds only flushed writes: one entry at `slot` for passes 0 and 1,
-            // and a second at `slot + 1` for pass 2.
-            let expected_slot_list = if pass < 2 { 1 } else { 2 };
-            assert_eq!(entry.unwrap().slot_list_lock_read_len(), expected_slot_list);
-            (false, ())
-        });
-        accounts.accounts_index.get_and_then(&pubkey2, |entry| {
-            assert!(entry.is_some());
-            (false, ())
-        });
-
-        let zero_lamport_single_ref_pubkeys = if pass < 2 { vec![&pubkey_zero] } else { vec![] };
-        accounts.remove_zero_lamport_single_ref_accounts_after_shrink(
-            &zero_lamport_single_ref_pubkeys,
-            slot,
-            &ShrinkStats::default(),
-        );
-
-        accounts.accounts_index.get_and_then(&pubkey_zero, |entry| {
-            match pass {
-                0 => {
-                    // should not exist in index at all
-                    assert!(entry.is_none(), "{pass}");
-                }
-                1 => {
-                    // The single-ref entry at `slot` is removed; pass 1's cache-only write at
-                    // `slot + 1` stays in the write cache.
-                    assert!(entry.is_none(), "{pass}");
-                    assert!(
-                        accounts
-                            .accounts_cache
-                            .load(slot + 1, &pubkey_zero)
-                            .is_some()
-                    );
-                }
-                2 => {
-                    // alive in both slot, slot + 1
-                    assert_eq!(entry.unwrap().slot_list_lock_read_len(), 2);
-
-                    let slots = entry
-                        .unwrap()
-                        .slot_list_read_lock()
-                        .iter()
-                        .map(|(s, _)| s)
-                        .cloned()
-                        .collect::<Vec<_>>();
-                    assert_eq!(slots, vec![slot, slot + 1]);
-                    let expected_ref_count = 2;
-                    assert_eq!(
-                        entry.map(|e| e.ref_count()),
-                        Some(expected_ref_count),
-                        "{pass}"
-                    );
-                }
-                _ => {
-                    unreachable!("Shouldn't reach here.")
-                }
-            }
-            (false, ())
-        });
-
-        accounts.accounts_index.get_and_then(&pubkey2, |entry| {
-            assert!(entry.is_some(), "{pass}");
-            (false, ())
-        });
-
-        if pass == 2 {
-            // Partially purge pubkey_zero: remove only the entry at `slot`, leaving the
-            // entry at `slot + 1` alive. The ref count must drop by exactly the number
-            // of removed slot list entries.
-            let reclaims = accounts.purge_keys_exact([(pubkey_zero, slot)]);
-            assert_eq!(
-                reclaims
-                    .iter()
-                    .map(|(reclaimed_slot, _)| *reclaimed_slot)
-                    .collect::<Vec<_>>(),
-                vec![slot]
-            );
-            accounts.accounts_index.get_and_then(&pubkey_zero, |entry| {
-                assert_eq!(entry.unwrap().ref_count(), 1);
-                let slots = entry
-                    .unwrap()
-                    .slot_list_read_lock()
-                    .iter()
-                    .map(|(s, _)| s)
-                    .cloned()
-                    .collect::<Vec<_>>();
-                assert_eq!(slots, vec![slot + 1]);
-                (false, ())
-            });
-        }
-    }
-}
-
 /// A pubkey whose account has died must stay dead when a storage holding a clean-reclaimed
 /// older version of it is later shrunk.
 #[test]
@@ -1468,136 +1301,6 @@ fn test_shrink_carries_or_purges_flush_tombstone() {
     }
 }
 
-/// Ensure that `shrink` converts a not-yet-purgeable zero lamport single ref account into a
-/// tombstone in the new storage
-#[test]
-fn test_shrink_converts_zero_lamport_single_ref_account_to_tombstone() {
-    let accounts_db = AccountsDb::new_for_tests_with_config(Vec::new(), DEFAULT_ACCOUNTS_DB_CONFIG);
-    let slot0 = 0;
-    let slot1 = slot0 + 1;
-    // latest full snapshot must be older than the slot(s) we plan to shrink,
-    // otherwise zero lamport single ref accounts will be purged
-    accounts_db.set_latest_full_snapshot_slot(slot0);
-
-    let obsolete_pubkey = Pubkey::new_unique();
-    let obsolete_zero_lamport_pubkey = Pubkey::new_unique();
-    let zero_lamport_single_ref_pubkey = Pubkey::new_unique();
-    let zero_lamport_multi_ref_pubkey = Pubkey::new_unique();
-    let alive_pubkey = Pubkey::new_unique();
-    let closed_account = AccountSharedData::new(0, 0, &Pubkey::default());
-    let open_account = AccountSharedData::new(1, 0, &Pubkey::default());
-
-    let (_temp_dirs, paths) = get_temp_accounts_paths(1).unwrap();
-    let storage1 = Arc::new(AccountStorageEntry::new(
-        &paths[0],
-        slot1,
-        10,
-        DEFAULT_FILE_SIZE,
-        accounts_db.accounts_file_provider,
-    ));
-    // store an obsolete account; it should not be marked ZLSR
-    append_single_account_with_default_hash(
-        &storage1,
-        &obsolete_pubkey,
-        &open_account,
-        true,
-        Some(&accounts_db.accounts_index),
-    );
-    // store an obsolete zero lamport account; it should not be marked ZLSR
-    append_single_account_with_default_hash(
-        &storage1,
-        &obsolete_zero_lamport_pubkey,
-        &closed_account,
-        true,
-        Some(&accounts_db.accounts_index),
-    );
-    // store a zero lamport single ref account; shrink *should* convert it to a tombstone
-    append_single_account_with_default_hash(
-        &storage1,
-        &zero_lamport_single_ref_pubkey,
-        &closed_account,
-        true,
-        Some(&accounts_db.accounts_index),
-    );
-    // store a zero lamport multi ref account; it should not be marked ZLSR
-    append_single_account_with_default_hash(
-        &storage1,
-        &zero_lamport_multi_ref_pubkey,
-        &closed_account,
-        true,
-        Some(&accounts_db.accounts_index),
-    );
-    // store an alive account; it should not be marked ZLSR
-    append_single_account_with_default_hash(
-        &storage1,
-        &alive_pubkey,
-        &open_account,
-        true,
-        Some(&accounts_db.accounts_index),
-    );
-    accounts_db.storage.insert(Arc::clone(&storage1));
-    accounts_db.add_root(slot1);
-
-    // we manually created the storage, so nothing got marked
-    assert_eq!(storage1.num_zero_lamport_single_ref_accounts(), 0);
-
-    // store the multi ref account again, in slot 2, so it becomes multi ref
-    let slot2 = slot1 + 1;
-    accounts_db.store_for_tests((
-        slot2,
-        [(&zero_lamport_multi_ref_pubkey, &closed_account)].as_slice(),
-    ));
-    accounts_db.add_root(slot2);
-    // flush without clean so the ZLMR account isn't marked obsolete in slot 1
-    accounts_db.flush_rooted_accounts_cache_without_clean();
-
-    // mark the obsolete accounts as obsolete
-    let ancestors = Ancestors::from(vec![slot2]);
-    for pubkey in [obsolete_pubkey, obsolete_zero_lamport_pubkey] {
-        let account_info = accounts_db
-            .accounts_index
-            .get_with_and_then(&pubkey, &ancestors, false, |account_info| account_info)
-            .unwrap();
-        accounts_db.remove_dead_accounts([account_info].iter(), MarkAccountsObsolete::Yes(slot2));
-    }
-
-    accounts_db.shrink_slot_forced(slot1);
-
-    let new_storage1 = accounts_db.get_and_assert_single_storage(slot1);
-
-    // ensure ids are different, to indicate shrink ran
-    assert_ne!(new_storage1.id(), storage1.id());
-    // ensure there are three accounts in the storage now, removing the two obsolete ones: the
-    // alive account, the zero-lamport multi-ref account, and the zero-lamport single-ref account
-    // carried forward as a tombstone
-    assert_eq!(new_storage1.count(), 3);
-
-    // the zero lamport single ref account is dropped from the index now that it is a tombstone
-    assert!(
-        accounts_db
-            .accounts_index
-            .get_with_and_then(
-                &zero_lamport_single_ref_pubkey,
-                &ancestors,
-                false,
-                |(_slot, _account_info)| (),
-            )
-            .is_none()
-    );
-
-    // it is recorded on the new storage's tombstone list, not the zero-lamport-single-ref list
-    assert_eq!(new_storage1.num_tombstones(), 1);
-    assert!(
-        new_storage1
-            .zero_lamport_single_ref_offsets()
-            .read()
-            .unwrap()
-            .is_empty()
-    );
-    // the combined single-ref + tombstone count still reflects the one removable account
-    assert_eq!(new_storage1.num_zero_lamport_single_ref_accounts(), 1);
-}
-
 /// `shrink_collect` must recognize tombstone offsets already recorded on a storage (carried
 /// forward by a prior shrink) and route them into `tombstones_to_carry_forward`: rewritten while
 /// the slot is newer than the latest full snapshot, and dropped once the snapshot advances past it.
@@ -1653,7 +1356,7 @@ fn test_shrink_collect_carries_forward_existing_tombstones() {
         })
         .unwrap();
     storage.batch_insert_tombstone_offsets([tombstone_offset.unwrap()]);
-    assert_eq!(storage.num_zero_lamport_single_ref_accounts(), 1);
+    assert_eq!(storage.num_tombstones(), 1);
 
     // Newer than the latest full snapshot: the tombstone must be carried forward, not dropped and
     // not mis-routed into the alive set.
@@ -1758,153 +1461,6 @@ fn test_fully_tombstoned_storage_reclaim() {
     accounts_db.set_latest_full_snapshot_slot(slot + 1);
     accounts_db.clean_accounts(Some(slot + 1), false);
     assert!(accounts_db.storage.get_slot_storage_entry(slot).is_none());
-}
-
-/// unit test for `alive_bytes_after_shrink()`
-///
-/// Check all the permutations of latest full snapshot slot w.r.t. if/how
-/// zero lamport single ref accounts are counted as alive bytes or not.
-#[test]
-fn test_alive_bytes_after_shrink() {
-    let accounts_db = AccountsDb::new_for_tests_with_config(Vec::new(), DEFAULT_ACCOUNTS_DB_CONFIG);
-    let slot = 5;
-    // note the initial alive bytes should be big enough so that subtracting
-    // all the zero lamport single ref accounts does not saturate at zero.
-    let initial_alive_bytes = 123_456;
-    let (_temp_dir, store) = create_store_for_shrink_tests(
-        &accounts_db,
-        slot,
-        4096, // <-- file size
-        initial_alive_bytes,
-        2, // <-- num zero lamport single ref accounts
-        accounts_db.accounts_file_provider,
-    );
-
-    // test case: latest full snapshot slot is None -- ZLSR accounts are dead
-    {
-        // latest full snapshot slot starts off as None
-        assert!(accounts_db.latest_full_snapshot_slot().is_none());
-
-        // ensure ZLSR accounts are dead bytes
-        let alive_bytes_after_shrink1 = accounts_db.alive_bytes_after_shrink(&store);
-        assert!(alive_bytes_after_shrink1 < initial_alive_bytes);
-
-        // add a ZLSR account, and ensure alive bytes reduces
-        store.insert_zero_lamport_single_ref_account_offset(2);
-        let alive_bytes_after_shrink2 = accounts_db.alive_bytes_after_shrink(&store);
-        assert!(alive_bytes_after_shrink2 < alive_bytes_after_shrink1);
-    }
-
-    // test case: slot > latest full snapshot -- ZLSR accounts are alive
-    {
-        accounts_db.set_latest_full_snapshot_slot(slot - 1);
-
-        // ensure ZLSR accounts are *not* dead bytes
-        let alive_bytes_after_shrink1 = accounts_db.alive_bytes_after_shrink(&store);
-        assert_eq!(alive_bytes_after_shrink1, initial_alive_bytes);
-
-        // add a ZLSR account, and ensure alive bytes is unchanged
-        store.insert_zero_lamport_single_ref_account_offset(3);
-        let alive_bytes_after_shrink2 = accounts_db.alive_bytes_after_shrink(&store);
-        assert_eq!(alive_bytes_after_shrink2, initial_alive_bytes);
-    }
-
-    // test case: slot == latest full snapshot -- ZLSR accounts are dead
-    {
-        accounts_db.set_latest_full_snapshot_slot(slot);
-
-        // ensure ZLSR accounts are dead bytes
-        let alive_bytes_after_shrink1 = accounts_db.alive_bytes_after_shrink(&store);
-        assert!(alive_bytes_after_shrink1 < initial_alive_bytes);
-
-        // add a ZLSR account, and ensure alive bytes reduces
-        store.insert_zero_lamport_single_ref_account_offset(4);
-        let alive_bytes_after_shrink2 = accounts_db.alive_bytes_after_shrink(&store);
-        assert!(alive_bytes_after_shrink2 < alive_bytes_after_shrink1);
-    }
-
-    // test case: slot < latest full snapshot -- ZLSR accounts are dead
-    {
-        accounts_db.set_latest_full_snapshot_slot(slot + 1);
-
-        // ensure ZLSR accounts are dead bytes
-        let alive_bytes_after_shrink1 = accounts_db.alive_bytes_after_shrink(&store);
-        assert!(alive_bytes_after_shrink1 < initial_alive_bytes);
-
-        // add a ZLSR account, and ensure alive bytes reduces
-        store.insert_zero_lamport_single_ref_account_offset(5);
-        let alive_bytes_after_shrink2 = accounts_db.alive_bytes_after_shrink(&store);
-        assert!(alive_bytes_after_shrink2 < alive_bytes_after_shrink1);
-    }
-}
-
-/// Ensure that shrinking a storage...
-/// * with zero lamport single ref accounts
-/// * in a slot *older* than the latest full snapshot slot
-///
-/// Results in...
-/// * the zero lamport single ref accounts *not* in the shrunk storage
-/// * the expected number of alive bytes
-#[test]
-fn test_alive_bytes_after_shrink_with_zero_lamport_single_ref_accounts() {
-    let accounts_db = AccountsDb::new_for_tests_with_config(Vec::new(), DEFAULT_ACCOUNTS_DB_CONFIG);
-    let slot = 1;
-    let dead_account = AccountSharedData::new(0, 123, &Pubkey::default());
-    let dead_pubkeys = [
-        Pubkey::new_unique(),
-        Pubkey::new_unique(),
-        Pubkey::new_unique(),
-    ];
-    let alive_account = AccountSharedData::new(11, 17, &Pubkey::default());
-    let alive_pubkey = Pubkey::new_unique();
-
-    store_rooted_nonzero_accounts(&accounts_db, slot, &dead_pubkeys);
-    let slot = slot + 1;
-
-    accounts_db.store_for_tests((
-        slot,
-        [
-            (&dead_pubkeys[0], &dead_account),
-            (&dead_pubkeys[1], &dead_account),
-            (&dead_pubkeys[2], &dead_account),
-            (&alive_pubkey, &alive_account),
-        ]
-        .as_slice(),
-    ));
-    accounts_db.add_root_and_flush_write_cache(slot);
-
-    // We must set the latest full snapshot slot to `slot` or greater
-    // to ensure that ZLSR accounts are treated as dead for `shrink`.
-    accounts_db.set_latest_full_snapshot_slot(slot);
-
-    let storage = accounts_db.get_storage_for_slot(slot).unwrap();
-
-    assert_eq!(
-        storage.num_zero_lamport_single_ref_accounts(),
-        dead_pubkeys.len(),
-    );
-
-    let alive_bytes_before_shrink = storage.alive_bytes();
-    let expected_alive_bytes_after_shrink = accounts_db.alive_bytes_after_shrink(&storage);
-    assert_ne!(expected_alive_bytes_after_shrink, 0);
-    assert!(expected_alive_bytes_after_shrink < alive_bytes_before_shrink);
-    assert_eq!(
-        expected_alive_bytes_after_shrink,
-        AppendVec::calculate_stored_size(alive_account.data().len()),
-    );
-
-    accounts_db.shrink_slot_forced(slot);
-
-    let storage_after_shrink = accounts_db.get_storage_for_slot(slot).unwrap();
-    assert_eq!(
-        storage_after_shrink.alive_bytes(),
-        expected_alive_bytes_after_shrink,
-    );
-    assert_eq!(storage_after_shrink.count(), 1);
-    assert!(accounts_db.contains(&alive_pubkey));
-    for pubkey in &dead_pubkeys {
-        assert!(!accounts_db.contains(pubkey));
-    }
 }
 
 #[test]
@@ -3168,252 +2724,6 @@ fn test_select_candidates_by_total_usage_all_clean() {
     assert_eq!(0, next_candidates.len());
 }
 
-/// Ensure selecting shrink candidates respects zero-lamport single-ref accounts.
-#[test]
-fn test_select_candidates_by_total_usage_with_zero_lamport_single_ref_accounts() {
-    let temp_dir = TempDir::new().unwrap();
-    let accounts_db = AccountsDb::new_for_tests_with_config(Vec::new(), DEFAULT_ACCOUNTS_DB_CONFIG);
-    let mut shrink_candidates = ShrinkCandidates::default();
-
-    let file_size = 10_000;
-    let num_zero_lamport_single_ref_accounts = 4;
-    let closed_account = AccountSharedData::new(0, 0, &Pubkey::default());
-    let accounts_to_store: Vec<_> =
-        iter::repeat_with(|| (Pubkey::new_unique(), closed_account.clone()))
-            .take(num_zero_lamport_single_ref_accounts)
-            .collect();
-
-    let slot_with_zlsr = 11;
-    let store_with_zlsr = Arc::new(AccountStorageEntry::new(
-        temp_dir.path(),
-        slot_with_zlsr,
-        slot_with_zlsr as AccountsFileId,
-        file_size,
-        accounts_db.accounts_file_provider,
-    ));
-    let stored_accounts_info = store_with_zlsr
-        .accounts
-        .write_accounts(&(slot_with_zlsr, accounts_to_store.as_slice()))
-        .unwrap();
-    store_with_zlsr.batch_insert_zero_lamport_single_ref_account_offsets(
-        &stored_accounts_info.offsets[..num_zero_lamport_single_ref_accounts],
-    );
-    store_with_zlsr
-        .num_alive_bytes
-        .store(store_with_zlsr.written_bytes() as usize, Ordering::Release);
-    accounts_db.storage.insert(Arc::clone(&store_with_zlsr));
-    shrink_candidates.insert(slot_with_zlsr);
-
-    let slot_no_zlsr = 22;
-    let store_no_zlsr = Arc::new(AccountStorageEntry::new(
-        temp_dir.path(),
-        slot_no_zlsr,
-        slot_no_zlsr as AccountsFileId,
-        file_size,
-        accounts_db.accounts_file_provider,
-    ));
-    store_no_zlsr
-        .accounts
-        .write_accounts(&(slot_with_zlsr, accounts_to_store.as_slice()))
-        .unwrap();
-    store_no_zlsr
-        .num_alive_bytes
-        .store(store_no_zlsr.written_bytes() as usize, Ordering::Release);
-    accounts_db.storage.insert(Arc::clone(&store_no_zlsr));
-    shrink_candidates.insert(slot_no_zlsr);
-
-    // test case: The latest full snapshot slot is *older* than
-    // the store with zero lamport single ref accounts.
-    // Ensure shrink will see ZLSR accounts as *alive*.
-    {
-        accounts_db.set_latest_full_snapshot_slot(slot_with_zlsr - 1);
-
-        // Bytes from ZLSR accounts are alive, and will stay alive after shrink.
-        assert_eq!(
-            accounts_db.alive_bytes_after_shrink(&store_with_zlsr),
-            store_with_zlsr.alive_bytes(),
-        );
-        assert!(!accounts_db.is_candidate_for_shrink(&store_with_zlsr));
-        assert!(!accounts_db.is_shrinking_productive(&store_with_zlsr));
-
-        // Stores without ZLSR accounts use the raw alive bytes.
-        assert_eq!(
-            accounts_db.alive_bytes_after_shrink(&store_no_zlsr),
-            store_no_zlsr.alive_bytes(),
-        );
-
-        let (selected_candidates, next_candidates) = accounts_db
-            .select_candidates_by_total_usage(&shrink_candidates, DEFAULT_ACCOUNTS_SHRINK_RATIO);
-
-        // both slots are above the shrink ratio, so neither should be shrink candidates
-        assert!(selected_candidates.is_empty());
-        assert!(next_candidates.is_empty());
-    }
-
-    // test case: The latest full snapshot slot is either:
-    // * newer than the store with ZLSR accounts
-    // * the same as the store with ZLSR accounts
-    // * unset
-    // Ensure shrink will see ZLSR accounts as *dead*.
-    {
-        for latest_full_snapshot_slot in [Some(slot_with_zlsr + 1), Some(slot_with_zlsr), None] {
-            *accounts_db.latest_full_snapshot_slot.lock_write() = latest_full_snapshot_slot;
-
-            // Bytes from ZLSR accounts are alive, but would be dead after shrink.
-            assert_eq!(
-                store_with_zlsr.alive_bytes() as u64,
-                store_with_zlsr.written_bytes(),
-            );
-            assert_eq!(accounts_db.alive_bytes_after_shrink(&store_with_zlsr), 0);
-            assert!(accounts_db.is_candidate_for_shrink(&store_with_zlsr));
-            assert!(accounts_db.is_shrinking_productive(&store_with_zlsr));
-
-            // Stores without ZLSR accounts use the raw alive bytes.
-            assert_eq!(
-                accounts_db.alive_bytes_after_shrink(&store_no_zlsr),
-                store_no_zlsr.alive_bytes(),
-            );
-
-            let (selected_candidates, next_candidates) = accounts_db
-                .select_candidates_by_total_usage(
-                    &shrink_candidates,
-                    DEFAULT_ACCOUNTS_SHRINK_RATIO,
-                );
-
-            // slot 11 with the ZLSR accounts *is* selected for shrink
-            assert_eq!(1, selected_candidates.len());
-            assert!(selected_candidates.contains_key(&slot_with_zlsr));
-
-            // slot 22 is above the shrink ratio, so ensure it is not a candidate
-            assert!(next_candidates.is_empty());
-        }
-    }
-}
-
-#[test]
-fn test_delete_dependencies() {
-    let accounts = AccountsDb::new_for_tests_with_config(Vec::new(), DEFAULT_ACCOUNTS_DB_CONFIG);
-    let accounts_index = &accounts.accounts_index;
-    let key0 = Pubkey::new_from_array([0u8; 32]);
-    let key1 = Pubkey::new_from_array([1u8; 32]);
-    let key2 = Pubkey::new_from_array([2u8; 32]);
-    let info0 = AccountInfo::new(StorageLocation::AppendVec(0, 0), true);
-    let info1 = AccountInfo::new(StorageLocation::AppendVec(1, 0), true);
-    let info2 = AccountInfo::new(StorageLocation::AppendVec(2, 0), true);
-    let info3 = AccountInfo::new(StorageLocation::AppendVec(3, 0), true);
-    let mut reclaims = ReclaimsSlotList::new();
-    accounts_index.upsert(
-        0,
-        0,
-        &key0,
-        info0,
-        &mut reclaims,
-        UpsertReclaim::IgnoreReclaims,
-    );
-    accounts_index.upsert(
-        1,
-        1,
-        &key0,
-        info1,
-        &mut reclaims,
-        UpsertReclaim::IgnoreReclaims,
-    );
-    accounts_index.upsert(
-        1,
-        1,
-        &key1,
-        info1,
-        &mut reclaims,
-        UpsertReclaim::IgnoreReclaims,
-    );
-    accounts_index.upsert(
-        2,
-        2,
-        &key1,
-        info2,
-        &mut reclaims,
-        UpsertReclaim::IgnoreReclaims,
-    );
-    accounts_index.upsert(
-        2,
-        2,
-        &key2,
-        info2,
-        &mut reclaims,
-        UpsertReclaim::IgnoreReclaims,
-    );
-    accounts_index.upsert(
-        3,
-        3,
-        &key2,
-        info3,
-        &mut reclaims,
-        UpsertReclaim::IgnoreReclaims,
-    );
-    let num_bins = accounts_index.bins();
-    let mut candidates: Box<_> = std::iter::repeat_with(HashMap::<Pubkey, CleaningInfo>::new)
-        .take(num_bins)
-        .collect();
-    for key in [&key0, &key1, &key2] {
-        let (rooted_entries, ref_count) = accounts_index.get_and_then(key, |entry| {
-            let slot_list_lock = entry.unwrap().slot_list_read_lock();
-            let rooted = accounts_index.get_entries_up_to_inclusive(slot_list_lock.as_ref(), None);
-            (false, (rooted, entry.unwrap().ref_count()))
-        });
-        let index = accounts_index.bin_calculator.bin_from_pubkey(key);
-        let candidates_bin = &mut candidates[index];
-        candidates_bin.insert(
-            *key,
-            CleaningInfo {
-                slot_list: rooted_entries,
-                ref_count,
-                ..Default::default()
-            },
-        );
-    }
-    for candidates_bin in candidates.iter() {
-        for (
-            key,
-            CleaningInfo {
-                slot_list: list,
-                ref_count,
-                ..
-            },
-        ) in candidates_bin.iter()
-        {
-            info!(" purge {key} ref_count {ref_count} =>");
-            for x in list {
-                info!("  {x:?}");
-            }
-        }
-    }
-
-    let mut store_counts = HashMap::new();
-    store_counts.insert(0, (0, HashSet::from_iter(vec![key0])));
-    store_counts.insert(1, (0, HashSet::from_iter(vec![key0, key1])));
-    store_counts.insert(2, (0, HashSet::from_iter(vec![key1, key2])));
-    store_counts.insert(3, (1, HashSet::from_iter(vec![key2])));
-    accounts.calc_delete_dependencies(&candidates, &mut store_counts, None);
-    let mut stores: Vec<_> = store_counts.keys().cloned().collect();
-    stores.sort_unstable();
-    for store in &stores {
-        info!(
-            "store: {:?} : {:?}",
-            store,
-            store_counts.get(store).unwrap()
-        );
-    }
-    for x in 0..3 {
-        // if the store count doesn't exist for this id, then it is implied to be > 0
-        assert!(
-            store_counts
-                .get(&x)
-                .map(|entry| entry.0 >= 1)
-                .unwrap_or(true)
-        );
-    }
-}
-
 #[test]
 fn test_account_balance_for_capitalization_native_program() {
     let normal_native_program = create_loadable_account_for_test("foo");
@@ -4360,13 +3670,10 @@ fn test_alive_bytes_exclude_zero_lamport_single_ref_accounts() {
     assert!(alive_bytes > 0);
 
     // assert the number of zlsr accounts
-    assert_eq!(storage.num_zero_lamport_single_ref_accounts(), num_keys);
+    assert_eq!(storage.num_tombstones(), num_keys);
 
     // assert the "alive_bytes_exclude_zero_lamport_single_ref_accounts"
-    assert_eq!(
-        storage.alive_bytes_exclude_zero_lamport_single_ref_accounts(),
-        0,
-    );
+    assert_eq!(storage.alive_bytes_exclude_tombstones(), 0,);
 }
 
 /// When the full snapshot advances past slots that still hold zero-lamport single-ref
@@ -4941,11 +4248,7 @@ fn test_clean_drop_dead_storage_handle_zero_lamport_single_ref_accounts() {
     // alive account, it is not completely dead, so clean won't drop it. Instead it is a candidate
     // for next round shrinking.
     assert_eq!(db.accounts_index.ref_count_from_storage(&account_key1), 0);
-    assert_eq!(
-        db.get_and_assert_single_storage(1)
-            .num_zero_lamport_single_ref_accounts(),
-        1
-    );
+    assert_eq!(db.get_and_assert_single_storage(1).num_tombstones(), 1);
     assert!(db.shrink_candidate_slots.lock().unwrap().contains(&1));
 }
 
@@ -5371,10 +4674,9 @@ fn test_remove_uncleaned_slots_and_collect_pubkeys_up_to_slot() {
     db.uncleaned_pubkeys.insert(slot3, vec![pubkey3]);
 
     let num_bins = db.accounts_index.bins();
-    let candidates: Box<_> =
-        std::iter::repeat_with(|| RwLock::new(HashMap::<Pubkey, CleaningInfo>::new()))
-            .take(num_bins)
-            .collect();
+    let candidates: Box<_> = std::iter::repeat_with(|| RwLock::new(HashSet::<Pubkey>::new()))
+        .take(num_bins)
+        .collect();
     db.remove_uncleaned_slots_up_to_slot_and_move_pubkeys(Some(slot3), &candidates);
 
     let candidates_contain = |pubkey: &Pubkey| {
@@ -5789,143 +5091,6 @@ fn test_clean_accounts_with_latest_full_snapshot_slot() {
     accounts_db.clean_accounts(None, false);
     // The full snapshot now covers slot3, so clean reclaims the tombstone-only storage
     assert!(accounts_db.storage.get_slot_storage_entry(slot3).is_none());
-}
-
-#[test]
-fn test_filter_zero_lamport_clean_for_incremental_snapshots() {
-    let slot = 10;
-
-    struct TestParameters {
-        latest_full_snapshot_slot: Option<Slot>,
-        max_clean_root: Option<Slot>,
-        should_contain: bool,
-    }
-
-    let do_test = |test_params: TestParameters| {
-        let account_info = AccountInfo::new(StorageLocation::AppendVec(42, 128), true);
-        let pubkey = solana_pubkey::new_rand();
-        let mut key_set = HashSet::default();
-        key_set.insert(pubkey);
-        let store_count = 0;
-        let mut store_counts = HashMap::default();
-        store_counts.insert(slot, (store_count, key_set));
-        let mut candidates = [HashMap::new()];
-        candidates[0].insert(
-            pubkey,
-            CleaningInfo {
-                slot_list: SlotList::from([(slot, account_info)]),
-                ref_count: 1,
-                ..Default::default()
-            },
-        );
-        let accounts_db =
-            AccountsDb::new_for_tests_with_config(Vec::new(), DEFAULT_ACCOUNTS_DB_CONFIG);
-        if let Some(latest_full_snapshot_slot) = test_params.latest_full_snapshot_slot {
-            accounts_db.set_latest_full_snapshot_slot(latest_full_snapshot_slot);
-        }
-        accounts_db.filter_zero_lamport_clean_for_incremental_snapshots(
-            test_params.max_clean_root,
-            &store_counts,
-            &mut candidates,
-        );
-
-        assert_eq!(
-            candidates[0].contains_key(&pubkey),
-            test_params.should_contain
-        );
-    };
-
-    // Scenario 1: last full snapshot is NONE
-    // In this scenario incremental snapshots are OFF, so always purge
-    {
-        let latest_full_snapshot_slot = None;
-
-        do_test(TestParameters {
-            latest_full_snapshot_slot,
-            max_clean_root: Some(slot),
-            should_contain: true,
-        });
-
-        do_test(TestParameters {
-            latest_full_snapshot_slot,
-            max_clean_root: None,
-            should_contain: true,
-        });
-    }
-
-    // Scenario 2: last full snapshot is GREATER THAN zero lamport account slot
-    // In this scenario always purge, and just test the various permutations of
-    // `should_filter_for_incremental_snapshots` based on `max_clean_root`.
-    {
-        let latest_full_snapshot_slot = Some(slot + 1);
-
-        do_test(TestParameters {
-            latest_full_snapshot_slot,
-            max_clean_root: latest_full_snapshot_slot,
-            should_contain: true,
-        });
-
-        do_test(TestParameters {
-            latest_full_snapshot_slot,
-            max_clean_root: latest_full_snapshot_slot.map(|s| s + 1),
-            should_contain: true,
-        });
-
-        do_test(TestParameters {
-            latest_full_snapshot_slot,
-            max_clean_root: None,
-            should_contain: true,
-        });
-    }
-
-    // Scenario 3: last full snapshot is EQUAL TO zero lamport account slot
-    // In this scenario always purge, as it's the same as Scenario 2.
-    {
-        let latest_full_snapshot_slot = Some(slot);
-
-        do_test(TestParameters {
-            latest_full_snapshot_slot,
-            max_clean_root: latest_full_snapshot_slot,
-            should_contain: true,
-        });
-
-        do_test(TestParameters {
-            latest_full_snapshot_slot,
-            max_clean_root: latest_full_snapshot_slot.map(|s| s + 1),
-            should_contain: true,
-        });
-
-        do_test(TestParameters {
-            latest_full_snapshot_slot,
-            max_clean_root: None,
-            should_contain: true,
-        });
-    }
-
-    // Scenario 4: last full snapshot is LESS THAN zero lamport account slot
-    // In this scenario do *not* purge, except when `should_filter_for_incremental_snapshots`
-    // is false
-    {
-        let latest_full_snapshot_slot = Some(slot - 1);
-
-        do_test(TestParameters {
-            latest_full_snapshot_slot,
-            max_clean_root: latest_full_snapshot_slot,
-            should_contain: true,
-        });
-
-        do_test(TestParameters {
-            latest_full_snapshot_slot,
-            max_clean_root: latest_full_snapshot_slot.map(|s| s + 1),
-            should_contain: false,
-        });
-
-        do_test(TestParameters {
-            latest_full_snapshot_slot,
-            max_clean_root: None,
-            should_contain: false,
-        });
-    }
 }
 
 #[test]
@@ -6372,9 +5537,7 @@ fn test_shrink_collect_simple() {
                                     .collect::<Vec<_>>(),
                                 expected_alive_accounts
                             );
-                            // Tombstoned-at-flush accounts are not in the index, so shrink's index
-                            // scan finds no zero-lamport single-ref accounts.
-                            assert!(shrink_collect.zero_lamport_single_ref_pubkeys.is_empty());
+
                             assert_eq!(
                                 shrink_collect
                                     .tombstones_to_carry_forward
@@ -6897,42 +6060,6 @@ fn test_mark_obsolete_accounts_at_startup_multiple_bins() {
     // Ensure that stats were accumulated correctly
     assert_eq!(obsolete_stats.accounts_marked_obsolete, 2);
     assert_eq!(obsolete_stats.slots_removed, 1);
-}
-
-#[test]
-fn test_batch_insert_zero_lamport_single_ref_account_offsets() {
-    let accounts = AccountsDb::new_for_tests_with_config(Vec::new(), DEFAULT_ACCOUNTS_DB_CONFIG);
-    let storage = accounts.create_store(1, 100);
-
-    // Test inserting new offsets
-    let offsets1 = vec![10, 20, 30];
-    let count1 = storage.batch_insert_zero_lamport_single_ref_account_offsets(&offsets1);
-    assert_eq!(count1, 3, "Should insert all 3 new offsets");
-    assert_eq!(storage.num_zero_lamport_single_ref_accounts(), 3);
-
-    // Test inserting some duplicate and some new offsets
-    let offsets2 = vec![20, 30, 40, 50]; // 20,30 are duplicates, 40,50 are new
-    let count2 = storage.batch_insert_zero_lamport_single_ref_account_offsets(&offsets2);
-    assert_eq!(count2, 2, "Should insert only 2 new offsets (40, 50)");
-    assert_eq!(storage.num_zero_lamport_single_ref_accounts(), 5);
-
-    // Test inserting all duplicates
-    let offsets3 = vec![10, 20];
-    let count3 = storage.batch_insert_zero_lamport_single_ref_account_offsets(&offsets3);
-    assert_eq!(count3, 0, "Should not insert any duplicates");
-    assert_eq!(storage.num_zero_lamport_single_ref_accounts(), 5);
-
-    // Test inserting empty slice
-    let empty_offsets: Vec<usize> = vec![];
-    let count4 = storage.batch_insert_zero_lamport_single_ref_account_offsets(&empty_offsets);
-    assert_eq!(count4, 0, "Should handle empty slice");
-    assert_eq!(storage.num_zero_lamport_single_ref_accounts(), 5);
-
-    // Test inserting large batch with mixed duplicates
-    let offsets5 = vec![10, 60, 20, 70, 30, 80, 40]; // 10,20,30,40 duplicates, 60,70,80 new
-    let count5 = storage.batch_insert_zero_lamport_single_ref_account_offsets(&offsets5);
-    assert_eq!(count5, 3, "Should insert only 3 new offsets (60, 70, 80)");
-    assert_eq!(storage.num_zero_lamport_single_ref_accounts(), 8);
 }
 
 #[test]

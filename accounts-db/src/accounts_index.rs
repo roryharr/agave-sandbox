@@ -929,12 +929,8 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> AccountsIndex<T, U> {
                 self.purge_older_root_entries(&mut slot_list, reclaims, max_clean_root_inclusive);
                 let mut unref_count = (reclaims.len() - reclaims_start) as RefCount;
 
-                // If reclaiming leaves a single ref zero lamport account, it is safe to delete
-                // the account entirely and mark it as a tombstone. An untouched single-entry
-                // zero-lamport account stays on the classic zero-lamport purge path: its offset
-                // is already marked zero-lamport single-ref at flush or index generation.
-                if unref_count > 0
-                    && entry.ref_count() == unref_count + 1
+                // If a single slot zero lamport entry is found, convert it to a tombstone
+                if entry.ref_count() == unref_count + 1
                     && let &[(slot, account_info)] = &*slot_list
                     && account_info.is_zero_lamport()
                 {
@@ -979,7 +975,10 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> AccountsIndex<T, U> {
     /// sole surviving entry is a zero-lamport account, turning them into tombstones (removed from
     /// the index but retained in storage). Returns the `(slot, value)` of each removed survivor so
     /// the caller can record the tombstone offsets on the owning storages.
-    pub fn create_zero_lamport_tombstones_by_bin(&self, pubkeys_by_bin: &[Pubkey]) -> Vec<(Slot, T)> {
+    pub fn create_zero_lamport_tombstones_by_bin(
+        &self,
+        pubkeys_by_bin: &[Pubkey],
+    ) -> Vec<(Slot, T)> {
         let map = match pubkeys_by_bin.first() {
             Some(pubkey) => self.get_bin(pubkey),
             None => return Vec::new(),
