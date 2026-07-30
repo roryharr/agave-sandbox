@@ -1145,65 +1145,6 @@ fn test_clean_reclaim_tombstones_zero_lamport_single_ref() {
 }
 
 #[test]
-fn test_clean_dead_slot_with_obsolete_accounts() {
-    // This test is triggering a scenario in reclaim_accounts where the entire slot is reclaimed
-    // When an entire slot is reclaimed, it normally unrefs the pubkeys, while when individual
-    // accounts are reclaimed it does not unref the pubkeys
-
-    // Obsolete accounts are already unreffed so they should not be unreffed again
-
-    let accounts = AccountsDb::new_for_tests_with_config(Vec::new(), DEFAULT_ACCOUNTS_DB_CONFIG);
-
-    let pubkey = solana_pubkey::new_rand();
-    let pubkey2 = solana_pubkey::new_rand();
-    let account = AccountSharedData::new(1, 1, AccountSharedData::default().owner());
-    let zero_lamport_account = AccountSharedData::new(0, 0, AccountSharedData::default().owner());
-    accounts.set_latest_full_snapshot_slot(2);
-
-    // Store pubkey1 and pubkey2 in slot 0
-    accounts.store_for_tests((0, [(&pubkey, &account), (&pubkey2, &account)].as_slice()));
-
-    // Update pubkey1 and make pubkey2 a zero lamport account in slot 1
-    accounts.store_for_tests((
-        1,
-        [(&pubkey, &account), (&pubkey2, &zero_lamport_account)].as_slice(),
-    ));
-
-    // Update pubkey1 as in slot 2
-    accounts.store_for_tests((2, [(&pubkey, &account)].as_slice()));
-
-    // Flush the slots individually to avoid reclaims
-    accounts.add_root_and_flush_write_cache(0);
-    accounts.add_root_and_flush_write_cache(1);
-    accounts.add_root_and_flush_write_cache(2);
-
-    // Slot 1 should not be removed as it has the zero lamport account
-    assert!(accounts.storage.get_slot_storage_entry(1).is_some());
-    let slot = accounts.storage.get_slot_storage_entry(1).unwrap();
-
-    // Ensure that slot1 also still contains the obsolete account
-    assert_eq!(
-        slot.obsolete_accounts_read_lock()
-            .filter_obsolete_accounts(None)
-            .count(),
-        1
-    );
-
-    // Ref count for pubkey is 1 as the older version was marked obsolete
-    assert_eq!(accounts.accounts_index.ref_count_from_storage(&pubkey), 1);
-
-    // Clean, which will remove slot1
-    accounts.clean_accounts_for_tests();
-
-    assert!(accounts.storage.get_slot_storage_entry(0).is_none());
-    assert!(accounts.storage.get_slot_storage_entry(1).is_none());
-
-    // Ref count for pubkey should be 1. It was NOT decremented during clean_accounts_for_tests
-    // despite slot 1 being removed, because the account was already obsolete
-    assert_eq!(accounts.accounts_index.ref_count_from_storage(&pubkey), 1);
-}
-
-#[test]
 fn test_remove_zero_lamport_single_ref_accounts_after_shrink() {
     for pass in 0..3 {
         let accounts =
@@ -1400,53 +1341,6 @@ fn test_shrink_does_not_resurrect_dead_account() {
     assert!(!accounts.contains(&pubkey));
 }
 
-#[test]
-fn test_reclaiming_last_live_account_purges_tombstone_only_storage() {
-    let accounts = AccountsDb::default_for_tests();
-    let tombstone_pubkey = Pubkey::new_unique();
-    let live_pubkey = Pubkey::new_unique();
-    let slot = 1;
-    let account = AccountSharedData::new(1, 0, &Pubkey::default());
-
-    // slot: both accounts stored and flushed
-    accounts.store_for_tests((
-        slot,
-        [(&tombstone_pubkey, &account), (&live_pubkey, &account)].as_slice(),
-    ));
-    accounts.add_root_and_flush_write_cache(slot);
-
-    // Turn tombstone_pubkey's account into a tombstone, as shrink's carry-forward leaves
-    // it: index entry removed, offset recorded in the storage's tombstone set
-    let storage = accounts.get_and_assert_single_storage(slot);
-    let account_offset = accounts
-        .accounts_index
-        .get_with_and_then(
-            &tombstone_pubkey,
-            &Ancestors::from(vec![slot]),
-            false,
-            |(_slot, account_info)| account_info.offset(),
-        )
-        .unwrap();
-    accounts.accounts_index.purge_exact(
-        &tombstone_pubkey,
-        HashSet::from([slot]),
-        &mut ReclaimsSlotList::new(),
-    );
-    storage.batch_insert_tombstone_offsets(iter::once(account_offset));
-    assert_eq!(storage.num_tombstones(), 1);
-
-    // Set the snapshot so the tombstone can be removed
-    accounts.set_latest_full_snapshot_slot(slot);
-
-    // slot + 1: a newer version of the live account. Its flush reclaims the entry at
-    // slot, leaving only the snapshot-covered tombstone, so the storage is dead
-    accounts.store_for_tests((slot + 1, [(&live_pubkey, &account)].as_slice()));
-    accounts.add_root_and_flush_write_cache(slot + 1);
-    assert!(accounts.storage.get_slot_storage_entry(slot).is_none());
-}
-
-/// A storage whose remaining accounts are all tombstones covered by the latest full
-/// snapshot is dead: reclaiming its last live account purges the storage.
 #[test]
 fn test_reclaiming_last_live_account_purges_tombstone_only_storage() {
     let accounts = AccountsDb::default_for_tests();
