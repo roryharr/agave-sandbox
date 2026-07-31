@@ -944,6 +944,25 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> AccountsIndex<T, U> {
         }
         reclaims
     }
+
+    /// Startup-only. For a set of pubkeys that all fall in the same index bin, remove any whose
+    /// sole surviving entry is a zero-lamport account, turning them into tombstones (removed from
+    /// the index but retained in storage). Returns the `(slot, value)` of each removed survivor so
+    /// the caller can record the tombstone offsets on the owning storages.
+    pub fn create_zero_lamport_tombstones_by_bin(
+        &self,
+        pubkeys_by_bin: &[Pubkey],
+    ) -> Vec<(Slot, T)> {
+        let map = match pubkeys_by_bin.first() {
+            Some(pubkey) => self.get_bin(pubkey),
+            None => return Vec::new(),
+        };
+
+        pubkeys_by_bin
+            .iter()
+            .filter_map(|pubkey| map.take_single_ref_zero_lamport_tombstone_on_startup(pubkey))
+            .collect()
+    }
 }
 
 /// modes the system can be in

@@ -133,7 +133,7 @@ fn run_generate_index_duplicates_within_slot_test(db: AccountsDb, reverse: bool)
     assert!(!db.accounts_index.contains(&pubkey));
     let storage = db.get_storage_for_slot(slot0).unwrap();
     let mut reader = crate::append_vec::new_scan_accounts_reader();
-    let mut accum = IndexGenerationAccumulator::with_slots_capacity(1);
+    let mut accum = IndexGenerationAccumulator::with_slots_capacity(1, db.accounts_index.bins());
     db.generate_index_for_slot(&mut reader, &mut accum, 0, &storage);
 }
 
@@ -166,10 +166,10 @@ fn test_generate_index_for_single_ref_zero_lamport_slot() {
     db.storage.insert(Arc::clone(&append_vec));
     assert!(!db.accounts_index.contains(&pubkey));
     let result = db.generate_index(None, false);
-    let slot_list_len = db.accounts_index.get_and_then(&pubkey, |entry| {
-        (false, entry.unwrap().slot_list_lock_read_len())
-    });
-    assert_eq!(slot_list_len, 1);
+    // The single-ref zero-lamport account is turned into a tombstone: removed from the index
+    // entirely, but retained in its storage so an incremental snapshot still observes it.
+    assert!(!db.accounts_index.contains(&pubkey));
+    assert_eq!(append_vec.num_tombstones(), 1);
     assert_eq!(
         append_vec.alive_bytes(),
         AppendVec::calculate_stored_size(0),
@@ -177,6 +177,7 @@ fn test_generate_index_for_single_ref_zero_lamport_slot() {
     assert_eq!(append_vec.accounts_count(), 1);
     assert_eq!(append_vec.count(), 1);
     assert_eq!(result.accounts_data_len, 0);
+    // Tombstones are counted as dead zero-lamport single refs, so shrink still reclaims them.
     assert_eq!(1, append_vec.num_zero_lamport_single_ref_accounts());
     assert_eq!(
         0,
@@ -5449,7 +5450,8 @@ fn test_calculate_storage_count_and_alive_bytes() {
 
     let storage = accounts.storage.get_slot_storage_entry(slot0).unwrap();
     let mut reader = crate::append_vec::new_scan_accounts_reader();
-    let mut accum = IndexGenerationAccumulator::with_slots_capacity(1);
+    let mut accum =
+        IndexGenerationAccumulator::with_slots_capacity(1, accounts.accounts_index.bins());
     accounts.generate_index_for_slot(&mut reader, &mut accum, 0, &storage);
     assert_eq!(accum.storage_info.len(), 1);
     for (slot, value) in accum.storage_info {
@@ -5468,7 +5470,8 @@ fn test_calculate_storage_count_and_alive_bytes_0_accounts() {
     // empty store
     let storage = accounts.create_store(0, 1);
     let mut reader = crate::append_vec::new_scan_accounts_reader();
-    let mut accum = IndexGenerationAccumulator::with_slots_capacity(1);
+    let mut accum =
+        IndexGenerationAccumulator::with_slots_capacity(1, accounts.accounts_index.bins());
     accounts.generate_index_for_slot(&mut reader, &mut accum, 0, &storage);
     assert!(accum.storage_info.is_empty());
 }
@@ -5503,7 +5506,8 @@ fn test_calculate_storage_count_and_alive_bytes_2_accounts() {
         .write_accounts(&(slot0, &[(&keys[0], &account), (&keys[1], &account_big)][..]));
 
     let mut reader = crate::append_vec::new_scan_accounts_reader();
-    let mut accum = IndexGenerationAccumulator::with_slots_capacity(1);
+    let mut accum =
+        IndexGenerationAccumulator::with_slots_capacity(1, accounts.accounts_index.bins());
     accounts.generate_index_for_slot(&mut reader, &mut accum, 0, &storage);
     assert_eq!(accum.storage_info.len(), 1);
     for (slot, value) in accum.storage_info {
@@ -5563,7 +5567,8 @@ fn test_calculate_storage_count_and_alive_bytes_obsolete_account(
         .mark_accounts_obsolete(accounts_to_mark_obsolete.iter().cloned(), slot0 + 1);
 
     let mut reader = crate::append_vec::new_scan_accounts_reader();
-    let mut accum = IndexGenerationAccumulator::with_slots_capacity(1);
+    let mut accum =
+        IndexGenerationAccumulator::with_slots_capacity(1, accounts.accounts_index.bins());
     accounts.generate_index_for_slot(&mut reader, &mut accum, 0, &storage);
     assert_eq!(
         accum.num_obsolete_accounts_skipped,
