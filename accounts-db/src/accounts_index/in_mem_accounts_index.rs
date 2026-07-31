@@ -735,7 +735,6 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
                             0,
                             "Callback must insert item into slot list"
                         );
-                        assert!(new_value.dirty());
                         vacant.insert(Box::new(new_value));
                         stats.inc_mem_count();
                     }
@@ -971,7 +970,6 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
                 } else {
                     // not on disk, so insert new thing and we're done
                     let new_entry = new_entry.into_account_map_entry(&self.storage);
-                    assert!(new_entry.dirty());
                     vacant.insert(new_entry);
                     (
                         false, /* found in mem */

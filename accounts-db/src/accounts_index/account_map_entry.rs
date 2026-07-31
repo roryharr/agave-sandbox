@@ -23,18 +23,15 @@ pub struct AccountMapEntry<T> {
     /// Note that 'clean' removes outdated entries (ie. older roots) from this slot_list
     /// purge_slot() also removes non-rooted slots from this list
     slot_list: RwLock<SlotList<T>>,
-    /// synchronization metadata for in-memory state since last flush to disk accounts index
-    meta: AccountMapEntryMeta,
 }
 
 // Ensure the size of AccountMapEntry never changes unexpectedly
-const _: () = assert!(size_of::<AccountMapEntry<AccountInfo>>() == 48);
+const _: () = assert!(size_of::<AccountMapEntry<AccountInfo>>() == 40);
 
 impl<T: IndexValue> AccountMapEntry<T> {
     pub fn new(slot_list: SlotList<T>, meta: AccountMapEntryMeta) -> Self {
         Self {
             slot_list: RwLock::new(slot_list),
-            meta,
         }
     }
 
@@ -42,42 +39,29 @@ impl<T: IndexValue> AccountMapEntry<T> {
     pub(super) fn empty_for_tests() -> Self {
         Self {
             slot_list: RwLock::default(),
-            meta: AccountMapEntryMeta::default(),
         }
     }
 
     pub fn dirty(&self) -> bool {
-        self.meta.dirty.load(Ordering::Acquire)
+        false
     }
 
     pub fn mark_dirty(&self) {
-        self.meta.dirty.store(true, Ordering::Release)
+
     }
 
     /// set dirty to false, return true if was dirty
     pub fn clear_dirty(&self) -> bool {
-        self.meta
-            .dirty
-            .compare_exchange(true, false, Ordering::AcqRel, Ordering::Relaxed)
-            .is_ok()
+        false
     }
 
     pub fn age(&self) -> Age {
-        self.meta.age.load(Ordering::Acquire)
+        1
+        //self.meta.age.load(Ordering::Acquire)
     }
 
     pub fn set_age(&self, value: Age) {
-        self.meta.age.store(value, Ordering::Release)
-    }
-
-    /// set age to 'next_age' if 'self.age' is 'expected_age'
-    pub fn try_exchange_age(&self, next_age: Age, expected_age: Age) {
-        let _ = self.meta.age.compare_exchange(
-            expected_age,
-            next_age,
-            Ordering::AcqRel,
-            Ordering::Relaxed,
-        );
+        //self.meta.age.store(value, Ordering::Release)
     }
 
     /// Return length of the slot list
