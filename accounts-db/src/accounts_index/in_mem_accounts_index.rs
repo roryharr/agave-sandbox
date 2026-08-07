@@ -1071,7 +1071,7 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
             );
             (possible_evictions, m)
         };
-        Self::update_time_stat(&self.stats().flush_scan_us, m);
+        Self::update_time_stat(&self.stats().evict_scan_us, m);
 
         possible_evictions
     }

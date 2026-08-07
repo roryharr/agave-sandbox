@@ -48,7 +48,7 @@ pub struct Stats {
     pub active_threads: AtomicU64,
     last_age: AtomicAge,
     last_ages_flushed: AtomicU64,
-    pub flush_scan_us: AtomicU64,
+    pub evict_scan_us: AtomicU64,
     pub flush_evict_us: AtomicU64,
     pub flush_grow_us: AtomicU64,
     last_was_startup: AtomicBool,
@@ -374,8 +374,8 @@ impl Stats {
                     i64
                 ),
                 (
-                    "flush_scan_us",
-                    self.flush_scan_us.swap(0, Ordering::Relaxed),
+                    "evict_scan_us",
+                    self.evict_scan_us.swap(0, Ordering::Relaxed),
                     i64
                 ),
                 (
