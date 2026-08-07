@@ -936,7 +936,7 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> AccountsIndex<T, U> {
             self.purge_older_root_entries(&mut slot_list, reclaims, max_clean_root_inclusive);
             let mut unref_count = (reclaims.len() - reclaims_start) as RefCount;
 
-            // If only a zero lamport single slot account remains, then reclaim it. It will be converted
+            // If only a zero lamport single ref account remains, then reclaim it. It will be converted
             // into a tombstone
             if entry.ref_count() == unref_count + 1
                 && let &[(slot, account_info)] = &*slot_list
