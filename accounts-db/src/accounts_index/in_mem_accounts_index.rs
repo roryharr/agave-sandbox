@@ -1077,9 +1077,7 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
     }
 
     /// Takes self's `startup_info` and writes it to disk and in-mem.
-    ///
-    /// If the configured memory limit is "minimal", nothing is writen to in-mem.
-    /// Otherwise write to in-mem (and respect the memory limit).
+    /// When in Threshold mode limit the insertions to the low water mark of the threshold.
     fn write_startup_info(&self) {
         let insert = std::mem::take(&mut *self.startup_info.insert.lock().unwrap());
         if insert.is_empty() {
