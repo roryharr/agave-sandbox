@@ -1556,8 +1556,7 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
             stats.update_in_mem_capacity(capacity_pre, capacity_post);
         }
 
-        // Only Threshold mode cares about tombstone-driven capacity doublings; Minimal
-        // evicts everything each pass, so rebuilding every flush is wasted work.
+        // Only Threshold mode cares about tombstone-driven capacity doublings
         if evicted > 0 && self.storage.threshold_entries_per_bin.is_some() {
             self.reallocate_to_clear_tombstones();
         }
@@ -1748,8 +1747,9 @@ mod tests {
     use {
         super::*,
         crate::accounts_index::{
-            ACCOUNTS_INDEX_CONFIG_FOR_TESTING, AccountsIndexConfig, BINS_FOR_TESTING, IndexLimit,
-            IndexLimitThreshold, bucket_map_holder::ThresholdEntriesPerBin,
+            ACCOUNTS_INDEX_CONFIG_FOR_TESTING, AccountsIndexConfig, BINS_FOR_TESTING,
+            INDEX_LIMIT_THRESHOLD_FOR_TESTING, IndexLimit, IndexLimitThreshold,
+            bucket_map_holder::ThresholdEntriesPerBin,
         },
         assert_matches::assert_matches,
         itertools::Itertools,
@@ -1769,7 +1769,7 @@ mod tests {
 
     fn new_disk_buckets_for_test<T: IndexValue>() -> InMemAccountsIndex<T, T> {
         let config = AccountsIndexConfig {
-            index_limit: IndexLimit::Minimal,
+            index_limit: INDEX_LIMIT_THRESHOLD_FOR_TESTING,
             ..Default::default()
         };
         let holder = Arc::new(BucketMapHolder::new(BINS_FOR_TESTING, &config, 1));
@@ -1916,13 +1916,13 @@ mod tests {
     }
 
     /// Populates `index` with four entries covering the age/dirty matrix, triggers a
-    /// background flush, then asserts the outcomes common to all flush modes:
+    /// background flush, then asserts:
     ///   - clean new: stays in memory, not on disk
     ///   - clean old: evicted from memory, not on disk
     ///   - dirty new: stays in memory, not on disk
     ///
     /// Returns `(pubkey_dirty_old, slot + 3, info + 3)` so the caller can assert the
-    /// mode-specific outcome for the old dirty entry (flushed vs. skipped).
+    /// outcome for the old dirty entry.
     fn flush_age_mixed_entries(
         accounts_index: &InMemAccountsIndex<u64, u64>,
     ) -> (Pubkey, Slot, u64) {
@@ -2018,33 +2018,6 @@ mod tests {
         assert!(accounts_index.load_from_disk(&pubkey_dirty_new).is_none());
 
         (pubkey_dirty_old, slot + 3, info + 3)
-    }
-
-    #[test]
-    fn test_flush_internal() {
-        let accounts_index = new_disk_buckets_for_test::<u64>();
-        let (pubkey_dirty_old, dirty_slot, dirty_info) = flush_age_mixed_entries(&accounts_index);
-
-        // old dirty entry should be flushed, and not evicted
-        let mut found_in_mem = None;
-        accounts_index.get_only_in_mem(&pubkey_dirty_old, false, |entry| {
-            found_in_mem = Some(entry.is_some());
-            let entry = entry.expect("entry should remain in memory");
-            assert!(!entry.dirty()); // flushing makes the entry clean
-
-            // also ensure that old dirty entry can be evicted next time
-            assert!(InMemAccountsIndex::<u64, u64>::should_evict_based_on_age(
-                accounts_index.storage.current_age(),
-                entry,
-                accounts_index.num_ages_to_distribute_flushes,
-            ));
-        });
-        assert_eq!(found_in_mem, Some(true));
-        let (slot_list, ref_count) = accounts_index
-            .load_from_disk(&pubkey_dirty_old)
-            .expect("entry should be written to disk");
-        assert_eq!(slot_list, SlotList::from([(dirty_slot, dirty_info)]));
-        assert_eq!(ref_count, 1);
     }
 
     /// With `should_write_through=true`, the background flush should evict old clean entries but
@@ -3242,42 +3215,6 @@ mod tests {
                 .num_hashmap_reallocates
                 .load(Ordering::Relaxed),
             1
-        );
-    }
-
-    /// Minimal mode evicts everything on every flush, so the per-pass HashMap
-    /// rebuild would be pure waste. Verify `evict_from_cache` skips it.
-    #[test]
-    fn test_reallocate_skipped_in_minimal_mode() {
-        let index = new_disk_buckets_for_test::<u64>();
-        assert!(index.storage.threshold_entries_per_bin.is_none());
-
-        let current_age = index.storage.current_age();
-        let pubkeys: Vec<_> = (0..100).map(|_| solana_pubkey::new_rand()).collect();
-        {
-            let mut map = index.map_internal.write().unwrap();
-            for pubkey in &pubkeys {
-                let entry = AccountMapEntry::new(
-                    SlotList::from([(/*slot*/ 0, /*info*/ 0)]),
-                    /*ref_count*/ 1,
-                    AccountMapEntryMeta::new_clean(&index.storage),
-                );
-                entry.set_age(current_age);
-                map.insert(*pubkey, Box::new(entry));
-            }
-        }
-
-        index.evict_from_cache(&pubkeys, current_age, /*ages_flushing_now*/ 0);
-
-        // All entries were evicted...
-        assert_eq!(index.map_internal.read().unwrap().len(), 0);
-        // ...but reallocate must not have run in Minimal mode.
-        assert_eq!(
-            index
-                .stats()
-                .num_hashmap_reallocates
-                .load(Ordering::Relaxed),
-            0
         );
     }
 }
