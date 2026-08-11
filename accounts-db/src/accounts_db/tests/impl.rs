@@ -1420,15 +1420,15 @@ fn test_shrink_carries_or_purges_flush_tombstone() {
     }
 }
 
-/// Ensure that `shrink` converts a not-yet-purgeable zero lamport single ref account into a
-/// tombstone in the new storage
+/// Ensure that `shrink` retains not-yet-purgeable zero lamport single ref account in
+/// the uncleaned pubkey list
 #[test]
-fn test_shrink_converts_zero_lamport_single_ref_account_to_tombstone() {
+fn test_shrink_retains_uncleaned_pubkeys() {
     let accounts_db = AccountsDb::new_for_tests_with_config(Vec::new(), DEFAULT_ACCOUNTS_DB_CONFIG);
     let slot0 = 0;
     let slot1 = slot0 + 1;
     // latest full snapshot must be older than the slot(s) we plan to shrink,
-    // otherwise zero lamport single ref accounts will be purged
+    // otherwise clean fully purges the zero lamport multi ref account
     accounts_db.set_latest_full_snapshot_slot(slot0);
 
     let obsolete_pubkey = Pubkey::new_unique();
@@ -1463,7 +1463,7 @@ fn test_shrink_converts_zero_lamport_single_ref_account_to_tombstone() {
         true,
         Some(&accounts_db.accounts_index),
     );
-    // store a zero lamport single ref account; shrink *should* convert it to a tombstone
+    // store a zero lamport single ref account; shrink carries it forward and clean tombstones it
     append_single_account_with_default_hash(
         &storage1,
         &zero_lamport_single_ref_pubkey,
@@ -1471,6 +1471,10 @@ fn test_shrink_converts_zero_lamport_single_ref_account_to_tombstone() {
         true,
         Some(&accounts_db.accounts_index),
     );
+    // manually add the zero lamport single ref pubkey to the uncleaned pubkeys list
+    accounts_db
+        .uncleaned_pubkeys
+        .insert(slot1, vec![zero_lamport_single_ref_pubkey]);
     // store a zero lamport multi ref account; multi ref means it stays alive, not tombstoned
     append_single_account_with_default_hash(
         &storage1,
@@ -1521,8 +1525,17 @@ fn test_shrink_converts_zero_lamport_single_ref_account_to_tombstone() {
     assert_ne!(new_storage1.id(), storage1.id());
     // ensure there are three accounts in the storage now, removing the two obsolete ones: the
     // alive account, the zero-lamport multi-ref account, and the zero-lamport single-ref account
-    // carried forward as a tombstone
+    // carried forward
     assert_eq!(new_storage1.count(), 3);
+
+    // the zero lamport single ref account is still an uncleaned pubkey, so clean can tombstone it
+    assert!(
+        accounts_db
+            .uncleaned_pubkeys
+            .get(&slot1)
+            .is_some_and(|pubkeys| pubkeys.contains(&zero_lamport_single_ref_pubkey))
+    );
+    accounts_db.clean_accounts_for_tests();
 
     // the zero lamport single ref account is dropped from the index now that it is a tombstone
     assert!(
@@ -1539,6 +1552,64 @@ fn test_shrink_converts_zero_lamport_single_ref_account_to_tombstone() {
 
     // it is recorded on the new storage's tombstone list
     assert_eq!(new_storage1.num_tombstones(), 1);
+}
+
+/// One clean pass fully reclaims a multi ref zero lamport account: the older entry is
+/// reclaimed and the remaining zero lamport single ref entry is converted to a
+/// tombstone, with no shrink involved.
+#[test]
+fn test_clean_reclaims_multi_ref_zero_lamport_account_in_one_pass() {
+    let accounts_db = AccountsDb::new_for_tests_with_config(Vec::new(), DEFAULT_ACCOUNTS_DB_CONFIG);
+    let slot1 = 1;
+    let slot2 = 2;
+
+    let alive_pubkey = Pubkey::new_unique();
+    let zero_lamport_pubkey = Pubkey::new_unique();
+    let closed_account = AccountSharedData::new(0, 0, &Pubkey::default());
+    let open_account = AccountSharedData::new(1, 0, &Pubkey::default());
+
+    // slot1 holds the account's older non zero version, plus an unrelated alive account
+    // that keeps slot1's storage alive. The older version is required: flush skips a
+    // zero lamport account that has no older rooted version in storage to shadow.
+    accounts_db.store_for_tests((
+        slot1,
+        [
+            (&alive_pubkey, &open_account),
+            (&zero_lamport_pubkey, &open_account),
+        ]
+        .as_slice(),
+    ));
+    accounts_db.add_root(slot1);
+
+    // close the account at slot2, making it a multi ref zero lamport account
+    accounts_db.store_for_tests((slot2, [(&zero_lamport_pubkey, &closed_account)].as_slice()));
+    accounts_db.add_root(slot2);
+
+    // flush without clean, so the slot1 entry is not marked obsolete; the flush queues
+    // the flushed accounts for clean at both slots
+    accounts_db.flush_rooted_accounts_cache_without_clean();
+
+    // the full snapshot is current, so no zero lamport handling is snapshot-gated
+    accounts_db.set_latest_full_snapshot_slot(slot2);
+
+    assert_eq!(
+        accounts_db
+            .accounts_index
+            .ref_count_from_storage(&zero_lamport_pubkey),
+        2
+    );
+    assert_eq!(accounts_db.get_len_of_slots_with_uncleaned_pubkeys(), 2);
+
+    // one clean pass reclaims the superseded slot1 entry, counts that unref, and
+    // tombstones the slot2 entry as a zero lamport single ref, all together
+    accounts_db.clean_accounts_for_tests();
+
+    // the whole account is reclaimed
+    assert!(!accounts_db.accounts_index.contains(&zero_lamport_pubkey));
+    // slot2 held nothing else, so its storage is dead and removed
+    assert!(accounts_db.storage.get_slot_storage_entry(slot2).is_none());
+    // the unrelated alive account is untouched
+    assert!(accounts_db.accounts_index.contains(&alive_pubkey));
 }
 
 /// `shrink_collect` must recognize tombstone offsets already recorded on a storage (carried
@@ -5629,11 +5700,9 @@ fn test_clean_accounts_with_latest_full_snapshot_slot() {
 fn test_mark_dirty_dead_stores_empty() {
     let db = AccountsDb::new_for_tests_with_config(Vec::new(), DEFAULT_ACCOUNTS_DB_CONFIG);
     let slot = 0;
-    for add_dirty_stores in [false, true] {
-        let dead_storages = db.mark_dirty_dead_stores(slot, add_dirty_stores, None, false);
-        assert!(dead_storages.is_empty());
-        assert!(db.dirty_stores.is_empty());
-    }
+    let dead_storages = db.mark_dirty_dead_stores(slot, None, false);
+    assert!(dead_storages.is_empty());
+    assert!(db.dirty_stores.is_empty());
 }
 
 #[test]
@@ -5642,54 +5711,37 @@ fn test_mark_dirty_dead_stores_no_shrink_in_progress() {
     // There should be no more append vecs at that slot after the call to mark_dirty_dead_stores.
     // This tests the case where this slot was combined into an ancient append vec from an older slot and
     // there is no longer an append vec at this slot.
-    for add_dirty_stores in [false, true] {
         let slot = 0;
         let db = AccountsDb::new_for_tests_with_config(Vec::new(), DEFAULT_ACCOUNTS_DB_CONFIG);
         let size = 1;
         let existing_store = db.create_store(slot, size);
         let old_id = existing_store.id();
         db.storage.insert(Arc::new(existing_store));
-        let dead_storages = db.mark_dirty_dead_stores(slot, add_dirty_stores, None, false);
+        let dead_storages = db.mark_dirty_dead_stores(slot, None, false);
         assert!(db.storage.get_slot_storage_entry(slot).is_none());
         assert_eq!(dead_storages.len(), 1);
         assert_eq!(dead_storages.first().unwrap().id(), old_id);
-        if add_dirty_stores {
-            assert_eq!(1, db.dirty_stores.len());
-            let dirty_store = db.dirty_stores.get(&slot).unwrap();
-            assert_eq!(dirty_store.id(), old_id);
-        } else {
-            assert!(db.dirty_stores.is_empty());
-        }
+        assert!(db.dirty_stores.is_empty());
         assert!(db.storage.is_empty_entry(slot));
-    }
 }
 
 #[test]
 fn test_mark_dirty_dead_stores() {
     let slot = 0;
 
-    // use shrink_in_progress to cause us to drop the initial store
-    for add_dirty_stores in [false, true] {
-        let db = AccountsDb::new_for_tests_with_config(Vec::new(), DEFAULT_ACCOUNTS_DB_CONFIG);
-        let size = 1;
-        let old_store = Arc::new(db.create_store(slot, size));
-        let old_id = old_store.id();
-        db.storage.insert(Arc::clone(&old_store));
-        let shrink_in_progress = db.get_store_for_shrink(slot, old_store, 100);
-        let dead_storages =
-            db.mark_dirty_dead_stores(slot, add_dirty_stores, Some(shrink_in_progress), false);
-        assert!(db.storage.get_slot_storage_entry(slot).is_some());
-        assert_eq!(dead_storages.len(), 1);
-        assert_eq!(dead_storages.first().unwrap().id(), old_id);
-        if add_dirty_stores {
-            assert_eq!(1, db.dirty_stores.len());
-            let dirty_store = db.dirty_stores.get(&slot).unwrap();
-            assert_eq!(dirty_store.id(), old_id);
-        } else {
-            assert!(db.dirty_stores.is_empty());
-        }
-        assert!(db.storage.get_slot_storage_entry(slot).is_some());
-    }
+    let db = AccountsDb::new_for_tests_with_config(Vec::new(), DEFAULT_ACCOUNTS_DB_CONFIG);
+    let size = 1;
+    let old_store = Arc::new(db.create_store(slot, size));
+    let old_id = old_store.id();
+    db.storage.insert(Arc::clone(&old_store));
+    let shrink_in_progress = db.get_store_for_shrink(slot, old_store, 100);
+    let dead_storages =
+        db.mark_dirty_dead_stores(slot, Some(shrink_in_progress), false);
+    assert!(db.storage.get_slot_storage_entry(slot).is_some());
+    assert_eq!(dead_storages.len(), 1);
+    assert_eq!(dead_storages.first().unwrap().id(), old_id);
+    assert!(db.dirty_stores.is_empty());
+    assert!(db.storage.get_slot_storage_entry(slot).is_some());
 }
 
 #[test]
@@ -6102,10 +6154,6 @@ fn test_shrink_collect_simple() {
 
                             assert_eq!(shrink_collect.written_bytes, expected_written_bytes);
                             assert_eq!(shrink_collect.total_starting_accounts, account_count);
-                            assert_eq!(
-                                shrink_collect.all_are_zero_lamports,
-                                expected_alive_accounts.is_empty()
-                            );
                         }
                     }
                 }

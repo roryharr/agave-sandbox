@@ -263,19 +263,11 @@ pub(crate) struct ShrinkCollect<'a, T: ShrinkCollectRefs<'a>> {
     /// total size in storage of all alive accounts
     pub(crate) alive_total_bytes: usize,
     pub(crate) total_starting_accounts: usize,
-    /// true if all alive accounts are zero lamports
-    pub(crate) all_are_zero_lamports: bool,
 }
 
-struct LoadAccountsIndexForShrink<'a, T: ShrinkCollectRefs<'a>> {
+struct LoadAccountsIndexForShrink<T> {
     /// all alive accounts
     alive_accounts: T,
-    /// pubkeys that are the last remaining zero lamport instance of an account
-    zero_lamport_single_ref_pubkeys: Vec<&'a Pubkey>,
-    /// accounts that are zero lamport but not indexed
-    tombstones: Vec<AccountFromStorage>,
-    /// true if all alive accounts are zero lamport accounts
-    all_are_zero_lamports: bool,
 }
 
 /// reference an account found during scanning a storage.
@@ -2024,48 +2016,27 @@ impl AccountsDb {
         );
     }
 
-    /// load the account index entry for the first `count` items in `accounts`
-    /// store a reference to all alive accounts in `alive_accounts`
-    /// return sum of account size for all alive accounts
+    /// load the account index entry for each of `accounts`, all of which are alive,
+    /// and collect them into the returned `ShrinkCollectRefs`
     fn load_accounts_index_for_shrink<'a, T: ShrinkCollectRefs<'a>>(
         &self,
         accounts: &'a [AccountFromStorage],
         stats: &ShrinkStats,
         slot_to_shrink: Slot,
-    ) -> LoadAccountsIndexForShrink<'a, T> {
-        let can_purge_zero_lamport_accounts = self.can_purge_zero_lamport_accounts(slot_to_shrink);
+    ) -> LoadAccountsIndexForShrink<T> {
         let count = accounts.len();
         let mut alive_accounts = T::with_capacity(count, slot_to_shrink);
-        let mut zero_lamport_single_ref_pubkeys = Vec::with_capacity(count);
-        let mut tombstones = Vec::new();
 
-        let mut alive = 0;
         let mut index = 0;
         let mut index_scan_returned_some_count = 0;
         let mut index_scan_returned_none_count = 0;
-        let mut all_are_zero_lamports = true;
+        let default_slot_list = [(slot_to_shrink, AccountInfo::default())];
         self.accounts_index.scan(
             accounts.iter().map(|account| account.pubkey()),
-            |pubkey, slots_refs| {
+            |_, slots_refs| {
                 let stored_account = &accounts[index];
-                let mut do_populate_accounts_for_shrink = |ref_count, slot_list| {
-                    if stored_account.is_zero_lamport() && ref_count == 1 {
-                        // The lone instance of a zero-lamport account. A load of a zero-lamport
-                        // account already reports "not found", so dropping its index entry is safe.
-                        zero_lamport_single_ref_pubkeys.push(pubkey);
-                        if !can_purge_zero_lamport_accounts {
-                            // Newer than the latest full snapshot: keep the bytes in storage as a
-                            // tombstone so an incremental snapshot can still propagate the deletion,
-                            // rather than dropping it.
-                            tombstones.push(*stored_account);
-                        }
-                    } else {
-                        all_are_zero_lamports &= stored_account.is_zero_lamport();
-                        alive_accounts.add(ref_count, stored_account, slot_list);
-                        alive += 1;
-                    }
-                };
-                if let Some((slot_list, ref_count)) = slots_refs {
+
+                let (slot_list, ref_count) = if let Some((slot_list, ref_count)) = slots_refs {
                     index_scan_returned_some_count += 1;
                     let is_alive = slot_list.iter().any(|(slot, _acct_info)| {
                         // if the accounts index contains an entry at this slot, then the append vec we're asking about contains this item and thus, it is alive at this slot
@@ -2074,7 +2045,7 @@ impl AccountsDb {
 
                     // All obsolete and tombstones have been filtered. Account MUST be alive in this slot
                     assert!(is_alive);
-                    do_populate_accounts_for_shrink(ref_count, slot_list);
+                    (&slot_list[..], ref_count)
                 } else {
                     index_scan_returned_none_count += 1;
                     // getting None here means the account is 'normal' and was written to disk. This means it must have ref_count=1 and
@@ -2082,29 +2053,25 @@ impl AccountsDb {
                     // Note that we could get Some(...) here if the account is in the in mem index because it is hot.
                     // Note this could also mean the account isn't on disk either. That would indicate a bug in accounts db.
                     // Account is alive.
-                    let ref_count = 1;
-                    let slot_list = [(slot_to_shrink, AccountInfo::default())];
-                    do_populate_accounts_for_shrink(ref_count, &slot_list);
-                }
+                    (&default_slot_list[..], 1)
+                };
+                alive_accounts.add(ref_count, stored_account, slot_list);
                 index += 1;
             },
             self.scan_filter_for_shrinking,
         );
-        assert_eq!(index, std::cmp::min(accounts.len(), count));
+        assert_eq!(index, count);
         stats
             .index_scan_returned_some
             .fetch_add(index_scan_returned_some_count, Ordering::Relaxed);
         stats
             .index_scan_returned_none
             .fetch_add(index_scan_returned_none_count, Ordering::Relaxed);
-        stats.alive_accounts.fetch_add(alive, Ordering::Relaxed);
+        stats
+            .alive_accounts
+            .fetch_add(count as u64, Ordering::Relaxed);
 
-        LoadAccountsIndexForShrink {
-            alive_accounts,
-            zero_lamport_single_ref_pubkeys,
-            tombstones,
-            all_are_zero_lamports,
-        }
+        LoadAccountsIndexForShrink { alive_accounts }
     }
 
     /// get all accounts in all the storages passed in
@@ -2216,7 +2183,6 @@ impl AccountsDb {
             tombstones_to_carry_forward,
             tombstones_total_bytes: 0, // will be updated after the tombstone list is populated
             total_starting_accounts,
-            all_are_zero_lamports: true,
             alive_total_bytes: 0, // will be updated after `alive_accounts` is populated
         });
 
@@ -2230,25 +2196,12 @@ impl AccountsDb {
             stored_accounts
                 .par_chunks(SHRINK_COLLECT_CHUNK_SIZE)
                 .for_each(|stored_accounts| {
-                    let LoadAccountsIndexForShrink {
-                        alive_accounts,
-                        all_are_zero_lamports,
-                        mut zero_lamport_single_ref_pubkeys,
-                        mut tombstones,
-                    } = self.load_accounts_index_for_shrink(stored_accounts, stats, slot);
+                    let LoadAccountsIndexForShrink { alive_accounts } =
+                        self.load_accounts_index_for_shrink(stored_accounts, stats, slot);
 
                     // collect
                     let mut shrink_collect = shrink_collect.lock().unwrap();
                     shrink_collect.alive_accounts.collect(alive_accounts);
-                    shrink_collect
-                        .zero_lamport_single_ref_pubkeys
-                        .append(&mut zero_lamport_single_ref_pubkeys);
-                    shrink_collect
-                        .tombstones_to_carry_forward
-                        .append(&mut tombstones);
-                    if !all_are_zero_lamports {
-                        shrink_collect.all_are_zero_lamports = false;
-                    }
                 });
         });
 
@@ -2333,8 +2286,6 @@ impl AccountsDb {
         // index has to be correct before we drop the old storage.
         let dead_storages = self.mark_dirty_dead_stores(
             shrink_collect.slot,
-            // If all accounts are zero lamports, then we want to mark the entire OLD append vec as dirty.
-            shrink_collect.all_are_zero_lamports,
             shrink_in_progress,
             shrink_can_be_active,
         );
@@ -2391,15 +2342,6 @@ impl AccountsDb {
             if total_rewrite_bytes == 0 {
                 // clean needs to take care of this dead slot
                 self.dirty_stores.insert(slot, store.clone());
-            }
-
-            if !shrink_collect.all_are_zero_lamports {
-                // if all are zero lamports, then we expect that we would like to mark the whole slot dead, but we cannot. That's clean's job.
-                info!(
-                    "Unexpected shrink for slot {} alive {} written {}, likely caused by a bug \
-                     for calculating alive bytes.",
-                    slot, shrink_collect.alive_total_bytes, shrink_collect.written_bytes
-                );
             }
 
             self.shrink_stats
@@ -2484,16 +2426,12 @@ impl AccountsDb {
     pub fn mark_dirty_dead_stores(
         &self,
         slot: Slot,
-        add_dirty_stores: bool,
         shrink_in_progress: Option<ShrinkInProgress>,
         shrink_can_be_active: bool,
     ) -> Vec<Arc<AccountStorageEntry>> {
         let mut dead_storages = Vec::default();
 
         let mut not_retaining_store = |store: &Arc<AccountStorageEntry>| {
-            if add_dirty_stores {
-                self.dirty_stores.insert(slot, store.clone());
-            }
             dead_storages.push(store.clone());
         };
 
