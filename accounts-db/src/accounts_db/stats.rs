@@ -381,7 +381,6 @@ pub struct ShrinkStats {
     pub obsolete_accounts_filtered: AtomicU64,
     pub accounts_loaded: AtomicU64,
     pub initial_candidates_count: AtomicU64,
-    pub purged_zero_lamports: AtomicU64,
     pub num_ancient_slots_shrunk: AtomicU64,
     pub ancient_slots_added_to_shrink: AtomicU64,
     pub ancient_bytes_added_to_shrink: AtomicU64,
@@ -540,11 +539,6 @@ impl ShrinkStats {
                 (
                     "accounts_loaded",
                     self.accounts_loaded.swap(0, Ordering::Relaxed),
-                    i64
-                ),
-                (
-                    "purged_zero_lamports_count",
-                    self.purged_zero_lamports.swap(0, Ordering::Relaxed),
                     i64
                 ),
                 (
@@ -782,13 +776,6 @@ impl ShrinkAncientStats {
             (
                 "many_refs_old_alive",
                 self.many_refs_old_alive.swap(0, Ordering::Relaxed),
-                i64
-            ),
-            (
-                "purged_zero_lamports_count",
-                self.shrink_stats
-                    .purged_zero_lamports
-                    .swap(0, Ordering::Relaxed),
                 i64
             ),
             ("slot", self.slot.load(Ordering::Relaxed), i64),

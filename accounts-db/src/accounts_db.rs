@@ -251,10 +251,9 @@ impl<'a> ShrinkCollectRefs<'a> for ShrinkCollectAliveSeparatedByRefs<'a> {
 }
 
 #[derive(Debug)]
-pub(crate) struct ShrinkCollect<'a, T: ShrinkCollectRefs<'a>> {
+pub(crate) struct ShrinkCollect<T> {
     pub(crate) slot: Slot,
     pub(crate) written_bytes: u64,
-    pub(crate) zero_lamport_single_ref_pubkeys: Vec<&'a Pubkey>,
     pub(crate) alive_accounts: T,
     /// Zero-lamport accounts written to the new storage as tombstones rather than live accounts.
     pub(crate) tombstones_to_carry_forward: Vec<AccountFromStorage>,
@@ -2126,12 +2125,12 @@ impl AccountsDb {
 
     /// shared code for shrinking normal slots and combining into ancient append vecs
     /// note 'unique_accounts' is passed by ref so we can return references to data within it, avoiding self-references
-    pub(crate) fn shrink_collect<'a: 'b, 'b, T: ShrinkCollectRefs<'b>>(
+    pub(crate) fn shrink_collect<'b, T: ShrinkCollectRefs<'b>>(
         &self,
-        store: &'a AccountStorageEntry,
+        store: &AccountStorageEntry,
         unique_accounts: &'b mut GetUniqueAccountsResult,
         stats: &ShrinkStats,
-    ) -> ShrinkCollect<'b, T> {
+    ) -> ShrinkCollect<T> {
         let slot = store.slot();
 
         let GetUniqueAccountsResult {
@@ -2178,7 +2177,6 @@ impl AccountsDb {
         let shrink_collect = Mutex::new(ShrinkCollect {
             slot,
             written_bytes: *written_bytes,
-            zero_lamport_single_ref_pubkeys: Vec::new(),
             alive_accounts: T::with_capacity(len, slot),
             tombstones_to_carry_forward,
             tombstones_total_bytes: 0, // will be updated after the tombstone list is populated
@@ -2238,48 +2236,16 @@ impl AccountsDb {
         shrink_collect
     }
 
-    /// These accounts were found during shrink of `slot` to be slot_list=[slot] and ref_count == 1 and lamports = 0.
-    /// This means this slot contained the only account data for this pubkey and it is zero lamport.
-    /// And also `slot` is <= the latest full snapshot slot, and can purge zero lamport accounts.
-    /// Thus, we did NOT treat this as an alive account, so we did NOT copy the zero lamport account to the new
-    /// storage. So, the account will no longer be alive or exist at `slot`.
-    /// Decrement the ref count and remove the `slot` from the index entry's slot list. If the slot list is now empty, then the
-    /// pubkey can be removed completely from the index.
-    fn remove_zero_lamport_single_ref_accounts_after_shrink(
-        &self,
-        zero_lamport_single_ref_pubkeys: &[&Pubkey],
-        slot: Slot,
-        stats: &ShrinkStats,
-    ) {
-        stats.purged_zero_lamports.fetch_add(
-            zero_lamport_single_ref_pubkeys.len() as u64,
-            Ordering::Relaxed,
-        );
-
-        zero_lamport_single_ref_pubkeys.iter().for_each(|k| {
-            _ = self.purge_keys_exact([(**k, slot)]);
-        });
-    }
-
     /// common code from shrink and combine_ancient_slots
     /// get rid of all original store_ids in the slot
-    pub(crate) fn remove_old_stores_shrink<'a, T: ShrinkCollectRefs<'a>>(
+    pub(crate) fn remove_old_stores_shrink<T>(
         &self,
-        shrink_collect: &ShrinkCollect<'a, T>,
+        shrink_collect: &ShrinkCollect<T>,
         stats: &ShrinkStats,
         shrink_in_progress: Option<ShrinkInProgress>,
         shrink_can_be_active: bool,
     ) {
         let mut time = Measure::start("remove_old_stores_shrink");
-
-        // handle the zero lamport alive accounts before calling clean
-        // We have to update the index entries for these zero lamport pubkeys before we remove the storage in `mark_dirty_dead_stores`
-        // that contained the accounts.
-        self.remove_zero_lamport_single_ref_accounts_after_shrink(
-            &shrink_collect.zero_lamport_single_ref_pubkeys,
-            shrink_collect.slot,
-            stats,
-        );
 
         // Purge old, overwritten storage entries
         // This has the side effect of dropping `shrink_in_progress`, which removes the old storage completely. The
