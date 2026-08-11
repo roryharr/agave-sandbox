@@ -2250,19 +2250,19 @@ impl AccountsDb {
         // Purge old, overwritten storage entries
         // This has the side effect of dropping `shrink_in_progress`, which removes the old storage completely. The
         // index has to be correct before we drop the old storage.
-        let dead_storages = self.mark_dirty_dead_stores(
+        let dead_storage = self.take_dead_storage(
             shrink_collect.slot,
             shrink_in_progress,
             shrink_can_be_active,
         );
-        let dead_storages_len = dead_storages.len();
+        let dead_storage_count = dead_storage.is_some() as u64;
 
-        let (_, drop_storage_entries_elapsed) = measure_us!(drop(dead_storages));
+        let (_, drop_storage_entries_elapsed) = measure_us!(drop(dead_storage));
         time.stop();
 
         self.stats
             .dropped_stores
-            .fetch_add(dead_storages_len as u64, Ordering::Relaxed);
+            .fetch_add(dead_storage_count, Ordering::Relaxed);
         stats
             .drop_storage_entries_elapsed
             .fetch_add(drop_storage_entries_elapsed, Ordering::Relaxed);
@@ -2385,32 +2385,22 @@ impl AccountsDb {
         self.shrink_stats.report();
     }
 
-    /// get stores for 'slot'
+    /// return the dead storage for 'slot'
     /// Drop 'shrink_in_progress', which will cause the old store to be removed from the storage map.
-    /// For 'shrink_in_progress'.'old_storage' which is not retained, insert in 'dead_storages' and optionally 'dirty_stores'
     /// This is the end of the life cycle of `shrink_in_progress`.
-    pub fn mark_dirty_dead_stores(
+    pub fn take_dead_storage(
         &self,
         slot: Slot,
         shrink_in_progress: Option<ShrinkInProgress>,
         shrink_can_be_active: bool,
-    ) -> Vec<Arc<AccountStorageEntry>> {
-        let mut dead_storages = Vec::default();
-
-        let mut not_retaining_store = |store: &Arc<AccountStorageEntry>| {
-            dead_storages.push(store.clone());
-        };
-
+    ) -> Option<Arc<AccountStorageEntry>> {
         if let Some(shrink_in_progress) = shrink_in_progress {
             // shrink is in progress, so 1 new append vec to keep, 1 old one to throw away
-            not_retaining_store(shrink_in_progress.old_storage());
-            // dropping 'shrink_in_progress' removes the old append vec that was being shrunk from db's storage
-        } else if let Some(store) = self.storage.remove(&slot, shrink_can_be_active) {
-            // no shrink in progress, so all append vecs in this slot are dead
-            not_retaining_store(&store);
+            Some(shrink_in_progress.old_storage().clone())
+        } else {
+            // no shrink in progress, so the slot's storage is dead
+            self.storage.remove(&slot, shrink_can_be_active)
         }
-
-        dead_storages
     }
 
     /// we are done writing to the storage at `slot`. It can be re-opened as read-only if that would help

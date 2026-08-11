@@ -5558,36 +5558,33 @@ fn test_clean_accounts_with_latest_full_snapshot_slot() {
 }
 
 #[test]
-fn test_mark_dirty_dead_stores_empty() {
+fn test_take_dead_storage_empty() {
     let db = AccountsDb::new_for_tests_with_config(Vec::new(), DEFAULT_ACCOUNTS_DB_CONFIG);
     let slot = 0;
-    let dead_storages = db.mark_dirty_dead_stores(slot, None, false);
-    assert!(dead_storages.is_empty());
-    assert!(db.dirty_stores.is_empty());
+    let dead_storage = db.take_dead_storage(slot, None, false);
+    assert!(dead_storage.is_none());
 }
 
 #[test]
-fn test_mark_dirty_dead_stores_no_shrink_in_progress() {
+fn test_take_dead_storage_no_shrink_in_progress() {
     // None for shrink_in_progress, 1 existing store at the slot
-    // There should be no more append vecs at that slot after the call to mark_dirty_dead_stores.
+    // There should be no more append vecs at that slot after the call to take_dead_storage.
     // This tests the case where this slot was combined into an ancient append vec from an older slot and
     // there is no longer an append vec at this slot.
-        let slot = 0;
-        let db = AccountsDb::new_for_tests_with_config(Vec::new(), DEFAULT_ACCOUNTS_DB_CONFIG);
-        let size = 1;
-        let existing_store = db.create_store(slot, size);
-        let old_id = existing_store.id();
-        db.storage.insert(Arc::new(existing_store));
-        let dead_storages = db.mark_dirty_dead_stores(slot, None, false);
-        assert!(db.storage.get_slot_storage_entry(slot).is_none());
-        assert_eq!(dead_storages.len(), 1);
-        assert_eq!(dead_storages.first().unwrap().id(), old_id);
-        assert!(db.dirty_stores.is_empty());
-        assert!(db.storage.is_empty_entry(slot));
+    let slot = 0;
+    let db = AccountsDb::new_for_tests_with_config(Vec::new(), DEFAULT_ACCOUNTS_DB_CONFIG);
+    let size = 1;
+    let existing_store = db.create_store(slot, size);
+    let old_id = existing_store.id();
+    db.storage.insert(Arc::new(existing_store));
+    let dead_storage = db.take_dead_storage(slot, None, false);
+    assert!(db.storage.get_slot_storage_entry(slot).is_none());
+    assert_eq!(dead_storage.unwrap().id(), old_id);
+    assert!(db.storage.is_empty_entry(slot));
 }
 
 #[test]
-fn test_mark_dirty_dead_stores() {
+fn test_take_dead_storage() {
     let slot = 0;
 
     let db = AccountsDb::new_for_tests_with_config(Vec::new(), DEFAULT_ACCOUNTS_DB_CONFIG);
@@ -5596,12 +5593,9 @@ fn test_mark_dirty_dead_stores() {
     let old_id = old_store.id();
     db.storage.insert(Arc::clone(&old_store));
     let shrink_in_progress = db.get_store_for_shrink(slot, old_store, 100);
-    let dead_storages =
-        db.mark_dirty_dead_stores(slot, Some(shrink_in_progress), false);
+    let dead_storage = db.take_dead_storage(slot, Some(shrink_in_progress), false);
     assert!(db.storage.get_slot_storage_entry(slot).is_some());
-    assert_eq!(dead_storages.len(), 1);
-    assert_eq!(dead_storages.first().unwrap().id(), old_id);
-    assert!(db.dirty_stores.is_empty());
+    assert_eq!(dead_storage.unwrap().id(), old_id);
     assert!(db.storage.get_slot_storage_entry(slot).is_some());
 }
 
