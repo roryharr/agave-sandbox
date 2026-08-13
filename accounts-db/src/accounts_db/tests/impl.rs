@@ -5607,10 +5607,11 @@ fn test_mark_dirty_dead_stores_no_shrink_in_progress() {
     // there is no longer an append vec at this slot.
     let slot = 0;
     let db = AccountsDb::new_for_tests_with_config(Vec::new(), DEFAULT_ACCOUNTS_DB_CONFIG);
-    let size = 1;
-    let existing_store = db.create_store(slot, size);
-    let old_id = existing_store.id();
-    db.storage.insert(Arc::new(existing_store));
+    let key = Pubkey::new_unique();
+    let account = AccountSharedData::new(1, 0, &Pubkey::default());
+    db.store_for_tests((slot, [(&key, &account)].as_slice()));
+    db.add_root_and_flush_write_cache(slot);
+    let old_id = db.get_and_assert_single_storage(slot).id();
     let dead_storages = db.mark_dirty_dead_stores(slot, None, false);
     assert!(db.storage.get_slot_storage_entry(slot).is_none());
     assert_eq!(dead_storages.len(), 1);
@@ -5623,10 +5624,12 @@ fn test_mark_dirty_dead_stores() {
     let slot = 0;
 
     let db = AccountsDb::new_for_tests_with_config(Vec::new(), DEFAULT_ACCOUNTS_DB_CONFIG);
-    let size = 1;
-    let old_store = Arc::new(db.create_store(slot, size));
+    let key = Pubkey::new_unique();
+    let account = AccountSharedData::new(1, 0, &Pubkey::default());
+    db.store_for_tests((slot, [(&key, &account)].as_slice()));
+    db.add_root_and_flush_write_cache(slot);
+    let old_store = db.get_and_assert_single_storage(slot);
     let old_id = old_store.id();
-    db.storage.insert(Arc::clone(&old_store));
     let shrink_in_progress = db.get_store_for_shrink(slot, old_store, 100);
     let dead_storages = db.mark_dirty_dead_stores(slot, Some(shrink_in_progress), false);
     assert!(db.storage.get_slot_storage_entry(slot).is_some());
