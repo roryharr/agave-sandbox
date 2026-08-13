@@ -2456,10 +2456,10 @@ fn test_storage_finder() {
     let lamports = 100;
     let data_len = 8190;
     let account = AccountSharedData::new(lamports, data_len, &solana_pubkey::new_rand());
-    // pre-populate with a smaller empty store
-    let storage = db.create_store(1, 8192);
-    db.storage.insert(Arc::new(storage));
     db.store_for_tests((1, [(&key, &account)].as_slice()));
+    // flushing creates a storage big enough for the account
+    db.add_root_and_flush_write_cache(1);
+    db.assert_load_account(1, key, lamports);
 }
 
 #[test]
