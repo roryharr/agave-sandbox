@@ -5771,14 +5771,13 @@ fn test_get_sorted_potential_ancient_slots() {
         db.get_sorted_potential_ancient_slots(oldest_non_ancient_slot)
             .is_empty()
     );
+    let account = AccountSharedData::new(1, 0, &Pubkey::default());
     let root1 = DEFAULT_MAX_ANCIENT_STORAGES as u64 + ancient_append_vec_offset as u64 + 1;
-    db.add_root(root1);
-    let store1 = db.create_store(root1, 4096);
-    db.storage.insert(Arc::new(store1));
+    db.store_for_tests((root1, [(&Pubkey::new_unique(), &account)].as_slice()));
+    db.add_root_and_flush_write_cache(root1);
     let root2 = root1 + 1;
-    db.add_root(root2);
-    let store2 = db.create_store(root2, 4096);
-    db.storage.insert(Arc::new(store2));
+    db.store_for_tests((root2, [(&Pubkey::new_unique(), &account)].as_slice()));
+    db.add_root_and_flush_write_cache(root2);
     let oldest_non_ancient_slot = db.get_oldest_non_ancient_slot(&epoch_schedule);
     assert!(
         db.get_sorted_potential_ancient_slots(oldest_non_ancient_slot)
