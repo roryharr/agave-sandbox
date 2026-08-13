@@ -109,10 +109,11 @@ mod tests {
         let key2 = Pubkey::new_unique();
         let account = AccountSharedData::new(1, 0, &Pubkey::default());
 
+        // The storages are written directly, without going through the write cache, so that the
+        // accounts are only in storage and not in the index: the state generate_index() rebuilds
+        // the index from.
+        //
         // Account with key1 is updated twice in two different slots, should get notified twice
-        // Need to add root and flush write cache for each slot to ensure accounts are written
-        // to correct slots. Cache flush can skip writes if accounts have already been written to
-        // a newer slot
         let slot0 = 0;
         let storage0 = accounts_db.create_store(slot0, /*size*/ 4_096);
         storage0
