@@ -2716,6 +2716,16 @@ impl AccountsDb {
     where
         F: FnMut(Option<(&Pubkey, AccountSharedData, Slot)>),
     {
+        // Unindexed scans can take a long time, performing them on unrooted slots has a high
+        // chance of resulting in a long scan then abort. Instead of allowing this, just
+        // abort the scan before it starts
+        if ancestors.max_slot() >= self.max_root() {
+            return Err(ScanError::UnindexedScanOnUnrootedSlot {
+                slot: ancestors.max_slot(),
+                bank_id,
+            });
+        }
+
         // Register this scan so that slots needed by the scan are not cleaned out from under us.
         let scan_guard = ScanGuard::try_new(&self.scan_tracker, bank_id, || self.max_root())
             .ok_or(ScanError::SlotRemoved {

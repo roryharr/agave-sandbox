@@ -16,6 +16,11 @@ pub type ScanResult<T> = Result<T, ScanError>;
 #[derive(Error, Debug, PartialEq, Eq)]
 pub enum ScanError {
     #[error(
+        "Node detected unindexed scan on {slot:?} with id {bank_id:?}, thus the scan on said slot \
+         was aborted"
+    )]
+    UnindexedScanOnUnrootedSlot { slot: Slot, bank_id: BankId },
+    #[error(
         "Node detected it replayed bad version of slot {slot:?} with id {bank_id:?}, thus the \
          scan on said slot was aborted"
     )]
