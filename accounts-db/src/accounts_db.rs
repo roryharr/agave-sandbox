@@ -1917,7 +1917,6 @@ impl AccountsDb {
         let count = accounts.len();
         let mut alive_accounts = T::with_capacity(count, slot_to_shrink);
 
-        let mut alive = 0;
         let mut index = 0;
         let mut index_scan_returned_some_count = 0;
         let mut index_scan_returned_none_count = 0;
@@ -1935,7 +1934,6 @@ impl AccountsDb {
                     // All obsolete and tombstones have been filtered. Account MUST be alive in this slot
                     assert!(is_alive);
                     alive_accounts.add(ref_count, stored_account, slot_list);
-                    alive += 1;
                 } else {
                     index_scan_returned_none_count += 1;
                     // getting None here means the account is 'normal' and was written to disk. This means it must have ref_count=1 and
@@ -1946,7 +1944,6 @@ impl AccountsDb {
                     let ref_count = 1;
                     let slot_list = [(slot_to_shrink, AccountInfo::default())];
                     alive_accounts.add(ref_count, stored_account, &slot_list);
-                    alive += 1;
                 }
                 index += 1;
             },
@@ -1959,7 +1956,6 @@ impl AccountsDb {
         stats
             .index_scan_returned_none
             .fetch_add(index_scan_returned_none_count, Ordering::Relaxed);
-        stats.alive_accounts.fetch_add(alive, Ordering::Relaxed);
 
         LoadAccountsIndexForShrink { alive_accounts }
     }

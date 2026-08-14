@@ -375,7 +375,6 @@ pub struct ShrinkStats {
     pub bytes_removed: AtomicU64,
     pub bytes_written: AtomicU64,
     pub skipped_shrink: AtomicU64,
-    pub alive_accounts: AtomicU64,
     pub index_scan_returned_none: AtomicU64,
     pub index_scan_returned_some: AtomicU64,
     pub obsolete_accounts_filtered: AtomicU64,
@@ -529,11 +528,6 @@ impl ShrinkStats {
                 (
                     "skipped_shrink",
                     self.skipped_shrink.swap(0, Ordering::Relaxed),
-                    i64
-                ),
-                (
-                    "alive_accounts",
-                    self.alive_accounts.swap(0, Ordering::Relaxed),
                     i64
                 ),
                 (
@@ -699,11 +693,6 @@ impl ShrinkAncientStats {
             (
                 "bytes_written",
                 self.shrink_stats.bytes_written.swap(0, Ordering::Relaxed),
-                i64
-            ),
-            (
-                "alive_accounts",
-                self.shrink_stats.alive_accounts.swap(0, Ordering::Relaxed),
                 i64
             ),
             (
