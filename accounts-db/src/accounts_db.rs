@@ -265,8 +265,6 @@ pub(crate) struct ShrinkCollect<'a, T: ShrinkCollectRefs<'a>> {
     /// total size in storage of all alive accounts
     pub(crate) alive_total_bytes: usize,
     pub(crate) total_starting_accounts: usize,
-    /// true if all alive accounts are zero lamports
-    pub(crate) all_are_zero_lamports: bool,
 }
 
 struct LoadAccountsIndexForShrink<'a, T: ShrinkCollectRefs<'a>> {
@@ -276,8 +274,6 @@ struct LoadAccountsIndexForShrink<'a, T: ShrinkCollectRefs<'a>> {
     zero_lamport_single_ref_pubkeys: Vec<&'a Pubkey>,
     /// accounts that are zero lamport but not indexed
     tombstones: Vec<AccountFromStorage>,
-    /// true if all alive accounts are zero lamport accounts
-    all_are_zero_lamports: bool,
 }
 
 /// reference an account found during scanning a storage.
@@ -1933,7 +1929,6 @@ impl AccountsDb {
         let mut index = 0;
         let mut index_scan_returned_some_count = 0;
         let mut index_scan_returned_none_count = 0;
-        let mut all_are_zero_lamports = true;
         self.accounts_index.scan(
             accounts.iter().map(|account| account.pubkey()),
             |pubkey, slots_refs| {
@@ -1950,7 +1945,6 @@ impl AccountsDb {
                             tombstones.push(*stored_account);
                         }
                     } else {
-                        all_are_zero_lamports &= stored_account.is_zero_lamport();
                         alive_accounts.add(ref_count, stored_account, slot_list);
                         alive += 1;
                     }
@@ -1993,7 +1987,6 @@ impl AccountsDb {
             alive_accounts,
             zero_lamport_single_ref_pubkeys,
             tombstones,
-            all_are_zero_lamports,
         }
     }
 
@@ -2106,7 +2099,6 @@ impl AccountsDb {
             tombstones_to_carry_forward,
             tombstones_total_bytes: 0, // will be updated after the tombstone list is populated
             total_starting_accounts,
-            all_are_zero_lamports: true,
             alive_total_bytes: 0, // will be updated after `alive_accounts` is populated
         });
 
@@ -2122,7 +2114,6 @@ impl AccountsDb {
                 .for_each(|stored_accounts| {
                     let LoadAccountsIndexForShrink {
                         alive_accounts,
-                        all_are_zero_lamports,
                         mut zero_lamport_single_ref_pubkeys,
                         mut tombstones,
                     } = self.load_accounts_index_for_shrink(stored_accounts, stats, slot);
@@ -2136,9 +2127,6 @@ impl AccountsDb {
                     shrink_collect
                         .tombstones_to_carry_forward
                         .append(&mut tombstones);
-                    if !all_are_zero_lamports {
-                        shrink_collect.all_are_zero_lamports = false;
-                    }
                 });
         });
 
@@ -2271,21 +2259,23 @@ impl AccountsDb {
         let total_rewrite_bytes =
             shrink_collect.alive_total_bytes + shrink_collect.tombstones_total_bytes;
 
-        // This shouldn't happen if alive_bytes is accurate.
-        // However, it is possible that the remaining alive bytes could be 0.
-        if Self::should_not_shrink(total_rewrite_bytes as u64, shrink_collect.written_bytes)
-            || total_rewrite_bytes == 0
-        {
-            if !shrink_collect.all_are_zero_lamports {
-                // if all are zero lamports, then we expect that we would like to mark the whole
-                // slot dead, but we cannot. That's clean's job.
-                info!(
-                    "Unexpected shrink for slot {} alive {} written {}, likely caused by a bug \
-                     for calculating alive bytes.",
-                    slot, shrink_collect.alive_total_bytes, shrink_collect.written_bytes
-                );
-            }
+        // Nothing to rewrite: nothing alive would be copied to a new storage, so the whole
+        // storage is dead. Marking the slot dead is clean's job.
+        if total_rewrite_bytes == 0 {
+            self.shrink_stats
+                .skipped_shrink
+                .fetch_add(1, Ordering::Relaxed);
+            return;
+        }
 
+        // Shrink candidates are gated on the same alive-bytes accounting that feeds
+        // `total_rewrite_bytes`, so reaching here means that accounting is wrong.
+        if Self::should_not_shrink(total_rewrite_bytes as u64, shrink_collect.written_bytes) {
+            info!(
+                "Unexpected shrink for slot {} rewrite bytes {} written {}, likely caused by a \
+                 bug for calculating alive bytes.",
+                slot, total_rewrite_bytes, shrink_collect.written_bytes
+            );
             self.shrink_stats
                 .skipped_shrink
                 .fetch_add(1, Ordering::Relaxed);

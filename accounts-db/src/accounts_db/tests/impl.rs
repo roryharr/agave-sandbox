@@ -5938,10 +5938,6 @@ fn test_shrink_collect_simple() {
 
                             assert_eq!(shrink_collect.written_bytes, expected_written_bytes);
                             assert_eq!(shrink_collect.total_starting_accounts, account_count);
-                            assert_eq!(
-                                shrink_collect.all_are_zero_lamports,
-                                expected_alive_accounts.is_empty()
-                            );
                         }
                     }
                 }
