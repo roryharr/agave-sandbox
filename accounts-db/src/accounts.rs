@@ -3,8 +3,8 @@ use {
         account_locks::{AccountLocks, validate_account_locks},
         account_storage::stored_account_info::StoredAccountInfo,
         accounts_db::{
-            AccountsAddRootTiming, AccountsDb, LoadHint, LoadedAccount, PopulateReadCache,
-            ScanAccountStorageData, ScanStorageResult, UpdateIndexThreadSelection,
+            AccountsDb, LoadHint, LoadedAccount, PopulateReadCache, ScanAccountStorageData,
+            ScanStorageResult, UpdateIndexThreadSelection,
         },
         accounts_index::IndexKey,
         accounts_scan::{ScanConfig, ScanError, ScanResult},
@@ -572,7 +572,7 @@ impl Accounts {
     }
 
     /// Add a slot to root.  Root slots cannot be purged
-    pub fn add_root(&self, slot: Slot) -> AccountsAddRootTiming {
+    pub fn add_root(&self, slot: Slot) {
         self.accounts_db.add_root(slot)
     }
 }

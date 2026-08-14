@@ -326,10 +326,6 @@ pub struct GetUniqueAccountsResult {
     pub written_bytes: u64,
 }
 
-pub struct AccountsAddRootTiming {
-    pub cache_us: u64,
-}
-
 /// Slots older the "number of slots in an epoch minus this number"
 /// than max root are treated as ancient and subject to packing.
 /// |  older  |<-          slots in an epoch          ->| max root
@@ -5055,16 +5051,9 @@ impl AccountsDb {
         }
     }
 
-    pub fn add_root(&self, slot: Slot) -> AccountsAddRootTiming {
-        let mut cache_time = Measure::start("cache_add_root");
+    pub fn add_root(&self, slot: Slot) {
         self.accounts_cache.add_root(slot);
-        cache_time.stop();
-
         self.max_root.fetch_max(slot, Ordering::Relaxed);
-
-        AccountsAddRootTiming {
-            cache_us: cache_time.as_us(),
-        }
     }
 
     /// Returns the largest slot that has been added as a root via `add_root`.
