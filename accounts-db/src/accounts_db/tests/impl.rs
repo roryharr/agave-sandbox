@@ -1361,15 +1361,15 @@ fn test_shrink_carries_or_purges_flush_tombstone() {
     }
 }
 
-/// Ensure that `shrink` converts a not-yet-purgeable zero lamport single ref account into a
-/// tombstone in the new storage
+/// Ensure that `shrink` keeps a not-yet-purgeable zero lamport single ref account alive, and
+/// that `clean` converts it into a tombstone in the shrunk storage afterward
 #[test]
-fn test_shrink_converts_zero_lamport_single_ref_account_to_tombstone() {
+fn test_clean_converts_zero_lamport_single_ref_account_to_tombstone_after_shrink() {
     let accounts_db = AccountsDb::new_for_tests_with_config(Vec::new(), DEFAULT_ACCOUNTS_DB_CONFIG);
     let slot0 = 0;
     let slot1 = slot0 + 1;
-    // latest full snapshot must be older than the slot(s) we plan to shrink,
-    // otherwise zero lamport single ref accounts will be purged
+    // the latest full snapshot is older than slot1, so the zero lamport
+    // single ref account is not yet purgeable
     accounts_db.set_latest_full_snapshot_slot(slot0);
 
     let obsolete_pubkey = Pubkey::new_unique();
@@ -1390,7 +1390,8 @@ fn test_shrink_converts_zero_lamport_single_ref_account_to_tombstone() {
     let accounts_to_write = [
         // an account that is made obsolete below; shrink drops it entirely
         (&obsolete_pubkey, &open_account),
-        // a zero lamport single ref account; shrink *should* convert it to a tombstone
+        // a zero lamport single ref account; shrink keeps it alive, then clean
+        // converts it to a tombstone
         (&zero_lamport_single_ref_pubkey, &closed_account),
         // a zero lamport multi ref account; multi ref means it stays alive, not tombstoned
         (&zero_lamport_multi_ref_pubkey, &closed_account),
@@ -1434,10 +1435,14 @@ fn test_shrink_converts_zero_lamport_single_ref_account_to_tombstone() {
 
     // ensure ids are different, to indicate shrink ran
     assert_ne!(new_storage1.id(), storage1.id());
-    // ensure there are three accounts in the storage now, removing the obsolete one: the
-    // alive account, the zero-lamport multi-ref account, and the zero-lamport single-ref account
-    // carried forward as a tombstone
+    // ensure there are exactly three accounts in the storage now, removing the obsolete one
     assert_eq!(new_storage1.count(), 3);
+
+    // shrink kept the zero lamport single ref account's index entry; clean has not run yet
+    assert!(accounts_db.contains(&zero_lamport_single_ref_pubkey));
+
+    // Clean converts the zero lamport single ref account into a tombstone
+    accounts_db.clean_accounts_for_tests();
 
     // the zero lamport single ref account is dropped from the index now that it is a tombstone
     assert!(!accounts_db.contains(&zero_lamport_single_ref_pubkey));
@@ -5866,8 +5871,6 @@ fn test_shrink_collect_simple() {
                                     vec![]
                                 };
 
-                            // a zero-lamport single-ref account is removed from the index by shrink
-                            // and carried forward as a tombstone, so it is not rewritten as alive
                             let expected_alive_accounts = if alive {
                                 pubkeys[..normal_account_count]
                                     .iter()
