@@ -47,7 +47,7 @@ use {
         accounts_hash::{AccountLtHash, AccountsLtHash, ZERO_LAMPORT_ACCOUNT_LT_HASH},
         accounts_index::{
             AccountSecondaryIndexes, AccountsIndex, IndexKey, ReclaimsSlotList,
-            ReclaimsWithNewestSlot, RefCount, ScanFilter, Startup, UpsertReclaim,
+            ReclaimsWithNewestSlot, ScanFilter, Startup, UpsertReclaim,
             in_mem_accounts_index::StartupStats,
         },
         accounts_scan::{ScanConfig, ScanError, ScanGuard, ScanResult, ScanTracker},
@@ -142,26 +142,21 @@ pub(crate) struct AliveAccounts<'a> {
     pub(crate) bytes: usize,
 }
 
-/// separate pubkeys into those with a single refcount and those with > 1 refcount
+/// separate pubkeys into those with a single slot and those with > 1 slot
 #[derive(Debug)]
 pub(crate) struct ShrinkCollectAliveSeparatedByRefs<'a> {
-    /// accounts where ref_count = 1
+    /// accounts where slot_list_len = 1
     pub(crate) one_ref: AliveAccounts<'a>,
-    /// account where ref_count > 1, but this slot contains the alive entry with the highest slot
+    /// account where slot_list_len > 1, but this slot contains the alive entry with the highest slot
     pub(crate) many_refs_this_is_newest_alive: AliveAccounts<'a>,
-    /// account where ref_count > 1, and this slot is NOT the highest alive entry in the index for the pubkey
+    /// account where slot_list_len > 1, and this slot is NOT the highest alive entry in the index for the pubkey
     pub(crate) many_refs_old_alive: AliveAccounts<'a>,
 }
 
 pub(crate) trait ShrinkCollectRefs<'a>: Sync + Send {
     fn with_capacity(capacity: usize, slot: Slot) -> Self;
     fn collect(&mut self, other: Self);
-    fn add(
-        &mut self,
-        ref_count: RefCount,
-        account: &'a AccountFromStorage,
-        slot_list: &[(Slot, AccountInfo)],
-    );
+    fn add(&mut self, account: &'a AccountFromStorage, slot_list: &[(Slot, AccountInfo)]);
     fn len(&self) -> usize;
     fn alive_bytes(&self) -> usize;
     fn alive_accounts(&self) -> &Vec<&'a AccountFromStorage>;
@@ -179,12 +174,7 @@ impl<'a> ShrinkCollectRefs<'a> for AliveAccounts<'a> {
             slot,
         }
     }
-    fn add(
-        &mut self,
-        _ref_count: RefCount,
-        account: &'a AccountFromStorage,
-        _slot_list: &[(Slot, AccountInfo)],
-    ) {
+    fn add(&mut self, account: &'a AccountFromStorage, _slot_list: &[(Slot, AccountInfo)]) {
         self.accounts.push(account);
         self.bytes = self.bytes.saturating_add(account.stored_size());
     }
@@ -213,18 +203,12 @@ impl<'a> ShrinkCollectRefs<'a> for ShrinkCollectAliveSeparatedByRefs<'a> {
             many_refs_old_alive: AliveAccounts::with_capacity(0, slot),
         }
     }
-    fn add(
-        &mut self,
-        ref_count: RefCount,
-        account: &'a AccountFromStorage,
-        slot_list: &[(Slot, AccountInfo)],
-    ) {
-        let other = if ref_count == 1 {
+    fn add(&mut self, account: &'a AccountFromStorage, slot_list: &[(Slot, AccountInfo)]) {
+        let other = if slot_list.len() == 1 {
             &mut self.one_ref
-        } else if slot_list.len() == 1
-            || !slot_list
-                .iter()
-                .any(|(slot_list_slot, _info)| slot_list_slot > &self.many_refs_old_alive.slot)
+        } else if !slot_list
+            .iter()
+            .any(|(slot_list_slot, _info)| slot_list_slot > &self.many_refs_old_alive.slot)
         {
             // this entry is alive but is newer than any other slot in the index
             &mut self.many_refs_this_is_newest_alive
@@ -233,7 +217,7 @@ impl<'a> ShrinkCollectRefs<'a> for ShrinkCollectAliveSeparatedByRefs<'a> {
             // We would expect clean to get rid of the entry for THIS slot at some point, but clean hasn't done that yet.
             &mut self.many_refs_old_alive
         };
-        other.add(ref_count, account, slot_list);
+        other.add(account, slot_list);
     }
     fn len(&self) -> usize {
         self.one_ref
@@ -1952,7 +1936,7 @@ impl AccountsDb {
             accounts.iter().map(|account| account.pubkey()),
             |_pubkey, slots_refs| {
                 let stored_account = &accounts[index];
-                if let Some((slot_list, ref_count)) = slots_refs {
+                if let Some((slot_list, _)) = slots_refs {
                     index_scan_returned_some_count += 1;
                     let is_alive = slot_list.iter().any(|(slot, _acct_info)| {
                         // if the accounts index contains an entry at this slot, then the append vec we're asking about contains this item and thus, it is alive at this slot
@@ -1961,17 +1945,16 @@ impl AccountsDb {
 
                     // All obsolete and tombstones have been filtered. Account MUST be alive in this slot
                     assert!(is_alive);
-                    alive_accounts.add(ref_count, stored_account, slot_list);
+                    alive_accounts.add(stored_account, slot_list);
                 } else {
                     index_scan_returned_none_count += 1;
-                    // getting None here means the account is 'normal' and was written to disk. This means it must have ref_count=1 and
+                    // getting None here means the account is 'normal' and was written to disk. This means it must have
                     // slot_list.len() = 1. This means it must be alive in this slot. This is by far the most common case.
                     // Note that we could get Some(...) here if the account is in the in mem index because it is hot.
                     // Note this could also mean the account isn't on disk either. That would indicate a bug in accounts db.
                     // Account is alive.
-                    let ref_count = 1;
                     let slot_list = [(slot_to_shrink, AccountInfo::default())];
-                    alive_accounts.add(ref_count, stored_account, &slot_list);
+                    alive_accounts.add(stored_account, &slot_list);
                 }
                 index += 1;
             },
