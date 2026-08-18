@@ -720,14 +720,13 @@ impl AccountsDb {
     }
 
     /// finish shrink operation on slots where a new storage was created
-    /// drop root and storage for all original slots whose contents were combined into other storages
+    /// drop storage for all original slots whose contents were combined into other storages
     fn finish_combine_ancient_slots_packed_internal(
         &self,
         accounts_to_combine: AccountsToCombine<'_>,
         mut write_ancient_accounts: WriteAncientAccounts,
         metrics: &mut SquashStatsSub,
     ) {
-        let mut dropped_roots = Vec::with_capacity(accounts_to_combine.accounts_to_combine.len());
         for shrink_collect in accounts_to_combine.accounts_to_combine {
             let slot = shrink_collect.slot;
 
@@ -742,18 +741,13 @@ impl AccountsDb {
 
             let shrink_in_progress = write_ancient_accounts.shrinks_in_progress.remove(&slot);
 
-            let mut reopen = false;
-            if shrink_in_progress.is_none() {
-                dropped_roots.push(slot);
-            } else {
-                // Remember that we need to 'reopen' the storage for this
-                // 'slot'. Note that it is not *safe* to reopen the storage for
-                // the 'slot' here, because 'shrink_in_progress' is still alive.
-                // Storage map may still point to the old storage and will be
-                // updated to point to the new storage, after we drop
-                // 'shrink_in_progress'.
-                reopen = true;
-            }
+            // Remember that we need to 'reopen' the storage for this
+            // 'slot'. Note that it is not *safe* to reopen the storage for
+            // the 'slot' here, because 'shrink_in_progress' is still alive.
+            // Storage map may still point to the old storage and will be
+            // updated to point to the new storage, after we drop
+            // 'shrink_in_progress'.
+            let reopen = shrink_in_progress.is_some();
 
             self.remove_old_stores_shrink(
                 slot,
