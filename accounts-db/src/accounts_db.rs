@@ -114,7 +114,7 @@ pub const TOTAL_IO_URING_BUFFERS_SIZE_LIMIT: usize = 2_000_000_000;
 
 // When getting accounts for shrinking from the index, this is the # of accounts to lookup per thread.
 // This allows us to split up accounts index accesses across multiple threads.
-const SHRINK_COLLECT_CHUNK_SIZE: usize = 50;
+pub(crate) const SHRINK_COLLECT_CHUNK_SIZE: usize = 50;
 
 /// The number of shrink candidate slots that is small enough so that
 /// additional storages from ancient slots can be added to the
@@ -140,17 +140,6 @@ pub(crate) struct AliveAccounts<'a> {
     pub(crate) slot: Slot,
     pub(crate) accounts: Vec<&'a AccountFromStorage>,
     pub(crate) bytes: usize,
-}
-
-/// separate pubkeys into those with a single refcount and those with > 1 refcount
-#[derive(Debug)]
-pub(crate) struct ShrinkCollectAliveSeparatedByRefs<'a> {
-    /// accounts where ref_count = 1
-    pub(crate) one_ref: AliveAccounts<'a>,
-    /// account where ref_count > 1, but this slot contains the alive entry with the highest slot
-    pub(crate) many_refs_this_is_newest_alive: AliveAccounts<'a>,
-    /// account where ref_count > 1, and this slot is NOT the highest alive entry in the index for the pubkey
-    pub(crate) many_refs_old_alive: AliveAccounts<'a>,
 }
 
 pub(crate) trait ShrinkCollectRefs<'a>: Sync + Send {
@@ -196,59 +185,6 @@ impl<'a> ShrinkCollectRefs<'a> for AliveAccounts<'a> {
     }
     fn alive_accounts(&self) -> &Vec<&'a AccountFromStorage> {
         &self.accounts
-    }
-}
-
-impl<'a> ShrinkCollectRefs<'a> for ShrinkCollectAliveSeparatedByRefs<'a> {
-    fn collect(&mut self, other: Self) {
-        self.one_ref.collect(other.one_ref);
-        self.many_refs_this_is_newest_alive
-            .collect(other.many_refs_this_is_newest_alive);
-        self.many_refs_old_alive.collect(other.many_refs_old_alive);
-    }
-    fn with_capacity(capacity: usize, slot: Slot) -> Self {
-        Self {
-            one_ref: AliveAccounts::with_capacity(capacity, slot),
-            many_refs_this_is_newest_alive: AliveAccounts::with_capacity(0, slot),
-            many_refs_old_alive: AliveAccounts::with_capacity(0, slot),
-        }
-    }
-    fn add(
-        &mut self,
-        ref_count: RefCount,
-        account: &'a AccountFromStorage,
-        slot_list: &[(Slot, AccountInfo)],
-    ) {
-        let other = if ref_count == 1 {
-            &mut self.one_ref
-        } else if slot_list.len() == 1
-            || !slot_list
-                .iter()
-                .any(|(slot_list_slot, _info)| slot_list_slot > &self.many_refs_old_alive.slot)
-        {
-            // this entry is alive but is newer than any other slot in the index
-            &mut self.many_refs_this_is_newest_alive
-        } else {
-            // This entry is alive but is older than at least one other slot in the index.
-            // We would expect clean to get rid of the entry for THIS slot at some point, but clean hasn't done that yet.
-            &mut self.many_refs_old_alive
-        };
-        other.add(ref_count, account, slot_list);
-    }
-    fn len(&self) -> usize {
-        self.one_ref
-            .len()
-            .saturating_add(self.many_refs_old_alive.len())
-            .saturating_add(self.many_refs_this_is_newest_alive.len())
-    }
-    fn alive_bytes(&self) -> usize {
-        self.one_ref
-            .alive_bytes()
-            .saturating_add(self.many_refs_old_alive.alive_bytes())
-            .saturating_add(self.many_refs_this_is_newest_alive.alive_bytes())
-    }
-    fn alive_accounts(&self) -> &Vec<&'a AccountFromStorage> {
-        unimplemented!("illegal use");
     }
 }
 
