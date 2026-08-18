@@ -803,13 +803,27 @@ impl AppendVec {
     ) -> Result<()> {
         reader.set_file(&self.file, self.len() as FileSize)?;
 
+        while Self::next_account_stored_meta(reader, &mut callback)?.is_some() {}
+        Ok(())
+    }
+
+    /// Read the account at `reader`'s current position and call `callback` with it, advancing
+    /// the reader past the account. Returns None once the reader is past the last account or
+    /// at end of file.
+    ///
+    /// The reader must be positioned at an account boundary, with its file already attached
+    /// via `set_file`.
+    fn next_account_stored_meta<'a, Ret>(
+        reader: &mut impl RequiredLenBufFileRead<'a>,
+        callback: impl for<'local> FnOnce(StoredAccountMeta<'local>) -> Ret,
+    ) -> Result<Option<Ret>> {
         let mut min_buf_len = STORE_META_OVERHEAD;
         loop {
             let offset = reader.get_file_offset() as usize;
             let bytes = match reader.fill_buf_required(min_buf_len) {
-                Ok([]) => break,
+                Ok([]) => return Ok(None),
                 Ok(bytes) => ValidSlice::new(bytes),
-                Err(err) if err.kind() == std::io::ErrorKind::UnexpectedEof => break,
+                Err(err) if err.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
                 Err(err) => return Err(AppendVecError::Io(err)),
             };
 
@@ -817,7 +831,7 @@ impl AppendVec {
             let (account_meta, next) = Self::get_type::<AccountMeta>(bytes, next).unwrap();
             if account_meta.lamports == 0 && meta.pubkey == Pubkey::default() {
                 // we passed the last useful account
-                break;
+                return Ok(None);
             }
             let (_hash, next) = Self::get_type::<ObsoleteAccountHash>(bytes, next).unwrap();
             let data_len = meta.data_len as usize;
@@ -833,16 +847,37 @@ impl AppendVec {
                     offset,
                     stored_size,
                 };
-                callback(account);
+                let ret = callback(account);
                 reader.consume_or_skip(stored_size);
-                // restore default required buffer size
-                min_buf_len = STORE_META_OVERHEAD;
+                return Ok(Some(ret));
             } else {
                 // repeat loop with required buffer size holding whole account data
                 min_buf_len = STORE_META_OVERHEAD + data_len;
             }
         }
-        Ok(())
+    }
+
+    /// Read the account at `reader`'s current position and call `callback` with it, advancing
+    /// the reader past the account. Returns None once the reader is past the last account or
+    /// at end of file.
+    ///
+    /// The reader must be positioned at an account boundary, with its file already attached
+    /// via `set_file`.
+    pub(crate) fn next_account<'a, Ret>(
+        reader: &mut impl RequiredLenBufFileRead<'a>,
+        callback: impl for<'local> FnOnce(StoredAccountInfo<'local>) -> Ret,
+    ) -> Result<Option<Ret>> {
+        Self::next_account_stored_meta(reader, |stored_account_meta| {
+            let account = StoredAccountInfo {
+                pubkey: stored_account_meta.pubkey(),
+                lamports: stored_account_meta.lamports(),
+                owner: stored_account_meta.owner(),
+                data: stored_account_meta.data(),
+                executable: stored_account_meta.executable(),
+                rent_epoch: stored_account_meta.rent_epoch(),
+            };
+            callback(account)
+        })
     }
 
     /// Scans accounts with StoredAccountMeta

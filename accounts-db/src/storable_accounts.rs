@@ -3,16 +3,18 @@ use {
     crate::{
         account_storage::stored_account_info::StoredAccountInfo,
         account_storage_entry::AccountStorageEntry,
+        account_storage_reader::AccountStorageReader,
         accounts_db::{AccountFromStorage, AccountsDb},
         is_zero_lamport::IsZeroLamport,
         utils::create_account_shared_data,
     },
+    agave_fs::buffered_reader::RequiredLenBufFileRead,
     solana_account::{AccountSharedData, ReadableAccount},
     solana_clock::{Epoch, Slot},
     solana_pubkey::Pubkey,
     std::{
         cmp::Ordering,
-        sync::{Arc, RwLock},
+        sync::{Arc, Mutex, RwLock},
     },
 };
 
@@ -193,6 +195,100 @@ impl<'a: 'b, 'b> StorableAccounts<'a> for (Slot, &'b [(&'a Pubkey, &'a AccountSh
     }
     fn len(&self) -> usize {
         self.1.len()
+    }
+}
+
+/// Streams the accounts of a storage out of an [`AccountStorageReader`] during shrink.
+/// Each account is read from the file once, in offset order, as the write path asks for it,
+/// and the pubkey and zero-lamport flag of every account served are remembered for the index
+/// update that follows the write.
+pub(crate) struct StorableAccountStorageReader<'r, R> {
+    slot: Slot,
+    len: usize,
+    inner: Mutex<StorableAccountStorageReaderInner<'r, R>>,
+}
+
+struct StorableAccountStorageReaderInner<'r, R> {
+    reader: AccountStorageReader<'r, R>,
+    /// pubkey and zero-lamport flag of every account served so far, in served order
+    served: Vec<(Pubkey, bool)>,
+}
+
+impl<'r, R> StorableAccountStorageReader<'r, R> {
+    pub(crate) fn new(slot: Slot, len: usize, reader: AccountStorageReader<'r, R>) -> Self {
+        Self {
+            slot,
+            len,
+            inner: Mutex::new(StorableAccountStorageReaderInner {
+                reader,
+                served: Vec::with_capacity(len),
+            }),
+        }
+    }
+
+    /// The pubkey and zero-lamport flag of every account that was served, in served order
+    pub(crate) fn into_served(self) -> Vec<(Pubkey, bool)> {
+        self.inner.into_inner().unwrap().served
+    }
+}
+
+impl<'a, R: RequiredLenBufFileRead<'a> + Send> StorableAccounts<'a>
+    for StorableAccountStorageReader<'_, R>
+{
+    fn account<Ret>(
+        &self,
+        _index: usize,
+        _callback: impl for<'local> FnMut(AccountForStorage<'local>) -> Ret,
+    ) -> Ret {
+        unimplemented!("accounts must be accessed through account_default_if_zero_lamport");
+    }
+    fn account_for_geyser<Ret>(
+        &self,
+        _index: usize,
+        _callback: impl for<'local> FnMut(&'local Pubkey, &'local AccountSharedData) -> Ret,
+    ) -> Ret {
+        unimplemented!("no AccountSharedData is available");
+    }
+    fn account_default_if_zero_lamport<Ret>(
+        &self,
+        index: usize,
+        mut callback: impl for<'local> FnMut(AccountForStorage<'local>) -> Ret,
+    ) -> Ret {
+        let inner = &mut *self.inner.lock().unwrap();
+        assert_eq!(
+            index,
+            inner.served.len(),
+            "accounts must be accessed sequentially"
+        );
+        let served = &mut inner.served;
+        inner
+            .reader
+            .next_account(|account| {
+                // zero lamport accounts are already stored in their default form, so the
+                // account can be served as-is
+                served.push((*account.pubkey(), account.is_zero_lamport()));
+                callback((&account).into())
+            })
+            .expect("must read account from storage")
+            .expect("storage must hold every account to store")
+    }
+    fn is_zero_lamport(&self, index: usize) -> bool {
+        self.inner.lock().unwrap().served[index].1
+    }
+    fn data_len(&self, _index: usize) -> usize {
+        unimplemented!("data length is only available through the account itself");
+    }
+    fn pubkey(&self, _index: usize) -> &Pubkey {
+        unimplemented!("pubkeys of served accounts are returned by into_served");
+    }
+    fn slot(&self, _index: usize) -> Slot {
+        self.slot
+    }
+    fn target_slot(&self) -> Slot {
+        self.slot
+    }
+    fn len(&self) -> usize {
+        self.len
     }
 }
 

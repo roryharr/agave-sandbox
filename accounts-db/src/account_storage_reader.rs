@@ -1,10 +1,11 @@
 use {
     crate::{
-        account_info::Offset, account_storage_entry::AccountStorageEntry,
-        accounts_file::OpenFileForArchive,
+        account_info::Offset, account_storage::stored_account_info::StoredAccountInfo,
+        account_storage_entry::AccountStorageEntry, accounts_file::OpenFileForArchive,
+        append_vec::AppendVec,
     },
     agave_fs::{
-        buffered_reader::{self, FileBufRead},
+        buffered_reader::{self, FileBufRead, RequiredLenBufFileRead},
         io_setup::IoSetupState,
     },
     solana_clock::Slot,
@@ -142,6 +143,29 @@ impl<'a, 'r, R: FileBufRead<'a>> AccountStorageReader<'r, R> {
 
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+}
+
+impl<'a, R: RequiredLenBufFileRead<'a>> AccountStorageReader<'_, R> {
+    /// Read the next account that is not excluded and call `callback` with it, advancing the
+    /// reader past any excluded accounts and the account that was read. Returns None once the
+    /// reader is past the last account.
+    pub(crate) fn next_account<Ret>(
+        &mut self,
+        callback: impl for<'local> FnOnce(StoredAccountInfo<'local>) -> Ret,
+    ) -> io::Result<Option<Ret>> {
+        // skip any excluded accounts at the current position
+        while let Some(&(excluded_start, excluded_size)) = self.sorted_excluded_accounts.last() {
+            let file_offset = self.reader.get_file_offset() as usize;
+            if file_offset != excluded_start {
+                break;
+            }
+            let skip_len = excluded_size.min(self.num_total_bytes - excluded_start);
+            self.reader.consume_or_skip(skip_len);
+            self.sorted_excluded_accounts.pop();
+        }
+
+        AppendVec::next_account(self.reader, callback).map_err(io::Error::other)
     }
 }
 

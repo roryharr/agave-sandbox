@@ -36,6 +36,7 @@ use {
             stored_account_info::{StoredAccountInfo, StoredAccountInfoWithoutData},
         },
         account_storage_entry::AccountStorageEntry,
+        account_storage_reader::{AccountStorageReader, TombstonesFilter},
         accounts_cache::{AccountsCache, CachedAccount, SlotCache},
         accounts_db::stats::{
             AccountsStats, CleanAccountsStats, FlushStats, LoadAccountsStats,
@@ -59,11 +60,11 @@ use {
         is_zero_lamport::IsZeroLamport,
         partitioned_rewards::PartitionedEpochRewardsConfig,
         read_only_accounts_cache::ReadOnlyAccountsCache,
-        storable_accounts::{StorableAccounts, StorableAccountsBySlot},
+        storable_accounts::{StorableAccountStorageReader, StorableAccounts},
         u64_align,
         utils::{self, create_account_shared_data},
     },
-    agave_fs::buffered_reader::RequiredLenBufFileRead,
+    agave_fs::buffered_reader::{FileBufRead, RequiredLenBufFileRead},
     ahash::HashMapExt,
     bv::BitVec,
     dashmap::DashMap,
@@ -149,11 +150,6 @@ pub(crate) struct ShrinkCollect<'a> {
     pub(crate) alive_accounts: AliveAccounts<'a>,
     /// Tombstones carried forward into the new storage because they are not yet purgeable.
     pub(crate) tombstones_to_carry_forward: Vec<AccountFromStorage>,
-    /// total size in storage of all accounts in `tombstones_to_carry_forward`
-    pub(crate) tombstones_total_bytes: usize,
-    /// total size in storage of all alive accounts
-    pub(crate) alive_total_bytes: usize,
-    pub(crate) total_starting_accounts: usize,
 }
 
 /// reference an account found during scanning a storage.
@@ -1887,7 +1883,7 @@ impl AccountsDb {
         let tombstones_total_bytes = tombstones_to_carry_forward
             .iter()
             .map(|account| account.stored_size())
-            .sum();
+            .sum::<usize>();
 
         // Every account surviving the obsolete and tombstone filters is alive: those filters
         // are the only sources of dead accounts in a storage.
@@ -1927,9 +1923,6 @@ impl AccountsDb {
             written_bytes: *written_bytes,
             alive_accounts,
             tombstones_to_carry_forward,
-            tombstones_total_bytes,
-            total_starting_accounts,
-            alive_total_bytes,
         }
     }
 
@@ -1982,13 +1975,12 @@ impl AccountsDb {
             // It is 'correct' to ignore calls to shrink when a slot is still in the write cache.
             return;
         }
-        let mut unique_accounts =
-            self.get_unique_accounts_from_storage_for_shrink(&store, &self.shrink_stats);
         debug!("do_shrink_slot_store: slot: {slot}");
-        let shrink_collect = self.shrink_collect(&store, &mut unique_accounts, &self.shrink_stats);
 
-        let total_rewrite_bytes =
-            shrink_collect.alive_total_bytes + shrink_collect.tombstones_total_bytes;
+        // The new storage is sized purely by the storage's alive-bytes accounting: the same
+        // accounting that nominates shrink candidates. Streaming more bytes than this panics
+        // in `write_accounts_to_storage`.
+        let total_rewrite_bytes = self.alive_bytes_after_shrink(&store) as u64;
 
         // Nothing to rewrite: nothing alive would be copied to a new storage, so the whole
         // storage is dead. Marking the slot dead is clean's job.
@@ -2001,11 +1993,13 @@ impl AccountsDb {
 
         // Shrink candidates are gated on the same alive-bytes accounting that feeds
         // `total_rewrite_bytes`, so reaching here means that accounting is wrong.
-        if Self::should_not_shrink(total_rewrite_bytes as u64, shrink_collect.written_bytes) {
+        if Self::should_not_shrink(total_rewrite_bytes, store.written_bytes()) {
             info!(
                 "Unexpected shrink for slot {} rewrite bytes {} written {}, likely caused by a \
                  bug for calculating alive bytes.",
-                slot, total_rewrite_bytes, shrink_collect.written_bytes
+                slot,
+                total_rewrite_bytes,
+                store.written_bytes()
             );
             self.shrink_stats
                 .skipped_shrink
@@ -2013,45 +2007,99 @@ impl AccountsDb {
             return;
         }
 
-        let total_accounts_after_shrink = shrink_collect.alive_accounts.accounts.len();
+        let can_purge_zero_lamport_accounts = self.can_purge_zero_lamport_accounts(slot);
+        let num_alive_accounts = store.count() - store.num_tombstones();
         debug!(
-            "shrinking: slot: {}, accounts: ({} => {}) bytes: {} original: {}",
+            "shrinking: slot: {}, accounts: {}, bytes: {} original: {}",
             slot,
-            shrink_collect.total_starting_accounts,
-            total_accounts_after_shrink,
-            shrink_collect.alive_total_bytes,
-            shrink_collect.written_bytes,
+            num_alive_accounts,
+            total_rewrite_bytes,
+            store.written_bytes(),
         );
 
         let mut stats_sub = ShrinkStatsSub::default();
         let mut rewrite_elapsed = Measure::start("rewrite_elapsed");
-        let (shrink_in_progress, time_us) = measure_us!(self.get_store_for_shrink(
-            slot,
-            Arc::clone(&store),
-            total_rewrite_bytes as u64
-        ));
+        let (shrink_in_progress, time_us) =
+            measure_us!(self.get_store_for_shrink(slot, Arc::clone(&store), total_rewrite_bytes));
         stats_sub.create_and_insert_store_elapsed_us = Saturating(time_us);
+        let new_storage = shrink_in_progress.new_storage();
 
-        // here, we're writing back alive_accounts. That should be an atomic operation
-        // without use of rather wide locks in this whole function, because we're
-        // mutating rooted slots; There should be no writers to them.
-        let accounts = [(slot, &shrink_collect.alive_accounts.accounts[..])];
-        let storable_accounts = StorableAccountsBySlot::new(slot, &accounts, self);
-        stats_sub.store_accounts_stats = self.store_accounts_for_shrink(
-            storable_accounts,
-            shrink_in_progress.new_storage(),
-            UpdateIndexThreadSelection::PoolWithThreshold,
-        );
+        // Stream the alive accounts (every account that is not obsolete and not a tombstone)
+        // out of the storage and directly into the write path, in a single sequential pass.
+        // Writing back rooted accounts is safe without use of rather wide locks in this whole
+        // function, because there are no writers to rooted slots.
+        let file = store
+            .accounts
+            .open_file_for_archive(false)
+            .expect("must open storage file");
+        let mut file_reader = append_vec::new_scan_accounts_reader();
+        file_reader
+            .set_file(file.as_ref(), store.accounts.len() as u64)
+            .expect("must attach storage file to reader");
+        let reader =
+            AccountStorageReader::new(&store, None, TombstonesFilter::Exclude, &mut file_reader)
+                .expect("must create account storage reader");
+        let streamed_accounts = StorableAccountStorageReader::new(slot, num_alive_accounts, reader);
+        stats_sub.store_accounts_stats =
+            self.store_streamed_accounts_for_shrink(streamed_accounts, new_storage);
 
-        let tombstone_refs: Vec<_> = shrink_collect.tombstones_to_carry_forward.iter().collect();
-        let tombstone_accounts = [(slot, &tombstone_refs[..])];
-        let storable_tombstones = StorableAccountsBySlot::new(slot, &tombstone_accounts, self);
-        let (num_tombstones_carried_forward, tombstone_carry_forward_us) = measure_us!(
-            self.store_tombstones(shrink_in_progress.new_storage(), storable_tombstones)
-        );
+        // Tombstones that are not yet purgeable are carried forward into the new storage
+        let (num_tombstones_carried_forward, tombstone_carry_forward_us) = measure_us!({
+            if can_purge_zero_lamport_accounts {
+                0
+            } else {
+                let mut tombstone_offsets: Vec<_> = store
+                    .tombstone_offsets_read_lock()
+                    .iter()
+                    .copied()
+                    .collect();
+                // read the tombstones in offset order
+                tombstone_offsets.sort_unstable();
+                let tombstones: Vec<(Pubkey, AccountSharedData)> = tombstone_offsets
+                    .iter()
+                    .map(|offset| {
+                        store
+                            .accounts
+                            .get_stored_account_without_data_callback(*offset, |account| {
+                                (*account.pubkey(), AccountSharedData::default())
+                            })
+                            .expect("must read tombstone from storage")
+                    })
+                    .collect();
+                self.store_tombstones(new_storage, (slot, &tombstones[..]))
+            }
+        });
         stats_sub.tombstone_carry_forward_us = Saturating(tombstone_carry_forward_us);
         stats_sub.num_tombstones_carried_forward =
             Saturating(num_tombstones_carried_forward as u64);
+
+        self.shrink_stats
+            .accounts_loaded
+            .fetch_add(num_alive_accounts as u64, Ordering::Relaxed);
+        let num_obsolete_filtered = store
+            .obsolete_accounts_read_lock()
+            .filter_obsolete_accounts(None)
+            .count();
+        self.shrink_stats
+            .obsolete_accounts_filtered
+            .fetch_add(num_obsolete_filtered as u64, Ordering::Relaxed);
+        let num_tombstones_purged = if can_purge_zero_lamport_accounts {
+            store.num_tombstones()
+        } else {
+            0
+        };
+        // Carried tombstones are rewritten into the new storage, not reclaimed, so they don't
+        // count toward the "removed" totals (which measure what shrink actually freed).
+        self.shrink_stats.accounts_removed.fetch_add(
+            num_obsolete_filtered + num_tombstones_purged,
+            Ordering::Relaxed,
+        );
+        self.shrink_stats.bytes_removed.fetch_add(
+            store
+                .written_bytes()
+                .saturating_sub(new_storage.written_bytes()),
+            Ordering::Relaxed,
+        );
 
         // Count the bytes actually written to the new storage
         self.shrink_stats.bytes_written.fetch_add(
@@ -4439,6 +4487,65 @@ impl AccountsDb {
     /// - `UpsertReclaims` is set to `IgnoreReclaims`. If the slot in `accounts` differs from the new slot,
     ///   accounts may be removed from the account index. In such cases, the caller must ensure that alive
     ///   accounts are decremented for the older storage or that the old storage is removed entirely
+    /// Stores the accounts streamed from `accounts` into `storage` and updates the index to
+    /// point every stored account at its new location, using the pubkeys remembered while
+    /// streaming.
+    fn store_streamed_accounts_for_shrink<'a, R: RequiredLenBufFileRead<'a> + Send>(
+        &self,
+        accounts: StorableAccountStorageReader<'_, R>,
+        storage: &AccountStorageEntry,
+    ) -> StoreAccountsForShrinkStats {
+        let slot = accounts.target_slot();
+        let num_accounts_stored = accounts.len();
+
+        // Write the accounts to storage
+        let write_accounts_time = Measure::start("write_accounts");
+        let infos = self.write_accounts_to_storage(slot, storage, &accounts);
+        let write_accounts_us = write_accounts_time.end_as_us();
+
+        let update_index_time = Measure::start("update_index");
+        let index_updates = accounts
+            .into_served()
+            .into_iter()
+            .zip(infos)
+            .map(|((pubkey, _is_zero_lamport), info)| (pubkey, info))
+            .collect();
+        self.update_index_for_streamed_shrink(slot, index_updates);
+        let update_index_us = update_index_time.end_as_us();
+
+        StoreAccountsForShrinkStats {
+            write_accounts_us,
+            update_index_us,
+            num_accounts_stored: num_accounts_stored as u64,
+        }
+    }
+
+    /// Update the index for accounts rewritten by streaming shrink: each account's index entry
+    /// is replaced to point at its new location in the new storage at the same slot.
+    fn update_index_for_streamed_shrink(
+        &self,
+        slot: Slot,
+        index_updates: Vec<(Pubkey, AccountInfo)>,
+    ) {
+        let update = |chunk: &[(Pubkey, AccountInfo)]| {
+            for (pubkey, info) in chunk {
+                self.accounts_index.replace(slot, slot, pubkey, *info);
+            }
+        };
+
+        let threshold = 1;
+        if index_updates.len() > threshold {
+            let chunk_size = index_updates
+                .len()
+                .div_ceil(self.thread_pool_background.current_num_threads());
+            self.thread_pool_background.install(|| {
+                index_updates.par_chunks(chunk_size).for_each(update);
+            });
+        } else {
+            update(&index_updates);
+        }
+    }
+
     pub fn store_accounts_for_shrink<'a>(
         &self,
         accounts: impl StorableAccounts<'a>,

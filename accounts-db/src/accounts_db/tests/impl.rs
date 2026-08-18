@@ -1154,6 +1154,7 @@ fn test_shrink_carries_or_purges_flush_tombstone() {
             AccountsDb::new_for_tests_with_config(Vec::new(), DEFAULT_ACCOUNTS_DB_CONFIG);
         let pubkey_zero = Pubkey::from([1; 32]);
         let pubkey2 = Pubkey::from([2; 32]);
+        let pubkey_extra = Pubkey::from([3; 32]);
         let account = AccountSharedData::new(1, 0, AccountSharedData::default().owner());
         let zero_lamport_account =
             AccountSharedData::new(0, 0, AccountSharedData::default().owner());
@@ -1161,10 +1162,15 @@ fn test_shrink_carries_or_purges_flush_tombstone() {
         store_rooted_nonzero_accounts(&accounts, slot, [&pubkey_zero]);
         let slot = slot + 1;
 
-        // Store a zero-lamport account and a non-zero lamport account
+        // Store a zero-lamport account and two non-zero lamport accounts
         accounts.store_for_tests((
             slot,
-            [(&pubkey_zero, &zero_lamport_account), (&pubkey2, &account)].as_slice(),
+            [
+                (&pubkey_zero, &zero_lamport_account),
+                (&pubkey2, &account),
+                (&pubkey_extra, &account),
+            ]
+            .as_slice(),
         ));
 
         // Verify the zero-lamport store landed.
@@ -1180,12 +1186,10 @@ fn test_shrink_carries_or_purges_flush_tombstone() {
             "{latest_full_snapshot_slot:?}"
         );
 
-        // for testing, we need to cause shrink to think this will be productive.
-        // The zero lamport account isn't dead, but it can become dead inside shrink.
-        let storage = accounts.storage.get_slot_storage_entry(slot).unwrap();
-        storage
-            .num_alive_bytes
-            .fetch_sub(storage.accounts.calculate_stored_size(0), Ordering::Release);
+        // Overwrite the extra account in a newer slot and flush with clean, which reclaims the
+        // copy in `slot` and marks it obsolete. The dead bytes make shrinking `slot` productive.
+        accounts.store_for_tests((slot + 1, [(&pubkey_extra, &account)].as_slice()));
+        accounts.add_root_and_flush_write_cache(slot + 1);
 
         if let Some(latest_full_snapshot_slot) = latest_full_snapshot_slot {
             accounts.set_latest_full_snapshot_slot(latest_full_snapshot_slot);
@@ -1353,7 +1357,6 @@ fn test_shrink_collect_carries_forward_existing_tombstones() {
     let shrink_collect =
         accounts_db.shrink_collect(&storage, &mut unique_accounts, &ShrinkStats::default());
     assert_eq!(shrink_collect.tombstones_to_carry_forward.len(), 1);
-    assert!(shrink_collect.tombstones_total_bytes > 0);
     assert_eq!(
         shrink_collect
             .alive_accounts
@@ -1372,7 +1375,6 @@ fn test_shrink_collect_carries_forward_existing_tombstones() {
     let shrink_collect =
         accounts_db.shrink_collect(&storage, &mut unique_accounts, &ShrinkStats::default());
     assert!(shrink_collect.tombstones_to_carry_forward.is_empty());
-    assert_eq!(shrink_collect.tombstones_total_bytes, 0);
 }
 
 /// Verify that a storage containing only tombstones is retained by clean if the latest full
@@ -5776,13 +5778,8 @@ fn test_shrink_collect_simple() {
 
                             let alive_total_one_account = AppendVec::calculate_stored_size(space);
                             assert_eq!(
-                                shrink_collect.alive_total_bytes,
+                                shrink_collect.alive_accounts.bytes,
                                 expected_alive_accounts.len() * alive_total_one_account
-                            );
-                            // tombstones (zero-lamport accounts) always store 0 bytes of data
-                            assert_eq!(
-                                shrink_collect.tombstones_total_bytes,
-                                expected_tombstones.len() * AppendVec::calculate_stored_size(0)
                             );
                             // expected_written_bytes is determined by what size append vec gets created when the write cache is flushed to an append vec.
                             let mut expected_written_bytes =
@@ -5793,7 +5790,6 @@ fn test_shrink_collect_simple() {
                             }
 
                             assert_eq!(shrink_collect.written_bytes, expected_written_bytes);
-                            assert_eq!(shrink_collect.total_starting_accounts, account_count);
                         }
                     }
                 }
