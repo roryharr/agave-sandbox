@@ -2125,9 +2125,9 @@ impl AccountsDb {
 
     /// common code from shrink and combine_ancient_slots
     /// get rid of all original store_ids in the slot
-    pub(crate) fn remove_old_stores_shrink<T>(
+    pub(crate) fn remove_old_stores_shrink(
         &self,
-        shrink_collect: &ShrinkCollect<T>,
+        slot: Slot,
         stats: &ShrinkStats,
         shrink_in_progress: Option<ShrinkInProgress>,
         shrink_can_be_active: bool,
@@ -2137,11 +2137,8 @@ impl AccountsDb {
         // Purge old, overwritten storage entries
         // This has the side effect of dropping `shrink_in_progress`, which removes the old storage completely. The
         // index has to be correct before we drop the old storage.
-        let dead_storages = self.mark_dirty_dead_stores(
-            shrink_collect.slot,
-            shrink_in_progress,
-            shrink_can_be_active,
-        );
+        let dead_storages =
+            self.mark_dirty_dead_stores(slot, shrink_in_progress, shrink_can_be_active);
         let dead_storages_len = dead_storages.len();
 
         let (_, drop_storage_entries_elapsed) = measure_us!(drop(dead_storages));
@@ -2266,12 +2263,7 @@ impl AccountsDb {
         // those here
         self.shrink_candidate_slots.lock().unwrap().remove(&slot);
 
-        self.remove_old_stores_shrink(
-            &shrink_collect,
-            &self.shrink_stats,
-            Some(shrink_in_progress),
-            false,
-        );
+        self.remove_old_stores_shrink(slot, &self.shrink_stats, Some(shrink_in_progress), false);
 
         self.reopen_storage_as_readonly_shrinking_in_progress_ok(slot);
 

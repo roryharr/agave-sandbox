@@ -756,7 +756,7 @@ impl AccountsDb {
             }
 
             self.remove_old_stores_shrink(
-                &shrink_collect,
+                slot,
                 &self.shrink_ancient_stats.shrink_stats,
                 shrink_in_progress,
                 true,
