@@ -672,9 +672,9 @@ mod tests {
         accounts.store_for_tests((slot, [(&rewritten_pubkey, &open_account)].as_slice()));
         accounts.add_root_and_flush_write_cache(slot);
 
-        // With the latest full snapshot behind tombstone_slot, clean retains the
-        // zero-lamport single-ref account and shrink carries it forward as a tombstone:
-        // its bytes stay in tombstone_slot's storage while its index entry is removed
+        // Clean removes the zero-lamport single-ref account's index entry and records
+        // it as a tombstone; with the latest full snapshot behind tombstone_slot,
+        // shrink then carries the tombstone forward into tombstone_slot's new storage
         accounts.set_latest_full_snapshot_slot(tombstone_slot - 1);
         accounts.clean_accounts_for_tests();
         accounts.shrink_all_slots(false, None);
