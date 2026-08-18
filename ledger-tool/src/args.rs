@@ -8,7 +8,7 @@ use {
         accounts_file::AccountsFileProvider,
         accounts_index::{
             AccountsIndexConfig, DEFAULT_NUM_ENTRIES_OVERHEAD, DEFAULT_NUM_ENTRIES_TO_EVICT,
-            IndexLimit, IndexLimitThreshold, MINIMAL_THRESHOLD_NUM_BYTES, ScanFilter,
+            IndexLimit, IndexLimitThreshold, MINIMAL_THRESHOLD_NUM_BYTES,
         },
         partitioned_rewards::PartitionedEpochRewardsConfig,
     },
@@ -106,14 +106,9 @@ pub fn accounts_db_args<'a, 'b>() -> Box<[Arg<'a, 'b>]> {
             .takes_value(true)
             .possible_values(&["all", "only-abnormal", "only-abnormal-with-verify"])
             .help(
-                "Debug option to use different type of filtering for accounts index scan in \
-                 shrinking. \"all\" will scan both in-memory and on-disk accounts index, which is \
-                 the default. \"only-abnormal\" will scan in-memory accounts index only for \
-                 abnormal entries and skip scanning on-disk accounts index by assuming that \
-                 on-disk accounts index contains only normal accounts index entry. \
-                 \"only-abnormal-with-verify\" is similar to \"only-abnormal\", which will scan \
-                 in-memory index for abnormal entries, but will also verify that on-disk account \
-                 entries are indeed normal.",
+                "[DEPRECATED] This flag is now a no-op: shrink no longer scans the accounts \
+                 index. The flag is preserved for backward compatibility, but the value is \
+                 ignored with a warning.",
             )
             .hidden(hidden_unless_forced()),
         Arg::with_name("accounts_db_skip_initial_hash_calculation")
@@ -348,18 +343,18 @@ pub fn get_accounts_db_config(
         );
     }
 
-    let scan_filter_for_shrinking = arg_matches
+    // The `--accounts-db-scan-filter-for-shrinking` flag is now a no-op. Shrink no longer
+    // scans the accounts index. The flag is preserved for backward compatibility, but the
+    // value is ignored with a warning.
+    if arg_matches
         .value_of("accounts_db_scan_filter_for_shrinking")
-        .map(|filter| match filter {
-            "all" => ScanFilter::All,
-            "only-abnormal" => ScanFilter::OnlyAbnormal,
-            "only-abnormal-with-verify" => ScanFilter::OnlyAbnormalWithVerify,
-            _ => {
-                // clap will enforce one of the above values is given
-                unreachable!("invalid value given to accounts_db_scan_filter_for_shrinking")
-            }
-        })
-        .unwrap_or_default();
+        .is_some()
+    {
+        warn!(
+            "`--accounts-db-scan-filter-for-shrinking` is now a no-op; shrink no longer scans \
+             the accounts index."
+        );
+    }
 
     AccountsDbConfig {
         index: Some(accounts_index_config),
@@ -382,7 +377,6 @@ pub fn get_accounts_db_config(
         exhaustively_verify_refcounts: arg_matches.is_present("accounts_db_verify_refcounts"),
         skip_initial_hash_calc: arg_matches.is_present("accounts_db_skip_initial_hash_calculation"),
         partitioned_epoch_rewards_config: PartitionedEpochRewardsConfig::default(),
-        scan_filter_for_shrinking,
         num_background_threads: None,
         num_foreground_threads: None,
         accounts_file_provider: AccountsFileProvider::AppendVec,

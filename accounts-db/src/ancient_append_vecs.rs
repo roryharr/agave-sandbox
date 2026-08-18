@@ -701,7 +701,7 @@ impl AccountsDb {
         let accounts_to_combine = accounts_per_storage
             .iter_mut()
             .map(|(info, unique_accounts)| {
-                self.shrink_collect::<AliveAccounts<'_>>(
+                self.shrink_collect(
                     &info.storage,
                     unique_accounts,
                     &self.shrink_ancient_stats.shrink_stats,
@@ -709,17 +709,23 @@ impl AccountsDb {
             })
             .collect::<Vec<_>>();
 
-        let mut target_slots_sorted = Vec::with_capacity(accounts_to_combine.len());
-        for shrink_collect in &accounts_to_combine {
+        let (_, index_read_us) = measure_us!(for shrink_collect in &accounts_to_combine {
             self.assert_ancient_accounts_can_be_moved(
                 &shrink_collect.alive_accounts,
                 max_ancient_slot,
             );
-            // ALL alive accounts in this slot can be written to any other slot we find
-            // convenient, so every slot is a candidate to hold packed accounts.
-            target_slots_sorted.push(shrink_collect.slot);
-        }
+        });
+        self.shrink_ancient_stats
+            .shrink_stats
+            .index_read_elapsed
+            .fetch_add(index_read_us, Ordering::Relaxed);
 
+        // ALL alive accounts in these slots can be written to any other slot we find
+        // convenient, so every slot is a candidate to hold packed accounts.
+        let mut target_slots_sorted = accounts_to_combine
+            .iter()
+            .map(|shrink_collect| shrink_collect.slot)
+            .collect::<Vec<_>>();
         target_slots_sorted.sort_unstable();
         AccountsToCombine {
             accounts_to_combine,
@@ -800,7 +806,7 @@ impl AccountsDb {
 struct AccountsToCombine<'a> {
     /// alive accounts that should be combined
     /// There is one entry here for each storage we are processing.
-    accounts_to_combine: Vec<ShrinkCollect<AliveAccounts<'a>>>,
+    accounts_to_combine: Vec<ShrinkCollect<'a>>,
     /// slots whose alive accounts are in 'accounts_to_combine'
     /// Some of these slots will have ancient append vecs created at them to contain everything in 'accounts_to_combine'
     /// The rest will become dead slots with no accounts in them.

@@ -13,7 +13,7 @@ use {
     solana_account::{Account, AccountSharedData, ReadableAccount, WritableAccount},
     solana_accounts_db::{
         accounts_db::{ACCOUNTS_DB_CONFIG_FOR_TESTING, AccountsDbConfig},
-        accounts_index::{AccountsIndexConfig, ScanFilter},
+        accounts_index::AccountsIndexConfig,
         utils::create_accounts_run_and_snapshot_dirs,
     },
     solana_bls_signatures::keypair::Keypair as BLSKeypair,
@@ -1145,7 +1145,6 @@ impl TestValidator {
         let accounts_db_config = AccountsDbConfig {
             index: Some(AccountsIndexConfig::default()),
             account_indexes: Some(config.rpc_config.account_indexes.clone()),
-            scan_filter_for_shrinking: ScanFilter::All,
             ..ACCOUNTS_DB_CONFIG_FOR_TESTING
         };
 

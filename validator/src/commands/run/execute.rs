@@ -25,7 +25,7 @@ use {
         accounts_index::{
             AccountSecondaryIndexes, AccountsIndexConfig, DEFAULT_NUM_ENTRIES_OVERHEAD,
             DEFAULT_NUM_ENTRIES_TO_EVICT, IndexLimit, IndexLimitThreshold,
-            MINIMAL_THRESHOLD_NUM_BYTES, ScanFilter,
+            MINIMAL_THRESHOLD_NUM_BYTES,
         },
         partitioned_rewards::PartitionedEpochRewardsConfig,
         utils::{
@@ -688,19 +688,6 @@ pub fn execute(
     // clap will enforce only one cli arg is provided, so pick whichever is Some
     let write_cache_limit_bytes = write_cache_limit_bytes.or(write_cache_limit_mb);
 
-    let scan_filter_for_shrinking = matches
-        .value_of("accounts_db_scan_filter_for_shrinking")
-        .map(|filter| match filter {
-            "all" => ScanFilter::All,
-            "only-abnormal" => ScanFilter::OnlyAbnormal,
-            "only-abnormal-with-verify" => ScanFilter::OnlyAbnormalWithVerify,
-            _ => {
-                // clap will enforce one of the above values is given
-                unreachable!("invalid value given to accounts_db_scan_filter_for_shrinking")
-            }
-        })
-        .unwrap_or_default();
-
     let accounts_db_config = AccountsDbConfig {
         index: Some(accounts_index_config),
         account_indexes: Some(account_indexes.clone()),
@@ -721,7 +708,6 @@ pub fn execute(
         skip_initial_hash_calc: false,
         exhaustively_verify_refcounts: matches.is_present("accounts_db_verify_refcounts"),
         partitioned_epoch_rewards_config: PartitionedEpochRewardsConfig::default(),
-        scan_filter_for_shrinking,
         num_background_threads: Some(accounts_db_background_threads),
         num_foreground_threads: Some(accounts_db_foreground_threads),
         accounts_file_provider: AccountsFileProvider::AppendVec,

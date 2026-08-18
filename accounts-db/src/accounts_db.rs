@@ -47,7 +47,7 @@ use {
         accounts_hash::{AccountLtHash, AccountsLtHash, ZERO_LAMPORT_ACCOUNT_LT_HASH},
         accounts_index::{
             AccountSecondaryIndexes, AccountsIndex, IndexKey, ReclaimsSlotList,
-            ReclaimsWithNewestSlot, RefCount, ScanFilter, Startup, UpsertReclaim,
+            ReclaimsWithNewestSlot, ScanFilter, Startup, UpsertReclaim,
             in_mem_accounts_index::StartupStats,
         },
         accounts_scan::{ScanConfig, ScanError, ScanGuard, ScanResult, ScanTracker},
@@ -142,57 +142,11 @@ pub(crate) struct AliveAccounts<'a> {
     pub(crate) bytes: usize,
 }
 
-pub(crate) trait ShrinkCollectRefs<'a>: Sync + Send {
-    fn with_capacity(capacity: usize, slot: Slot) -> Self;
-    fn collect(&mut self, other: Self);
-    fn add(
-        &mut self,
-        ref_count: RefCount,
-        account: &'a AccountFromStorage,
-        slot_list: &[(Slot, AccountInfo)],
-    );
-    fn len(&self) -> usize;
-    fn alive_bytes(&self) -> usize;
-    fn alive_accounts(&self) -> &Vec<&'a AccountFromStorage>;
-}
-
-impl<'a> ShrinkCollectRefs<'a> for AliveAccounts<'a> {
-    fn collect(&mut self, mut other: Self) {
-        self.bytes = self.bytes.saturating_add(other.bytes);
-        self.accounts.append(&mut other.accounts);
-    }
-    fn with_capacity(capacity: usize, slot: Slot) -> Self {
-        Self {
-            accounts: Vec::with_capacity(capacity),
-            bytes: 0,
-            slot,
-        }
-    }
-    fn add(
-        &mut self,
-        _ref_count: RefCount,
-        account: &'a AccountFromStorage,
-        _slot_list: &[(Slot, AccountInfo)],
-    ) {
-        self.accounts.push(account);
-        self.bytes = self.bytes.saturating_add(account.stored_size());
-    }
-    fn len(&self) -> usize {
-        self.accounts.len()
-    }
-    fn alive_bytes(&self) -> usize {
-        self.bytes
-    }
-    fn alive_accounts(&self) -> &Vec<&'a AccountFromStorage> {
-        &self.accounts
-    }
-}
-
 #[derive(Debug)]
-pub(crate) struct ShrinkCollect<T> {
+pub(crate) struct ShrinkCollect<'a> {
     pub(crate) slot: Slot,
     pub(crate) written_bytes: u64,
-    pub(crate) alive_accounts: T,
+    pub(crate) alive_accounts: AliveAccounts<'a>,
     /// Tombstones carried forward into the new storage because they are not yet purgeable.
     pub(crate) tombstones_to_carry_forward: Vec<AccountFromStorage>,
     /// total size in storage of all accounts in `tombstones_to_carry_forward`
@@ -200,11 +154,6 @@ pub(crate) struct ShrinkCollect<T> {
     /// total size in storage of all alive accounts
     pub(crate) alive_total_bytes: usize,
     pub(crate) total_starting_accounts: usize,
-}
-
-struct LoadAccountsIndexForShrink<T> {
-    /// all alive accounts
-    alive_accounts: T,
 }
 
 /// reference an account found during scanning a storage.
@@ -860,9 +809,6 @@ pub struct AccountsDb {
     /// storage format to use for new storages
     accounts_file_provider: AccountsFileProvider,
 
-    /// index scan filtering for shrinking
-    scan_filter_for_shrinking: ScanFilter,
-
     /// this will live here until the feature for partitioned epoch rewards is activated.
     /// At that point, this and other code can be deleted.
     pub partitioned_epoch_rewards_config: PartitionedEpochRewardsConfig,
@@ -1014,7 +960,6 @@ impl AccountsDb {
             write_cache_limit_bytes: accounts_db_config.write_cache_limit_bytes,
             partitioned_epoch_rewards_config: accounts_db_config.partitioned_epoch_rewards_config,
             exhaustively_verify_refcounts: accounts_db_config.exhaustively_verify_refcounts,
-            scan_filter_for_shrinking: accounts_db_config.scan_filter_for_shrinking,
             thread_pool_foreground,
             thread_pool_background,
             active_stats: ActiveStats::default(),
@@ -1841,61 +1786,6 @@ impl AccountsDb {
         );
     }
 
-    /// load the account index entry for the first `count` items in `accounts`
-    /// store a reference to all alive accounts in `alive_accounts`
-    /// return sum of account size for all alive accounts
-    fn load_accounts_index_for_shrink<'a, T: ShrinkCollectRefs<'a>>(
-        &self,
-        accounts: &'a [AccountFromStorage],
-        stats: &ShrinkStats,
-        slot_to_shrink: Slot,
-    ) -> LoadAccountsIndexForShrink<T> {
-        let count = accounts.len();
-        let mut alive_accounts = T::with_capacity(count, slot_to_shrink);
-
-        let mut index = 0;
-        let mut index_scan_returned_some_count = 0;
-        let mut index_scan_returned_none_count = 0;
-        self.accounts_index.scan(
-            accounts.iter().map(|account| account.pubkey()),
-            |_pubkey, slots_refs| {
-                let stored_account = &accounts[index];
-                if let Some((slot_list, ref_count)) = slots_refs {
-                    index_scan_returned_some_count += 1;
-                    let is_alive = slot_list.iter().any(|(slot, _acct_info)| {
-                        // if the accounts index contains an entry at this slot, then the append vec we're asking about contains this item and thus, it is alive at this slot
-                        *slot == slot_to_shrink
-                    });
-
-                    // All obsolete and tombstones have been filtered. Account MUST be alive in this slot
-                    assert!(is_alive);
-                    alive_accounts.add(ref_count, stored_account, slot_list);
-                } else {
-                    index_scan_returned_none_count += 1;
-                    // getting None here means the account is 'normal' and was written to disk. This means it must have ref_count=1 and
-                    // slot_list.len() = 1. This means it must be alive in this slot. This is by far the most common case.
-                    // Note that we could get Some(...) here if the account is in the in mem index because it is hot.
-                    // Note this could also mean the account isn't on disk either. That would indicate a bug in accounts db.
-                    // Account is alive.
-                    let ref_count = 1;
-                    let slot_list = [(slot_to_shrink, AccountInfo::default())];
-                    alive_accounts.add(ref_count, stored_account, &slot_list);
-                }
-                index += 1;
-            },
-            self.scan_filter_for_shrinking,
-        );
-        assert_eq!(index, std::cmp::min(accounts.len(), count));
-        stats
-            .index_scan_returned_some
-            .fetch_add(index_scan_returned_some_count, Ordering::Relaxed);
-        stats
-            .index_scan_returned_none
-            .fetch_add(index_scan_returned_none_count, Ordering::Relaxed);
-
-        LoadAccountsIndexForShrink { alive_accounts }
-    }
-
     /// get all accounts in all the storages passed in
     /// for duplicate pubkeys, the account with the highest write_value is returned
     pub fn get_unique_accounts_from_storage(
@@ -1948,20 +1838,18 @@ impl AccountsDb {
 
     /// shared code for shrinking normal slots and combining into ancient append vecs
     /// note 'unique_accounts' is passed by ref so we can return references to data within it, avoiding self-references
-    pub(crate) fn shrink_collect<'b, T: ShrinkCollectRefs<'b>>(
+    pub(crate) fn shrink_collect<'b>(
         &self,
         store: &AccountStorageEntry,
         unique_accounts: &'b mut GetUniqueAccountsResult,
         stats: &ShrinkStats,
-    ) -> ShrinkCollect<T> {
+    ) -> ShrinkCollect<'b> {
         let slot = store.slot();
 
         let GetUniqueAccountsResult {
             stored_accounts,
             written_bytes,
         } = unique_accounts;
-
-        let mut index_read_elapsed = Measure::start("index_read_elapsed");
 
         // Get a set of all obsolete offsets
         // Slot is not needed, as all obsolete accounts can be considered
@@ -2001,62 +1889,48 @@ impl AccountsDb {
             .map(|account| account.stored_size())
             .sum();
 
-        let len = stored_accounts.len();
-        let shrink_collect = Mutex::new(ShrinkCollect {
+        // Every account surviving the obsolete and tombstone filters is alive: those filters
+        // are the only sources of dead accounts in a storage.
+        let alive_accounts = AliveAccounts {
             slot,
-            written_bytes: *written_bytes,
-            alive_accounts: T::with_capacity(len, slot),
-            tombstones_to_carry_forward,
-            tombstones_total_bytes,
-            total_starting_accounts,
-            alive_total_bytes: 0, // will be updated after `alive_accounts` is populated
-        });
+            accounts: stored_accounts.iter().collect(),
+            bytes: stored_accounts.iter().fold(0usize, |bytes, account| {
+                bytes.saturating_add(account.stored_size())
+            }),
+        };
+        let alive_total_bytes = alive_accounts.bytes;
 
         stats
             .accounts_loaded
-            .fetch_add(len as u64, Ordering::Relaxed);
+            .fetch_add(alive_accounts.accounts.len() as u64, Ordering::Relaxed);
         stats
             .obsolete_accounts_filtered
             .fetch_add(num_obsolete_filtered as u64, Ordering::Relaxed);
-        self.thread_pool_background.install(|| {
-            stored_accounts
-                .par_chunks(SHRINK_COLLECT_CHUNK_SIZE)
-                .for_each(|stored_accounts| {
-                    let LoadAccountsIndexForShrink { alive_accounts } =
-                        self.load_accounts_index_for_shrink(stored_accounts, stats, slot);
-
-                    // collect
-                    let mut shrink_collect = shrink_collect.lock().unwrap();
-                    shrink_collect.alive_accounts.collect(alive_accounts);
-                });
-        });
-
-        index_read_elapsed.stop();
-
-        let mut shrink_collect = shrink_collect.into_inner().unwrap();
-        let alive_total_bytes = shrink_collect.alive_accounts.alive_bytes();
-        shrink_collect.alive_total_bytes = alive_total_bytes;
-
-        stats
-            .index_read_elapsed
-            .fetch_add(index_read_elapsed.as_us(), Ordering::Relaxed);
 
         // Tombstones carried forward are rewritten into the new storage, not reclaimed, so exclude
         // them from the "removed" totals (which measure what shrink actually freed).
         stats.accounts_removed.fetch_add(
             total_starting_accounts
-                - shrink_collect.alive_accounts.len()
-                - shrink_collect.tombstones_to_carry_forward.len(),
+                - alive_accounts.accounts.len()
+                - tombstones_to_carry_forward.len(),
             Ordering::Relaxed,
         );
         stats.bytes_removed.fetch_add(
             written_bytes
                 .saturating_sub(alive_total_bytes as u64)
-                .saturating_sub(shrink_collect.tombstones_total_bytes as u64),
+                .saturating_sub(tombstones_total_bytes as u64),
             Ordering::Relaxed,
         );
 
-        shrink_collect
+        ShrinkCollect {
+            slot,
+            written_bytes: *written_bytes,
+            alive_accounts,
+            tombstones_to_carry_forward,
+            tombstones_total_bytes,
+            total_starting_accounts,
+            alive_total_bytes,
+        }
     }
 
     /// common code from shrink and combine_ancient_slots
@@ -2111,11 +1985,7 @@ impl AccountsDb {
         let mut unique_accounts =
             self.get_unique_accounts_from_storage_for_shrink(&store, &self.shrink_stats);
         debug!("do_shrink_slot_store: slot: {slot}");
-        let shrink_collect = self.shrink_collect::<AliveAccounts<'_>>(
-            &store,
-            &mut unique_accounts,
-            &self.shrink_stats,
-        );
+        let shrink_collect = self.shrink_collect(&store, &mut unique_accounts, &self.shrink_stats);
 
         let total_rewrite_bytes =
             shrink_collect.alive_total_bytes + shrink_collect.tombstones_total_bytes;
@@ -2143,7 +2013,7 @@ impl AccountsDb {
             return;
         }
 
-        let total_accounts_after_shrink = shrink_collect.alive_accounts.len();
+        let total_accounts_after_shrink = shrink_collect.alive_accounts.accounts.len();
         debug!(
             "shrinking: slot: {}, accounts: ({} => {}) bytes: {} original: {}",
             slot,
@@ -2165,7 +2035,7 @@ impl AccountsDb {
         // here, we're writing back alive_accounts. That should be an atomic operation
         // without use of rather wide locks in this whole function, because we're
         // mutating rooted slots; There should be no writers to them.
-        let accounts = [(slot, &shrink_collect.alive_accounts.alive_accounts()[..])];
+        let accounts = [(slot, &shrink_collect.alive_accounts.accounts[..])];
         let storable_accounts = StorableAccountsBySlot::new(slot, &accounts, self);
         stats_sub.store_accounts_stats = self.store_accounts_for_shrink(
             storable_accounts,

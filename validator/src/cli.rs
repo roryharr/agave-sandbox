@@ -173,6 +173,15 @@ fn deprecated_arguments() -> Vec<DeprecatedArg> {
             .help("Disables the banking trace. No-op, banking trace is disabled by default."),
     );
     add_arg!(
+        // deprecated in v4.4.0
+        Arg::with_name("accounts_db_scan_filter_for_shrinking")
+            .long("accounts-db-scan-filter-for-shrinking")
+            .takes_value(true)
+            .possible_values(&["all", "only-abnormal", "only-abnormal-with-verify"])
+            .help("No-op; shrink no longer scans the accounts index"),
+        usage_warning: "Shrink no longer scans the accounts index.",
+    );
+    add_arg!(
         // deprecated in v4.0.0
         Arg::with_name("enable_accounts_disk_index")
             .long("enable-accounts-disk-index")
