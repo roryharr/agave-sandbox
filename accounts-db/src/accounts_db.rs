@@ -2012,9 +2012,9 @@ impl AccountsDb {
 
     /// shared code for shrinking normal slots and combining into ancient append vecs
     /// note 'unique_accounts' is passed by ref so we can return references to data within it, avoiding self-references
-    pub(crate) fn shrink_collect<'a: 'b, 'b, T: ShrinkCollectRefs<'b>>(
+    pub(crate) fn shrink_collect<'b, T: ShrinkCollectRefs<'b>>(
         &self,
-        store: &'a AccountStorageEntry,
+        store: &AccountStorageEntry,
         unique_accounts: &'b mut GetUniqueAccountsResult,
         stats: &ShrinkStats,
     ) -> ShrinkCollect<T> {
