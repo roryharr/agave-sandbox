@@ -587,6 +587,13 @@ impl ShrinkAncientStats {
                 i64
             ),
             (
+                "obsolete_accounts_filtered",
+                self.shrink_stats
+                    .obsolete_accounts_filtered
+                    .swap(0, Ordering::Relaxed),
+                i64
+            ),
+            (
                 "index_scan_returned_none",
                 self.shrink_stats
                     .index_scan_returned_none
