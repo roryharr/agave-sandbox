@@ -5633,7 +5633,8 @@ fn test_shrink_collect_simple() {
                             );
                             let slot4 = 4;
                             let slot5 = 5;
-                            // don't do special zero lamport account handling
+                            // slot5 is newer than the latest full snapshot, so
+                            // tombstones are carried forward rather than purged
                             db.set_latest_full_snapshot_slot(0);
                             let mut account = AccountSharedData::new(
                                 lamports,
