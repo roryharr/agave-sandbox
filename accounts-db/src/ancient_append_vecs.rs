@@ -336,7 +336,7 @@ struct WriteAncientAccounts<'a> {
 
 #[derive(Debug, PartialEq, Clone, Copy)]
 /// specify what to do with slots holding accounts that are in multiple slots
-enum IncludeManyRefSlots {
+enum IncludeMultipleNewestSlots {
     /// include them in packing
     Include,
     // skip them. ie. don't include them until sufficient slots of single refs have been created
@@ -446,7 +446,7 @@ impl AccountsDb {
         let mut accounts_to_combine = self.calc_accounts_to_combine(
             &mut accounts_per_storage,
             &tuning,
-            IncludeManyRefSlots::Skip,
+            IncludeMultipleNewestSlots::Skip,
         );
         metrics.unpackable_slots_count += accounts_to_combine.unpackable_slots_count;
 
@@ -782,7 +782,7 @@ impl AccountsDb {
         &self,
         accounts_per_storage: &'a mut [(&'a SlotInfo, GetUniqueAccountsResult)],
         tuning: &PackedAncientStorageTuning,
-        mut include_multiple_newest_slots: IncludeManyRefSlots,
+        mut include_multiple_newest_slots: IncludeMultipleNewestSlots,
     ) -> AccountsToCombine<'a> {
         // reverse sort by slot #
         accounts_per_storage.sort_unstable_by_key(|b| cmp::Reverse(b.0.slot));
@@ -830,7 +830,7 @@ impl AccountsDb {
             last_slot = Some(shrink_collect.slot);
 
             let multiple_not_newest = &mut shrink_collect.alive_accounts.multiple_not_newest;
-            if include_multiple_newest_slots == IncludeManyRefSlots::Skip
+            if include_multiple_newest_slots == IncludeMultipleNewestSlots::Skip
                 && !shrink_collect
                     .alive_accounts
                     .multiple_newest
@@ -847,7 +847,7 @@ impl AccountsDb {
                 if (target_slots_sorted.len() as u64) >= required_packed_slots {
                     // we have prepared to pack enough normal target slots, that form now on we can safely pack
                     // any slots holding accounts in multiple slots.
-                    include_multiple_newest_slots = IncludeManyRefSlots::Include;
+                    include_multiple_newest_slots = IncludeMultipleNewestSlots::Include;
                 } else {
                     // Skip this because too few valid slots have been processed so far.
                     // There are `multiple_newest` accounts in this slot. They must be packed into slots that are >= the current slot value.
@@ -1733,7 +1733,7 @@ mod tests {
                     let accounts_to_combine = db.calc_accounts_to_combine(
                         &mut accounts_per_storage,
                         &default_tuning(),
-                        IncludeManyRefSlots::Include,
+                        IncludeMultipleNewestSlots::Include,
                     );
                     let mut stats = SquashStatsSub::default();
                     let mut write_ancient_accounts = WriteAncientAccounts::default();
@@ -1795,9 +1795,10 @@ mod tests {
             ideal_storage_size: NonZeroU64::new(alive_bytes_per_slot * 2 + 1).unwrap(),
             ..default_tuning()
         };
-        for include_multiple_newest_slots in
-            [IncludeManyRefSlots::Skip, IncludeManyRefSlots::Include]
-        {
+        for include_multiple_newest_slots in [
+            IncludeMultipleNewestSlots::Skip,
+            IncludeMultipleNewestSlots::Include,
+        ] {
             for num_slots in 0..6 {
                 for unsorted_slots in [false, true] {
                     for two_slots in [false, true] {
@@ -1836,7 +1837,7 @@ mod tests {
                         );
                         let expected_accounts_to_combine = if num_slots >= 3
                             && two_slots
-                            && include_multiple_newest_slots == IncludeManyRefSlots::Skip
+                            && include_multiple_newest_slots == IncludeMultipleNewestSlots::Skip
                         {
                             // In this test setup, 2.5 regular slots fits into 1 ancient slot.
                             // When there are two_slots and when slots < 3, all regular slots can fit into one ancient slots.
@@ -1894,9 +1895,10 @@ mod tests {
             ..default_tuning()
         };
 
-        for include_multiple_newest_slots in
-            [IncludeManyRefSlots::Skip, IncludeManyRefSlots::Include]
-        {
+        for include_multiple_newest_slots in [
+            IncludeMultipleNewestSlots::Skip,
+            IncludeMultipleNewestSlots::Include,
+        ] {
             for add_dead_account in [true, false] {
                 for method in TestWriteMultipleRefs::iter() {
                     for num_slots in 0..3 {
@@ -1981,15 +1983,17 @@ mod tests {
                                 // one element (storage), because we don't count alive bytes of skipped accounts
                                 // when we compute required target storages, and the second slot can be combined.
                                 let expected_number_accounts_to_combine = if !two_slots
-                                    || include_multiple_newest_slots == IncludeManyRefSlots::Include
+                                    || include_multiple_newest_slots
+                                        == IncludeMultipleNewestSlots::Include
                                     || num_slots == 1
                                     || (num_slots == 2
                                         && include_multiple_newest_slots
-                                            != IncludeManyRefSlots::Skip)
+                                            != IncludeMultipleNewestSlots::Skip)
                                 {
                                     num_slots
                                 } else if num_slots == 2
-                                    && include_multiple_newest_slots == IncludeManyRefSlots::Skip
+                                    && include_multiple_newest_slots
+                                        == IncludeMultipleNewestSlots::Skip
                                 {
                                     1
                                 } else {
@@ -2003,7 +2007,8 @@ mod tests {
                                 );
 
                                 let expected_target_slots_sorted = if !two_slots
-                                    || include_multiple_newest_slots == IncludeManyRefSlots::Include
+                                    || include_multiple_newest_slots
+                                        == IncludeMultipleNewestSlots::Include
                                     || num_slots == 1
                                 {
                                     if unsorted_slots {
@@ -2012,7 +2017,8 @@ mod tests {
                                         slots_vec.clone()
                                     }
                                 } else if num_slots == 2
-                                    && include_multiple_newest_slots == IncludeManyRefSlots::Skip
+                                    && include_multiple_newest_slots
+                                        == IncludeMultipleNewestSlots::Skip
                                 {
                                     vec![1]
                                 } else {
@@ -2161,7 +2167,7 @@ mod tests {
             let accounts_to_combine = db.calc_accounts_to_combine(
                 &mut accounts_per_storage,
                 &default_tuning(),
-                IncludeManyRefSlots::Include,
+                IncludeMultipleNewestSlots::Include,
             );
             let slots_vec = slots.collect::<Vec<_>>();
             assert_eq!(accounts_to_combine.accounts_to_combine.len(), num_slots);
@@ -2350,7 +2356,7 @@ mod tests {
             let accounts_to_combine = db.calc_accounts_to_combine(
                 &mut accounts_per_storage,
                 &default_tuning(),
-                IncludeManyRefSlots::Include,
+                IncludeMultipleNewestSlots::Include,
             );
             let slots_vec = slots.collect::<Vec<_>>();
             assert_eq!(accounts_to_combine.accounts_to_combine.len(), num_slots);
