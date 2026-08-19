@@ -1701,8 +1701,8 @@ mod tests {
     }
 
     #[derive(EnumIter, Debug, PartialEq, Eq)]
-    enum TestWriteMultipleRefs {
-        MultipleRefs,
+    enum TestWriteMultipleNotNewest {
+        MultipleNotNewest,
         PackedStorages,
     }
 
@@ -1900,7 +1900,7 @@ mod tests {
             IncludeMultipleNewestSlots::Include,
         ] {
             for add_dead_account in [true, false] {
-                for method in TestWriteMultipleRefs::iter() {
+                for method in TestWriteMultipleNotNewest::iter() {
                     for num_slots in 0..3 {
                         for unsorted_slots in [false, true] {
                             for two_slots in [false, true] {
@@ -2077,7 +2077,7 @@ mod tests {
 
                                 // test write_ancient_accounts_to_same_slot_multiple_not_newest since we built interesting 'AccountsToCombine'
                                 let write_ancient_accounts = match method {
-                                    TestWriteMultipleRefs::MultipleRefs => {
+                                    TestWriteMultipleNotNewest::MultipleNotNewest => {
                                         let mut write_ancient_accounts =
                                             WriteAncientAccounts::default();
                                         db.write_ancient_accounts_to_same_slot_multiple_not_newest(
@@ -2086,7 +2086,7 @@ mod tests {
                                         );
                                         write_ancient_accounts
                                     }
-                                    TestWriteMultipleRefs::PackedStorages => {
+                                    TestWriteMultipleNotNewest::PackedStorages => {
                                         let packed_contents = Vec::default();
                                         db.write_packed_storages(
                                             &accounts_to_combine,
@@ -2111,7 +2111,7 @@ mod tests {
         // 1 in a single slot
         // 1 in 2 slots (and the other entry is from a newer slot)
         // So, the other alive entry will cause the account in 2 slots to be put into multiple_not_newest and then accounts_keep_slots
-        for method in TestWriteMultipleRefs::iter() {
+        for method in TestWriteMultipleNotNewest::iter() {
             let db = AccountsDb::new_for_tests_with_config(Vec::new(), accounts_db_config.clone());
             let num_slots = 1;
             // creating 1 more sample slot/storage, but effectively act like 1 slot
@@ -2244,7 +2244,7 @@ mod tests {
 
             // test write_ancient_accounts_to_same_slot_multiple_not_newest since we built interesting 'AccountsToCombine'
             let write_ancient_accounts = match method {
-                TestWriteMultipleRefs::MultipleRefs => {
+                TestWriteMultipleNotNewest::MultipleNotNewest => {
                     let mut write_ancient_accounts = WriteAncientAccounts::default();
                     db.write_ancient_accounts_to_same_slot_multiple_not_newest(
                         accounts_to_combine.accounts_keep_slots.values(),
@@ -2252,7 +2252,7 @@ mod tests {
                     );
                     write_ancient_accounts
                 }
-                TestWriteMultipleRefs::PackedStorages => {
+                TestWriteMultipleNotNewest::PackedStorages => {
                     let packed_contents = Vec::default();
                     db.write_packed_storages(&accounts_to_combine, packed_contents)
                 }
@@ -2312,7 +2312,7 @@ mod tests {
         // 1 with a single slot list entry
         // 1 with 2 slot list entries, where the other entry is from an older slot, so this one is the newer index entry
         // The result will be that the account, even though it is in multiple slots, can be moved to a newer slot.
-        for method in TestWriteMultipleRefs::iter() {
+        for method in TestWriteMultipleNotNewest::iter() {
             let db = AccountsDb::new_for_tests_with_config(Vec::new(), accounts_db_config.clone());
             let num_slots = 1;
             let (storages, slots, infos) = get_sample_storages(&db, num_slots, None);
@@ -2423,7 +2423,7 @@ mod tests {
 
             // test write_ancient_accounts_to_same_slot_multiple_not_newest since we built interesting 'AccountsToCombine'
             let write_ancient_accounts = match method {
-                TestWriteMultipleRefs::MultipleRefs => {
+                TestWriteMultipleNotNewest::MultipleNotNewest => {
                     let mut write_ancient_accounts = WriteAncientAccounts::default();
                     db.write_ancient_accounts_to_same_slot_multiple_not_newest(
                         accounts_to_combine.accounts_keep_slots.values(),
@@ -2431,7 +2431,7 @@ mod tests {
                     );
                     write_ancient_accounts
                 }
-                TestWriteMultipleRefs::PackedStorages => {
+                TestWriteMultipleNotNewest::PackedStorages => {
                     let packed_contents = Vec::default();
                     db.write_packed_storages(&accounts_to_combine, packed_contents)
                 }
