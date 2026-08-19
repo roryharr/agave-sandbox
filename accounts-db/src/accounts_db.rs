@@ -145,11 +145,11 @@ pub(crate) struct AliveAccounts<'a> {
 /// separate pubkeys into those with a single slot and those with > 1 slot
 #[derive(Debug)]
 pub(crate) struct ShrinkCollectAliveSeparatedByRefs<'a> {
-    /// accounts where slot_list_len = 1
+    /// the account is in this slot only
     pub(crate) single: AliveAccounts<'a>,
-    /// account where slot_list_len > 1, but this slot contains the alive entry with the highest slot
+    /// the account is in multiple slots, and this slot is the newest of them
     pub(crate) multiple_newest: AliveAccounts<'a>,
-    /// account where slot_list_len > 1, and this slot is NOT the highest alive entry in the index for the pubkey
+    /// the account is in multiple slots, and a newer slot also holds it
     pub(crate) multiple_not_newest: AliveAccounts<'a>,
 }
 
