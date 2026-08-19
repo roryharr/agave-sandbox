@@ -144,7 +144,7 @@ pub(crate) struct AliveAccounts<'a> {
 
 /// separate pubkeys into those with a single slot and those with > 1 slot
 #[derive(Debug)]
-pub(crate) struct ShrinkCollectAliveSeparatedByRefs<'a> {
+pub(crate) struct AliveAccountsSeparatedBySlots<'a> {
     /// the account is in this slot only
     pub(crate) single: AliveAccounts<'a>,
     /// the account is in multiple slots, and this slot is the newest of them
@@ -189,7 +189,7 @@ impl<'a> ShrinkCollector<'a> for AliveAccounts<'a> {
     }
 }
 
-impl<'a> ShrinkCollector<'a> for ShrinkCollectAliveSeparatedByRefs<'a> {
+impl<'a> ShrinkCollector<'a> for AliveAccountsSeparatedBySlots<'a> {
     fn collect(&mut self, other: Self) {
         self.single.collect(other.single);
         self.multiple_newest.collect(other.multiple_newest);
