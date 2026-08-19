@@ -1703,12 +1703,6 @@ mod tests {
         }
     }
 
-    #[derive(EnumIter, Debug, PartialEq, Eq)]
-    enum TestWriteMultipleRefs {
-        MultipleRefs,
-        PackedStorages,
-    }
-
     #[test_case(ACCOUNTS_DB_CONFIG_APPEND_VEC)]
     fn test_finish_combine_ancient_slots_packed_internal(accounts_db_config: AccountsDbConfig) {
         // n storages
@@ -1907,7 +1901,6 @@ mod tests {
 
         for many_ref_slots in [IncludeManyRefSlots::Skip, IncludeManyRefSlots::Include] {
             for add_dead_account in [true, false] {
-                for method in TestWriteMultipleRefs::iter() {
                     for num_slots in 0..3 {
                         for unsorted_slots in [false, true] {
                             for two_refs in [false, true] {
@@ -2006,8 +1999,8 @@ mod tests {
                                 assert_eq!(
                                     accounts_to_combine.accounts_to_combine.len(),
                                     expected_number_accounts_to_combine,
-                                    "method: {method:?}, num_slots: {num_slots}, two_refs: \
-                                     {two_refs}, many_refs: {many_ref_slots:?}"
+                                    "num_slots: {num_slots}, two_refs: {two_refs}, many_refs: \
+                                     {many_ref_slots:?}"
                                 );
 
                                 let expected_target_slots_sorted = if !two_refs
@@ -2081,31 +2074,14 @@ mod tests {
                                     ));
                                 }
 
-                                // test write_ancient_accounts_to_same_slot_multiple_refs since we built interesting 'AccountsToCombine'
-                                let write_ancient_accounts = match method {
-                                    TestWriteMultipleRefs::MultipleRefs => {
-                                        let mut write_ancient_accounts =
-                                            WriteAncientAccounts::default();
-                                        db.write_ancient_accounts_to_same_slot_multiple_refs(
-                                            accounts_to_combine.accounts_keep_slots.values(),
-                                            &mut write_ancient_accounts,
-                                        );
-                                        write_ancient_accounts
-                                    }
-                                    TestWriteMultipleRefs::PackedStorages => {
-                                        let packed_contents = Vec::default();
-                                        db.write_packed_storages(
-                                            &accounts_to_combine,
-                                            packed_contents,
-                                        )
-                                    }
-                                };
+                                let packed_contents = Vec::default();
+                                let write_ancient_accounts =
+                                    db.write_packed_storages(&accounts_to_combine, packed_contents);
 
                                 assert!(write_ancient_accounts.shrinks_in_progress.is_empty());
                             }
                         }
                     }
-                }
             }
         }
     }
@@ -2117,7 +2093,6 @@ mod tests {
         // 1 with 1 ref
         // 1 with 2 refs (and the other ref is from a newer slot)
         // So, the other alive ref will cause the account with 2 refs to be put into many_refs_old_alive and then accounts_keep_slots
-        for method in TestWriteMultipleRefs::iter() {
             let db = AccountsDb::new_for_tests_with_config(Vec::new(), accounts_db_config.clone());
             let num_slots = 1;
             // creating 1 more sample slot/storage, but effectively act like 1 slot
@@ -2248,21 +2223,9 @@ mod tests {
                         .is_empty())
             );
 
-            // test write_ancient_accounts_to_same_slot_multiple_refs since we built interesting 'AccountsToCombine'
-            let write_ancient_accounts = match method {
-                TestWriteMultipleRefs::MultipleRefs => {
-                    let mut write_ancient_accounts = WriteAncientAccounts::default();
-                    db.write_ancient_accounts_to_same_slot_multiple_refs(
-                        accounts_to_combine.accounts_keep_slots.values(),
-                        &mut write_ancient_accounts,
-                    );
-                    write_ancient_accounts
-                }
-                TestWriteMultipleRefs::PackedStorages => {
-                    let packed_contents = Vec::default();
-                    db.write_packed_storages(&accounts_to_combine, packed_contents)
-                }
-            };
+            let packed_contents = Vec::default();
+            let write_ancient_accounts =
+                db.write_packed_storages(&accounts_to_combine, packed_contents);
             assert_eq!(write_ancient_accounts.shrinks_in_progress.len(), num_slots);
             let mut shrinks_in_progress = write_ancient_accounts
                 .shrinks_in_progress
@@ -2308,7 +2271,6 @@ mod tests {
                 })
                 .unwrap();
             assert_eq!(account, account_shared_data_with_2_refs);
-        }
     }
 
     #[test_case(ACCOUNTS_DB_CONFIG_APPEND_VEC)]
@@ -2318,7 +2280,6 @@ mod tests {
         // 1 with 1 ref
         // 1 with 2 refs, with the idea that the other ref is from an older slot, so this one is the newer index entry
         // The result will be that the account, even though it has refcount > 1, can be moved to a newer slot.
-        for method in TestWriteMultipleRefs::iter() {
             let db = AccountsDb::new_for_tests_with_config(Vec::new(), accounts_db_config.clone());
             let num_slots = 1;
             let (storages, slots, infos) = get_sample_storages(&db, num_slots, None);
@@ -2430,21 +2391,9 @@ mod tests {
                         .is_empty())
             );
 
-            // test write_ancient_accounts_to_same_slot_multiple_refs since we built interesting 'AccountsToCombine'
-            let write_ancient_accounts = match method {
-                TestWriteMultipleRefs::MultipleRefs => {
-                    let mut write_ancient_accounts = WriteAncientAccounts::default();
-                    db.write_ancient_accounts_to_same_slot_multiple_refs(
-                        accounts_to_combine.accounts_keep_slots.values(),
-                        &mut write_ancient_accounts,
-                    );
-                    write_ancient_accounts
-                }
-                TestWriteMultipleRefs::PackedStorages => {
-                    let packed_contents = Vec::default();
-                    db.write_packed_storages(&accounts_to_combine, packed_contents)
-                }
-            };
+            let packed_contents = Vec::default();
+            let write_ancient_accounts =
+                db.write_packed_storages(&accounts_to_combine, packed_contents);
             assert!(write_ancient_accounts.shrinks_in_progress.is_empty());
             // assert that we wrote the 2_ref account (and the 1 ref account) to the newly shrunk append vec
             let storage = db.storage.get_slot_storage_entry(slot1).unwrap();
@@ -2465,7 +2414,6 @@ mod tests {
             assert_eq!(count, 2);
             assert_eq!(accounts_shrunk_same_slot.0, *pk_with_2_refs);
             assert_eq!(accounts_shrunk_same_slot.1, account_shared_data_with_2_refs);
-        }
     }
 
     #[test_case(ACCOUNTS_DB_CONFIG_APPEND_VEC)]
