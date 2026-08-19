@@ -383,16 +383,16 @@ impl AccountsDb {
         self.shrink_ancient_stats.report();
     }
 
-    /// return false if `many_refs_newest` accounts cannot be moved into `target_slots_sorted`.
+    /// return false if `multiple_newest` accounts cannot be moved into `target_slots_sorted`.
     /// The slot # would be violated.
-    /// accounts in `many_refs_newest` must be moved a slot >= each account's current slot.
+    /// accounts in `multiple_newest` must be moved a slot >= each account's current slot.
     /// If that can be done, this fn returns true
-    fn many_ref_accounts_can_be_moved(
-        many_refs_newest: &[AliveAccounts<'_>],
+    fn multiple_newest_can_be_moved(
+        multiple_newest: &[AliveAccounts<'_>],
         target_slots_sorted: &[Slot],
         tuning: &PackedAncientStorageTuning,
     ) -> bool {
-        let alive_bytes = many_refs_newest
+        let alive_bytes = multiple_newest
             .iter()
             .map(|alive| alive.bytes)
             .sum::<usize>();
@@ -409,9 +409,7 @@ impl AccountsDb {
             .saturating_sub(required_ideal_packed);
 
         let highest_slot = target_slots_sorted[i_last];
-        many_refs_newest
-            .iter()
-            .all(|many| many.slot <= highest_slot)
+        multiple_newest.iter().all(|many| many.slot <= highest_slot)
     }
 
     fn combine_ancient_slots_packed_internal(
@@ -452,23 +450,22 @@ impl AccountsDb {
         );
         metrics.unpackable_slots_count += accounts_to_combine.unpackable_slots_count;
 
-        let mut many_refs_newest = accounts_to_combine
+        let mut multiple_newest = accounts_to_combine
             .accounts_to_combine
             .iter_mut()
             .filter_map(|alive| {
-                let newest_alive =
-                    std::mem::take(&mut alive.alive_accounts.many_refs_this_is_newest_alive);
+                let newest_alive = std::mem::take(&mut alive.alive_accounts.multiple_newest);
                 (!newest_alive.accounts.is_empty()).then_some(newest_alive)
             })
             .collect::<Vec<_>>();
 
         // Sort highest slot to lowest slot. This way, we will put the multi ref accounts with the highest slots in the highest
         // packed slot.
-        many_refs_newest.sort_unstable_by_key(|b| cmp::Reverse(b.slot));
-        metrics.newest_alive_packed_count += many_refs_newest.len();
+        multiple_newest.sort_unstable_by_key(|b| cmp::Reverse(b.slot));
+        metrics.newest_alive_packed_count += multiple_newest.len();
 
-        if !Self::many_ref_accounts_can_be_moved(
-            &many_refs_newest,
+        if !Self::multiple_newest_can_be_moved(
+            &multiple_newest,
             &accounts_to_combine.target_slots_sorted,
             &tuning,
         ) {
@@ -476,7 +473,7 @@ impl AccountsDb {
             log::info!(
                 "unable to ancient pack: highest available slot: {:?}, lowest required slot: {:?}",
                 accounts_to_combine.target_slots_sorted.last(),
-                many_refs_newest.last().map(|accounts| accounts.slot)
+                multiple_newest.last().map(|accounts| accounts.slot)
             );
             return;
         }
@@ -494,11 +491,11 @@ impl AccountsDb {
         // pack the accounts with slot_list_len = 1 or slot_list_len > 1 but the slot we're packing is the highest alive slot for the pubkey.
         // Note the `chain` below combining them
         let pack = PackedAncientStorage::pack(
-            many_refs_newest.iter().chain(
+            multiple_newest.iter().chain(
                 accounts_to_combine
                     .accounts_to_combine
                     .iter()
-                    .map(|shrink_collect| &shrink_collect.alive_accounts.one_ref),
+                    .map(|shrink_collect| &shrink_collect.alive_accounts.single),
             ),
             tuning.ideal_storage_size,
         );
@@ -693,7 +690,7 @@ impl AccountsDb {
         let mut write_ancient_accounts = write_ancient_accounts.into_inner().unwrap();
 
         // write new storages where contents were unable to move because slot_list_len > 1
-        self.write_ancient_accounts_to_same_slot_multiple_refs(
+        self.write_ancient_accounts_to_same_slot_multiple_not_newest(
             accounts_to_combine.accounts_keep_slots.values(),
             &mut write_ancient_accounts,
         );
@@ -785,7 +782,7 @@ impl AccountsDb {
         &self,
         accounts_per_storage: &'a mut [(&'a SlotInfo, GetUniqueAccountsResult)],
         tuning: &PackedAncientStorageTuning,
-        mut many_ref_slots: IncludeManyRefSlots,
+        mut include_multiple_newest_slots: IncludeManyRefSlots,
     ) -> AccountsToCombine<'a> {
         // reverse sort by slot #
         accounts_per_storage.sort_unstable_by_key(|b| cmp::Reverse(b.0.slot));
@@ -797,9 +794,9 @@ impl AccountsDb {
         // We are no longer doing eager unref in shrink_collect. Therefore, we will no longer need to iter them serially?
         // There is a subtle difference for zero lamport accounts, which can lead to having more multi-refs than before?
         // Consider account X in both slot x, and x+1 and x+2.
-        // With eager unref, we will only collect `one_ref`` X at slot x+2 after shrink.
+        // With eager unref, we will only collect `single`` X at slot x+2 after shrink.
         // Without eager unref, we will collect X at `multi-ref` after shrink.
-        // Packing multi-ref is less efficient than `one_ref``. But it might be ok - in next round of clean, hopefully, it can turn this from multi-ref into one-ref.
+        // Packing multi-ref is less efficient than `single``. But it might be ok - in next round of clean, hopefully, it can turn this from multi-ref into one-ref.
         let mut accounts_to_combine = accounts_per_storage
             .iter_mut()
             .map(|(info, unique_accounts)| {
@@ -816,7 +813,7 @@ impl AccountsDb {
             .map(|a| a.alive_total_bytes)
             .sum::<usize>();
 
-        let mut many_refs_old_alive_count = 0;
+        let mut multiple_not_newest_count = 0;
 
         let mut remove = Vec::default();
         let mut last_slot = None;
@@ -832,16 +829,16 @@ impl AccountsDb {
             }
             last_slot = Some(shrink_collect.slot);
 
-            let many_refs_old_alive = &mut shrink_collect.alive_accounts.many_refs_old_alive;
-            if many_ref_slots == IncludeManyRefSlots::Skip
+            let multiple_not_newest = &mut shrink_collect.alive_accounts.multiple_not_newest;
+            if include_multiple_newest_slots == IncludeManyRefSlots::Skip
                 && !shrink_collect
                     .alive_accounts
-                    .many_refs_this_is_newest_alive
+                    .multiple_newest
                     .accounts
                     .is_empty()
             {
                 let mut required_packed_slots = min_resulting_packed_slots;
-                if many_refs_old_alive.accounts.is_empty() {
+                if multiple_not_newest.accounts.is_empty() {
                     // if THIS slot can be used as a target slot, then even if we have multi refs
                     // this is ok.
                     required_packed_slots = required_packed_slots.saturating_sub(1);
@@ -850,7 +847,7 @@ impl AccountsDb {
                 if (target_slots_sorted.len() as u64) >= required_packed_slots {
                     // we have prepared to pack enough normal target slots, that form now on we can safely pack
                     // any 'many ref' slots.
-                    many_ref_slots = IncludeManyRefSlots::Include;
+                    include_multiple_newest_slots = IncludeManyRefSlots::Include;
                 } else {
                     // Skip this because too few valid slots have been processed so far.
                     // There are 'many ref newest' accounts in this slot. They must be packed into slots that are >= the current slot value.
@@ -866,17 +863,17 @@ impl AccountsDb {
                 }
             }
 
-            if !many_refs_old_alive.accounts.is_empty() {
-                many_refs_old_alive_count += many_refs_old_alive.accounts.len();
-                many_refs_old_alive.accounts.iter().for_each(|account| {
+            if !multiple_not_newest.accounts.is_empty() {
+                multiple_not_newest_count += multiple_not_newest.accounts.len();
+                multiple_not_newest.accounts.iter().for_each(|account| {
                     // these accounts could indicate clean bugs or low memory conditions where we are forced to flush non-roots
                     log::info!(
                         "ancient append vec: found unpackable account: {}, {}",
-                        many_refs_old_alive.slot,
+                        multiple_not_newest.slot,
                         account.pubkey()
                     );
                 });
-                // There are alive accounts with slot_list_len > 1, where the entry for the account in the index is NOT the highest slot. (`many_refs_old_alive`)
+                // There are alive accounts with slot_list_len > 1, where the entry for the account in the index is NOT the highest slot. (`multiple_not_newest`)
                 // This means this account must remain IN this slot. There could be alive or dead references to this same account in any older slot.
                 // Moving it to a lower slot could move it before an alive or dead entry to this same account.
                 // Moving it to a higher slot could move it ahead of other slots where this account is also alive. We know a higher slot exists that contains this account.
@@ -884,10 +881,10 @@ impl AccountsDb {
                 // This would fail the invariant that the highest slot # where an account exists defines the most recent account.
                 // It could be a clean error or a transient condition that will resolve if we encounter this situation.
                 // The count of these accounts per call will be reported by metrics in `unpackable_slots_count`
-                if shrink_collect.alive_accounts.one_ref.accounts.is_empty()
+                if shrink_collect.alive_accounts.single.accounts.is_empty()
                     && shrink_collect
                         .alive_accounts
-                        .many_refs_this_is_newest_alive
+                        .multiple_newest
                         .accounts
                         .is_empty()
                 {
@@ -896,7 +893,7 @@ impl AccountsDb {
                     continue;
                 }
                 accounts_keep_slots
-                    .insert(shrink_collect.slot, std::mem::take(many_refs_old_alive));
+                    .insert(shrink_collect.slot, std::mem::take(multiple_not_newest));
             } else {
                 // No alive accounts in this slot have a slot_list_len > 1. So, ALL alive accounts in this slot can be written to any other slot
                 // we find convenient. There is NO other instance of any account to conflict with.
@@ -916,7 +913,7 @@ impl AccountsDb {
             .fetch_add(accounts_keep_slots.len() as u64, Ordering::Relaxed);
         self.shrink_ancient_stats
             .many_refs_old_alive
-            .fetch_add(many_refs_old_alive_count as u64, Ordering::Relaxed);
+            .fetch_add(multiple_not_newest_count as u64, Ordering::Relaxed);
         AccountsToCombine {
             accounts_to_combine,
             accounts_keep_slots,
@@ -955,7 +952,7 @@ impl AccountsDb {
     /// These accounts need to be rewritten in their same slot, Ideally with no other accounts in the slot.
     /// Other accounts would have slot_list_len = 1.
     /// slot_list_len = 1 accounts will be combined together with other slots into larger append vecs elsewhere.
-    fn write_ancient_accounts_to_same_slot_multiple_refs<'a, 'b: 'a>(
+    fn write_ancient_accounts_to_same_slot_multiple_not_newest<'a, 'b: 'a>(
         &'b self,
         accounts_to_combine: impl Iterator<Item = &'a AliveAccounts<'a>>,
         write_ancient_accounts: &mut WriteAncientAccounts<'b>,
@@ -1226,7 +1223,7 @@ mod tests {
     /// Give every account backing `storages` a second index entry at slot 0. Sample-storage
     /// slots start at 1, so slot 0 is older than all of them: each account ends up with
     /// slot_list.len() == 2 while its storage slot stays newest
-    fn add_older_ref(db: &AccountsDb, storages: &[Arc<AccountStorageEntry>]) {
+    fn add_older_slot(db: &AccountsDb, storages: &[Arc<AccountStorageEntry>]) {
         storages.iter().for_each(|storage| {
             db.get_unique_accounts_from_storage(storage)
                 .stored_accounts
@@ -1405,13 +1402,13 @@ mod tests {
     }
 
     #[test_case(ACCOUNTS_DB_CONFIG_APPEND_VEC)]
-    fn test_write_ancient_accounts_to_same_slot_multiple_refs_empty(
+    fn test_write_ancient_accounts_to_same_slot_multiple_not_newest_empty(
         accounts_db_config: AccountsDbConfig,
     ) {
         let db = AccountsDb::new_for_tests_with_config(Vec::new(), accounts_db_config);
         let (_storages, _slots, _infos) = get_sample_storages(&db, 0, None);
         let mut write_ancient_accounts = WriteAncientAccounts::default();
-        db.write_ancient_accounts_to_same_slot_multiple_refs(
+        db.write_ancient_accounts_to_same_slot_multiple_not_newest(
             AccountsToCombine::default().accounts_keep_slots.values(),
             &mut write_ancient_accounts,
         );
@@ -1786,7 +1783,7 @@ mod tests {
     }
 
     #[test_case(ACCOUNTS_DB_CONFIG_APPEND_VEC)]
-    fn test_calc_accounts_to_combine_many_refs(accounts_db_config: AccountsDbConfig) {
+    fn test_calc_accounts_to_combine_multiple(accounts_db_config: AccountsDbConfig) {
         // n storages
         // 1 account each
         // all accounts have 1 ref or all accounts have 2 refs
@@ -1798,10 +1795,12 @@ mod tests {
             ideal_storage_size: NonZeroU64::new(alive_bytes_per_slot * 2 + 1).unwrap(),
             ..default_tuning()
         };
-        for many_ref_slots in [IncludeManyRefSlots::Skip, IncludeManyRefSlots::Include] {
+        for include_multiple_newest_slots in
+            [IncludeManyRefSlots::Skip, IncludeManyRefSlots::Include]
+        {
             for num_slots in 0..6 {
                 for unsorted_slots in [false, true] {
-                    for two_refs in [false, true] {
+                    for two_slots in [false, true] {
                         let db = AccountsDb::new_for_tests_with_config(
                             Vec::new(),
                             accounts_db_config.clone(),
@@ -1818,8 +1817,8 @@ mod tests {
                             infos = infos.into_iter().rev().collect();
                         }
 
-                        if two_refs {
-                            add_older_ref(&db, &storages);
+                        if two_slots {
+                            add_older_slot(&db, &storages);
                         }
 
                         let original_results = storages
@@ -1833,17 +1832,17 @@ mod tests {
                         let accounts_to_combine = db.calc_accounts_to_combine(
                             &mut accounts_per_storage,
                             &tuning,
-                            many_ref_slots,
+                            include_multiple_newest_slots,
                         );
                         let expected_accounts_to_combine = if num_slots >= 3
-                            && two_refs
-                            && many_ref_slots == IncludeManyRefSlots::Skip
+                            && two_slots
+                            && include_multiple_newest_slots == IncludeManyRefSlots::Skip
                         {
                             // In this test setup, 2.5 regular slots fits into 1 ancient slot.
-                            // When there are two_refs and when slots < 3, all regular slots can fit into one ancient slots.
+                            // When there are two_slots and when slots < 3, all regular slots can fit into one ancient slots.
                             // Therefore, we should have all slots that can be combined for slots < 3.
                             // However, when slots >=3, we need more than one ancient slots. The pack algorithm will need to first
-                            // find at least [ceiling(num_slots/2.5) - 1] slots that's don't have many_refs before we can pack slots with many_refs.
+                            // find at least [ceiling(num_slots/2.5) - 1] slots that's don't have multiple before we can pack slots with multiple.
                             // Since we decrease the number of alive bytes we'll be writing, when we encounter slots that can't be packed,
                             // we now reduce the number required ideal packed storages. As a result, the last
                             // slot can be packed, and the number of accounts to combine should be 2.
@@ -1861,9 +1860,9 @@ mod tests {
                             });
 
                         log::debug!(
-                            "output slots: {:?}, num_slots: {num_slots}, two_refs: {two_refs}, \
-                             many_refs: {many_ref_slots:?}, expected accounts to combine: \
-                             {expected_accounts_to_combine}, target slots: {:?}, \
+                            "output slots: {:?}, num_slots: {num_slots}, two_slots: {two_slots}, \
+                             multiple: {include_multiple_newest_slots:?}, expected accounts to \
+                             combine: {expected_accounts_to_combine}, target slots: {:?}, \
                              accounts_to_combine: {}",
                             accounts_to_combine.target_slots_sorted,
                             accounts_to_combine.target_slots_sorted,
@@ -1872,8 +1871,8 @@ mod tests {
                         assert_eq!(
                             accounts_to_combine.accounts_to_combine.len(),
                             expected_accounts_to_combine,
-                            "num_slots: {num_slots}, two_refs: {two_refs}, many_refs: \
-                             {many_ref_slots:?}"
+                            "num_slots: {num_slots}, two_slots: {two_slots}, multiple: \
+                             {include_multiple_newest_slots:?}"
                         );
                     }
                 }
@@ -1895,12 +1894,14 @@ mod tests {
             ..default_tuning()
         };
 
-        for many_ref_slots in [IncludeManyRefSlots::Skip, IncludeManyRefSlots::Include] {
+        for include_multiple_newest_slots in
+            [IncludeManyRefSlots::Skip, IncludeManyRefSlots::Include]
+        {
             for add_dead_account in [true, false] {
                 for method in TestWriteMultipleRefs::iter() {
                     for num_slots in 0..3 {
                         for unsorted_slots in [false, true] {
-                            for two_refs in [false, true] {
+                            for two_slots in [false, true] {
                                 let db = AccountsDb::new_for_tests_with_config(
                                     Vec::new(),
                                     accounts_db_config.clone(),
@@ -1920,8 +1921,8 @@ mod tests {
                                     slots_vec = slots.collect::<Vec<_>>()
                                 }
 
-                                if two_refs {
-                                    add_older_ref(&db, &storages);
+                                if two_slots {
+                                    add_older_slot(&db, &storages);
                                 }
 
                                 if add_dead_account {
@@ -1973,21 +1974,22 @@ mod tests {
                                 let accounts_to_combine = db.calc_accounts_to_combine(
                                     &mut accounts_per_storage,
                                     &tuning,
-                                    many_ref_slots,
+                                    include_multiple_newest_slots,
                                 );
                                 // if we are only trying to pack a single slot of multi-refs, it will succeed
                                 // if num_slots = 2 and skip multi-ref slots, accounts_to_combine should contain
                                 // one element (storage), because we don't count alive bytes of skipped accounts
                                 // when we compute required target storages, and the second slot can be combined.
-                                let expected_number_accounts_to_combine = if !two_refs
-                                    || many_ref_slots == IncludeManyRefSlots::Include
+                                let expected_number_accounts_to_combine = if !two_slots
+                                    || include_multiple_newest_slots == IncludeManyRefSlots::Include
                                     || num_slots == 1
                                     || (num_slots == 2
-                                        && many_ref_slots != IncludeManyRefSlots::Skip)
+                                        && include_multiple_newest_slots
+                                            != IncludeManyRefSlots::Skip)
                                 {
                                     num_slots
                                 } else if num_slots == 2
-                                    && many_ref_slots == IncludeManyRefSlots::Skip
+                                    && include_multiple_newest_slots == IncludeManyRefSlots::Skip
                                 {
                                     1
                                 } else {
@@ -1996,12 +1998,12 @@ mod tests {
                                 assert_eq!(
                                     accounts_to_combine.accounts_to_combine.len(),
                                     expected_number_accounts_to_combine,
-                                    "method: {method:?}, num_slots: {num_slots}, two_refs: \
-                                     {two_refs}, many_refs: {many_ref_slots:?}"
+                                    "method: {method:?}, num_slots: {num_slots}, two_slots: \
+                                     {two_slots}, multiple: {include_multiple_newest_slots:?}"
                                 );
 
-                                let expected_target_slots_sorted = if !two_refs
-                                    || many_ref_slots == IncludeManyRefSlots::Include
+                                let expected_target_slots_sorted = if !two_slots
+                                    || include_multiple_newest_slots == IncludeManyRefSlots::Include
                                     || num_slots == 1
                                 {
                                     if unsorted_slots {
@@ -2010,13 +2012,13 @@ mod tests {
                                         slots_vec.clone()
                                     }
                                 } else if num_slots == 2
-                                    && many_ref_slots == IncludeManyRefSlots::Skip
+                                    && include_multiple_newest_slots == IncludeManyRefSlots::Skip
                                 {
                                     vec![1]
                                 } else {
                                     vec![]
                                 };
-                                // all accounts should be in one_ref and all slots are available as target slots
+                                // all accounts should be in single and all slots are available as target slots
                                 assert_eq!(
                                     accounts_to_combine.target_slots_sorted,
                                     expected_target_slots_sorted,
@@ -2026,26 +2028,22 @@ mod tests {
                                     |shrink_collect| {
                                         shrink_collect
                                             .alive_accounts
-                                            .many_refs_old_alive
+                                            .multiple_not_newest
                                             .accounts
                                             .is_empty()
                                     }
                                 ));
-                                if two_refs {
+                                if two_slots {
                                     assert!(accounts_to_combine.accounts_to_combine.iter().all(
                                         |shrink_collect| {
-                                            shrink_collect
-                                                .alive_accounts
-                                                .one_ref
-                                                .accounts
-                                                .is_empty()
+                                            shrink_collect.alive_accounts.single.accounts.is_empty()
                                         }
                                     ));
                                     assert!(accounts_to_combine.accounts_to_combine.iter().all(
                                         |shrink_collect| {
                                             !shrink_collect
                                                 .alive_accounts
-                                                .many_refs_this_is_newest_alive
+                                                .multiple_newest
                                                 .accounts
                                                 .is_empty()
                                         }
@@ -2055,7 +2053,7 @@ mod tests {
                                         |shrink_collect| {
                                             !shrink_collect
                                                 .alive_accounts
-                                                .one_ref
+                                                .single
                                                 .accounts
                                                 .is_empty()
                                         }
@@ -2064,19 +2062,19 @@ mod tests {
                                         |shrink_collect| {
                                             shrink_collect
                                                 .alive_accounts
-                                                .many_refs_this_is_newest_alive
+                                                .multiple_newest
                                                 .accounts
                                                 .is_empty()
                                         }
                                     ));
                                 }
 
-                                // test write_ancient_accounts_to_same_slot_multiple_refs since we built interesting 'AccountsToCombine'
+                                // test write_ancient_accounts_to_same_slot_multiple_not_newest since we built interesting 'AccountsToCombine'
                                 let write_ancient_accounts = match method {
                                     TestWriteMultipleRefs::MultipleRefs => {
                                         let mut write_ancient_accounts =
                                             WriteAncientAccounts::default();
-                                        db.write_ancient_accounts_to_same_slot_multiple_refs(
+                                        db.write_ancient_accounts_to_same_slot_multiple_not_newest(
                                             accounts_to_combine.accounts_keep_slots.values(),
                                             &mut write_ancient_accounts,
                                         );
@@ -2106,7 +2104,7 @@ mod tests {
         // with 2 accounts
         // 1 with 1 ref
         // 1 with 2 refs (and the other ref is from a newer slot)
-        // So, the other alive ref will cause the account with 2 refs to be put into many_refs_old_alive and then accounts_keep_slots
+        // So, the other alive ref will cause the account with 2 refs to be put into multiple_not_newest and then accounts_keep_slots
         for method in TestWriteMultipleRefs::iter() {
             let db = AccountsDb::new_for_tests_with_config(Vec::new(), accounts_db_config.clone());
             let num_slots = 1;
@@ -2119,35 +2117,35 @@ mod tests {
                 .iter()
                 .map(|store| db.get_unique_accounts_from_storage(store))
                 .collect::<Vec<_>>();
-            let pk_with_1_ref = solana_pubkey::new_rand();
+            let pk_with_1_slot = solana_pubkey::new_rand();
             let slot1 = slots.start;
-            let account_with_2_refs = original_results
+            let account_with_2_slots = original_results
                 .first()
                 .unwrap()
                 .stored_accounts
                 .first()
                 .unwrap();
-            let account_shared_data_with_2_refs =
-                get_account_from_account_from_storage(account_with_2_refs, &db, slot1);
-            let pk_with_2_refs = account_with_2_refs.pubkey();
-            let mut account_with_1_ref = account_shared_data_with_2_refs.clone();
-            account_with_1_ref.checked_add_lamports(1).unwrap();
+            let account_shared_data_with_2_slots =
+                get_account_from_account_from_storage(account_with_2_slots, &db, slot1);
+            let pk_with_2_slots = account_with_2_slots.pubkey();
+            let mut account_with_1_slot = account_shared_data_with_2_slots.clone();
+            account_with_1_slot.checked_add_lamports(1).unwrap();
             append_single_account_with_default_hash(
                 &storage,
-                &pk_with_1_ref,
-                &account_with_1_ref,
+                &pk_with_1_slot,
+                &account_with_1_slot,
                 true,
                 Some(&db.accounts_index),
             );
             // add the account with 2 refs into the storage we're ignoring.
             // The storage we're ignoring has a higher slot.
-            // The index entry for pk_with_2_refs will have both slots in it.
+            // The index entry for pk_with_2_slots will have both slots in it.
             // The slot of `storage` is lower than the slot of `ignored_storage`.
             // But, both are 'alive', aka in the index.
             append_single_account_with_default_hash(
                 &ignored_storage,
-                pk_with_2_refs,
-                &account_shared_data_with_2_refs,
+                pk_with_2_slots,
+                &account_shared_data_with_2_slots,
                 true,
                 Some(&db.accounts_index),
             );
@@ -2167,7 +2165,7 @@ mod tests {
             );
             let slots_vec = slots.collect::<Vec<_>>();
             assert_eq!(accounts_to_combine.accounts_to_combine.len(), num_slots);
-            // all accounts should be in many_refs
+            // all accounts should be in multiple
             let mut accounts_keep = accounts_to_combine
                 .accounts_keep_slots
                 .keys()
@@ -2186,34 +2184,34 @@ mod tests {
                     .iter()
                     .map(|meta| meta.pubkey())
                     .collect::<Vec<_>>(),
-                vec![pk_with_2_refs]
+                vec![pk_with_2_slots]
             );
             assert_eq!(accounts_to_combine.accounts_to_combine.len(), 1);
-            let one_ref_accounts = &accounts_to_combine
+            let one_slot_accounts = &accounts_to_combine
                 .accounts_to_combine
                 .first()
                 .unwrap()
                 .alive_accounts
-                .one_ref
+                .single
                 .accounts;
-            let one_ref_accounts_account_shared_data = one_ref_accounts
+            let one_slot_accounts_account_shared_data = one_slot_accounts
                 .iter()
                 .map(|account| get_account_from_account_from_storage(account, &db, slot1))
                 .collect::<Vec<_>>();
 
             assert_eq!(
-                one_ref_accounts
+                one_slot_accounts
                     .iter()
                     .map(|meta| meta.pubkey())
                     .collect::<Vec<_>>(),
-                vec![&pk_with_1_ref]
+                vec![&pk_with_1_slot]
             );
             assert_eq!(
-                one_ref_accounts_account_shared_data
+                one_slot_accounts_account_shared_data
                     .iter()
                     .map(create_account_shared_data)
                     .collect::<Vec<_>>(),
-                vec![account_with_1_ref]
+                vec![account_with_1_slot]
             );
             assert!(
                 accounts_to_combine
@@ -2221,7 +2219,7 @@ mod tests {
                     .iter()
                     .all(|shrink_collect| shrink_collect
                         .alive_accounts
-                        .many_refs_this_is_newest_alive
+                        .multiple_newest
                         .accounts
                         .is_empty())
             );
@@ -2233,16 +2231,16 @@ mod tests {
                     .iter()
                     .all(|shrink_collect| shrink_collect
                         .alive_accounts
-                        .many_refs_old_alive
+                        .multiple_not_newest
                         .accounts
                         .is_empty())
             );
 
-            // test write_ancient_accounts_to_same_slot_multiple_refs since we built interesting 'AccountsToCombine'
+            // test write_ancient_accounts_to_same_slot_multiple_not_newest since we built interesting 'AccountsToCombine'
             let write_ancient_accounts = match method {
                 TestWriteMultipleRefs::MultipleRefs => {
                     let mut write_ancient_accounts = WriteAncientAccounts::default();
-                    db.write_ancient_accounts_to_same_slot_multiple_refs(
+                    db.write_ancient_accounts_to_same_slot_multiple_not_newest(
                         accounts_to_combine.accounts_keep_slots.values(),
                         &mut write_ancient_accounts,
                     );
@@ -2293,11 +2291,11 @@ mod tests {
                 .new_storage()
                 .accounts
                 .get_stored_account_callback(0, |account| {
-                    assert_eq!(account.pubkey(), pk_with_2_refs);
+                    assert_eq!(account.pubkey(), pk_with_2_slots);
                     create_account_shared_data(&account)
                 })
                 .unwrap();
-            assert_eq!(account, account_shared_data_with_2_refs);
+            assert_eq!(account, account_shared_data_with_2_slots);
         }
     }
 
@@ -2317,26 +2315,26 @@ mod tests {
                 .map(|store| db.get_unique_accounts_from_storage(store))
                 .collect::<Vec<_>>();
             // add an older index entry for the sample account, giving it 2 refs.
-            // `pk_with_1_ref` is appended below, so it only gets the 1 ref.
-            add_older_ref(&db, &storages);
+            // `pk_with_1_slot` is appended below, so it only gets the 1 ref.
+            add_older_slot(&db, &storages);
             let storage = storages.first().unwrap().clone();
-            let pk_with_1_ref = solana_pubkey::new_rand();
+            let pk_with_1_slot = solana_pubkey::new_rand();
             let slot1 = slots.start;
-            let account_with_2_refs = original_results
+            let account_with_2_slots = original_results
                 .first()
                 .unwrap()
                 .stored_accounts
                 .first()
                 .unwrap();
-            let account_shared_data_with_2_refs =
-                get_account_from_account_from_storage(account_with_2_refs, &db, slot1);
-            let pk_with_2_refs = account_with_2_refs.pubkey();
-            let mut account_with_1_ref = account_shared_data_with_2_refs.clone();
-            _ = account_with_1_ref.checked_add_lamports(1);
+            let account_shared_data_with_2_slots =
+                get_account_from_account_from_storage(account_with_2_slots, &db, slot1);
+            let pk_with_2_slots = account_with_2_slots.pubkey();
+            let mut account_with_1_slot = account_shared_data_with_2_slots.clone();
+            _ = account_with_1_slot.checked_add_lamports(1);
             append_single_account_with_default_hash(
                 &storage,
-                &pk_with_1_ref,
-                &account_with_1_ref,
+                &pk_with_1_slot,
+                &account_with_1_slot,
                 true,
                 Some(&db.accounts_index),
             );
@@ -2356,7 +2354,7 @@ mod tests {
             );
             let slots_vec = slots.collect::<Vec<_>>();
             assert_eq!(accounts_to_combine.accounts_to_combine.len(), num_slots);
-            // all accounts should be in many_refs_this_is_newest_alive
+            // all accounts should be in multiple_newest
             let mut accounts_keep = accounts_to_combine
                 .accounts_keep_slots
                 .keys()
@@ -2373,38 +2371,38 @@ mod tests {
                     .first()
                     .unwrap()
                     .alive_accounts
-                    .many_refs_this_is_newest_alive
+                    .multiple_newest
                     .accounts
                     .iter()
                     .map(|meta| meta.pubkey())
                     .collect::<Vec<_>>(),
-                vec![pk_with_2_refs]
+                vec![pk_with_2_slots]
             );
             assert_eq!(accounts_to_combine.accounts_to_combine.len(), 1);
-            let one_ref_accounts = &accounts_to_combine
+            let one_slot_accounts = &accounts_to_combine
                 .accounts_to_combine
                 .first()
                 .unwrap()
                 .alive_accounts
-                .one_ref
+                .single
                 .accounts;
-            let one_ref_accounts_account_shared_data = one_ref_accounts
+            let one_slot_accounts_account_shared_data = one_slot_accounts
                 .iter()
                 .map(|account| get_account_from_account_from_storage(account, &db, slot1))
                 .collect::<Vec<_>>();
             assert_eq!(
-                one_ref_accounts
+                one_slot_accounts
                     .iter()
                     .map(|meta| meta.pubkey())
                     .collect::<Vec<_>>(),
-                vec![&pk_with_1_ref]
+                vec![&pk_with_1_slot]
             );
             assert_eq!(
-                one_ref_accounts_account_shared_data
+                one_slot_accounts_account_shared_data
                     .iter()
                     .map(create_account_shared_data)
                     .collect::<Vec<_>>(),
-                vec![account_with_1_ref]
+                vec![account_with_1_slot]
             );
             assert!(
                 accounts_to_combine
@@ -2412,16 +2410,16 @@ mod tests {
                     .iter()
                     .all(|shrink_collect| !shrink_collect
                         .alive_accounts
-                        .many_refs_this_is_newest_alive
+                        .multiple_newest
                         .accounts
                         .is_empty())
             );
 
-            // test write_ancient_accounts_to_same_slot_multiple_refs since we built interesting 'AccountsToCombine'
+            // test write_ancient_accounts_to_same_slot_multiple_not_newest since we built interesting 'AccountsToCombine'
             let write_ancient_accounts = match method {
                 TestWriteMultipleRefs::MultipleRefs => {
                     let mut write_ancient_accounts = WriteAncientAccounts::default();
-                    db.write_ancient_accounts_to_same_slot_multiple_refs(
+                    db.write_ancient_accounts_to_same_slot_multiple_not_newest(
                         accounts_to_combine.accounts_keep_slots.values(),
                         &mut write_ancient_accounts,
                     );
@@ -2450,8 +2448,11 @@ mod tests {
                 })
                 .expect("must scan accounts storage");
             assert_eq!(count, 2);
-            assert_eq!(accounts_shrunk_same_slot.0, *pk_with_2_refs);
-            assert_eq!(accounts_shrunk_same_slot.1, account_shared_data_with_2_refs);
+            assert_eq!(accounts_shrunk_same_slot.0, *pk_with_2_slots);
+            assert_eq!(
+                accounts_shrunk_same_slot.1,
+                account_shared_data_with_2_slots
+            );
         }
     }
 
@@ -3824,17 +3825,12 @@ mod tests {
                                 ),
                             )];
                             alive_accounts.add(&account, &slot_list);
-                            assert!(!alive_accounts.one_ref.accounts.is_empty());
-                            assert!(alive_accounts.many_refs_old_alive.accounts.is_empty());
-                            assert!(
-                                alive_accounts
-                                    .many_refs_this_is_newest_alive
-                                    .accounts
-                                    .is_empty()
-                            );
+                            assert!(!alive_accounts.single.accounts.is_empty());
+                            assert!(alive_accounts.multiple_not_newest.accounts.is_empty());
+                            assert!(alive_accounts.multiple_newest.accounts.is_empty());
                         }
                         1 => {
-                            // multiple slot list, this is NOT newest alive, so many_refs_old_alive
+                            // multiple slot list, this is NOT newest alive, so multiple_not_newest
                             let slot_list = vec![
                                 (
                                     slot,
@@ -3852,14 +3848,9 @@ mod tests {
                                 ),
                             ];
                             alive_accounts.add(&account, &slot_list);
-                            assert!(alive_accounts.one_ref.accounts.is_empty());
-                            assert!(!alive_accounts.many_refs_old_alive.accounts.is_empty());
-                            assert!(
-                                alive_accounts
-                                    .many_refs_this_is_newest_alive
-                                    .accounts
-                                    .is_empty()
-                            );
+                            assert!(alive_accounts.single.accounts.is_empty());
+                            assert!(!alive_accounts.multiple_not_newest.accounts.is_empty());
+                            assert!(alive_accounts.multiple_newest.accounts.is_empty());
                         }
                         2 => {
                             // multiple slot list, this is newest
@@ -3880,14 +3871,9 @@ mod tests {
                                 ),
                             ];
                             alive_accounts.add(&account, &slot_list);
-                            assert!(alive_accounts.one_ref.accounts.is_empty());
-                            assert!(alive_accounts.many_refs_old_alive.accounts.is_empty());
-                            assert!(
-                                !alive_accounts
-                                    .many_refs_this_is_newest_alive
-                                    .accounts
-                                    .is_empty()
-                            );
+                            assert!(alive_accounts.single.accounts.is_empty());
+                            assert!(alive_accounts.multiple_not_newest.accounts.is_empty());
+                            assert!(!alive_accounts.multiple_newest.accounts.is_empty());
                         }
                         _ => {
                             panic!("unexpected");
@@ -3898,7 +3884,7 @@ mod tests {
     }
 
     #[test]
-    fn test_many_ref_accounts_can_be_moved() {
+    fn test_multiple_newest_can_be_moved() {
         let tuning = PackedAncientStorageTuning {
             // only allow 10k slots old enough to be ancient
             max_ancient_slots: 10_000,
@@ -3909,58 +3895,58 @@ mod tests {
         };
 
         // nothing to move, so no problem fitting it
-        let many_refs_newest = vec![];
+        let multiple_newest = vec![];
         let target_slots_sorted = vec![];
-        assert!(AccountsDb::many_ref_accounts_can_be_moved(
-            &many_refs_newest,
+        assert!(AccountsDb::multiple_newest_can_be_moved(
+            &multiple_newest,
             &target_slots_sorted,
             &tuning
         ));
         // something to move, no target slots, so can't fit
         let slot = 1;
-        let many_refs_newest = vec![AliveAccounts {
+        let multiple_newest = vec![AliveAccounts {
             bytes: 1,
             slot,
             accounts: Vec::default(),
         }];
-        assert!(!AccountsDb::many_ref_accounts_can_be_moved(
-            &many_refs_newest,
+        assert!(!AccountsDb::multiple_newest_can_be_moved(
+            &multiple_newest,
             &target_slots_sorted,
             &tuning
         ));
 
         // something to move, 1 target slot, so can fit
         let target_slots_sorted = vec![slot];
-        assert!(AccountsDb::many_ref_accounts_can_be_moved(
-            &many_refs_newest,
+        assert!(AccountsDb::multiple_newest_can_be_moved(
+            &multiple_newest,
             &target_slots_sorted,
             &tuning
         ));
 
         // too much to move to 1 target slot, so can't fit
-        let many_refs_newest = vec![AliveAccounts {
+        let multiple_newest = vec![AliveAccounts {
             bytes: tuning.ideal_storage_size.get() as usize,
             slot,
             accounts: Vec::default(),
         }];
-        assert!(!AccountsDb::many_ref_accounts_can_be_moved(
-            &many_refs_newest,
+        assert!(!AccountsDb::multiple_newest_can_be_moved(
+            &multiple_newest,
             &target_slots_sorted,
             &tuning
         ));
 
         // more than 1 slot to move, 2 target slots, so can fit
         let target_slots_sorted = vec![slot, slot + 1];
-        assert!(AccountsDb::many_ref_accounts_can_be_moved(
-            &many_refs_newest,
+        assert!(AccountsDb::multiple_newest_can_be_moved(
+            &multiple_newest,
             &target_slots_sorted,
             &tuning
         ));
 
         // lowest target slot is below required slot
         let target_slots_sorted = vec![slot - 1, slot];
-        assert!(!AccountsDb::many_ref_accounts_can_be_moved(
-            &many_refs_newest,
+        assert!(!AccountsDb::multiple_newest_can_be_moved(
+            &multiple_newest,
             &target_slots_sorted,
             &tuning
         ));

@@ -146,11 +146,11 @@ pub(crate) struct AliveAccounts<'a> {
 #[derive(Debug)]
 pub(crate) struct ShrinkCollectAliveSeparatedByRefs<'a> {
     /// accounts where slot_list_len = 1
-    pub(crate) one_ref: AliveAccounts<'a>,
+    pub(crate) single: AliveAccounts<'a>,
     /// account where slot_list_len > 1, but this slot contains the alive entry with the highest slot
-    pub(crate) many_refs_this_is_newest_alive: AliveAccounts<'a>,
+    pub(crate) multiple_newest: AliveAccounts<'a>,
     /// account where slot_list_len > 1, and this slot is NOT the highest alive entry in the index for the pubkey
-    pub(crate) many_refs_old_alive: AliveAccounts<'a>,
+    pub(crate) multiple_not_newest: AliveAccounts<'a>,
 }
 
 pub(crate) trait ShrinkCollectRefs<'a>: Sync + Send {
@@ -191,45 +191,44 @@ impl<'a> ShrinkCollectRefs<'a> for AliveAccounts<'a> {
 
 impl<'a> ShrinkCollectRefs<'a> for ShrinkCollectAliveSeparatedByRefs<'a> {
     fn collect(&mut self, other: Self) {
-        self.one_ref.collect(other.one_ref);
-        self.many_refs_this_is_newest_alive
-            .collect(other.many_refs_this_is_newest_alive);
-        self.many_refs_old_alive.collect(other.many_refs_old_alive);
+        self.single.collect(other.single);
+        self.multiple_newest.collect(other.multiple_newest);
+        self.multiple_not_newest.collect(other.multiple_not_newest);
     }
     fn with_capacity(capacity: usize, slot: Slot) -> Self {
         Self {
-            one_ref: AliveAccounts::with_capacity(capacity, slot),
-            many_refs_this_is_newest_alive: AliveAccounts::with_capacity(0, slot),
-            many_refs_old_alive: AliveAccounts::with_capacity(0, slot),
+            single: AliveAccounts::with_capacity(capacity, slot),
+            multiple_newest: AliveAccounts::with_capacity(0, slot),
+            multiple_not_newest: AliveAccounts::with_capacity(0, slot),
         }
     }
     fn add(&mut self, account: &'a AccountFromStorage, slot_list: &[(Slot, AccountInfo)]) {
         let other = if slot_list.len() == 1 {
-            &mut self.one_ref
+            &mut self.single
         } else if !slot_list
             .iter()
-            .any(|(slot_list_slot, _info)| slot_list_slot > &self.many_refs_old_alive.slot)
+            .any(|(slot_list_slot, _info)| slot_list_slot > &self.multiple_not_newest.slot)
         {
             // this entry is alive but is newer than any other slot in the index
-            &mut self.many_refs_this_is_newest_alive
+            &mut self.multiple_newest
         } else {
             // This entry is alive but is older than at least one other slot in the index.
             // We would expect clean to get rid of the entry for THIS slot at some point, but clean hasn't done that yet.
-            &mut self.many_refs_old_alive
+            &mut self.multiple_not_newest
         };
         other.add(account, slot_list);
     }
     fn len(&self) -> usize {
-        self.one_ref
+        self.single
             .len()
-            .saturating_add(self.many_refs_old_alive.len())
-            .saturating_add(self.many_refs_this_is_newest_alive.len())
+            .saturating_add(self.multiple_not_newest.len())
+            .saturating_add(self.multiple_newest.len())
     }
     fn alive_bytes(&self) -> usize {
-        self.one_ref
+        self.single
             .alive_bytes()
-            .saturating_add(self.many_refs_old_alive.alive_bytes())
-            .saturating_add(self.many_refs_this_is_newest_alive.alive_bytes())
+            .saturating_add(self.multiple_not_newest.alive_bytes())
+            .saturating_add(self.multiple_newest.alive_bytes())
     }
     fn alive_accounts(&self) -> &Vec<&'a AccountFromStorage> {
         unimplemented!("illegal use");
