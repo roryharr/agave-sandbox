@@ -153,7 +153,7 @@ pub(crate) struct ShrinkCollectAliveSeparatedByRefs<'a> {
     pub(crate) not_newest_duplicate: AliveAccounts<'a>,
 }
 
-pub(crate) trait ShrinkCollectRefs<'a>: Sync + Send {
+pub(crate) trait ShrinkCollector<'a>: Sync + Send {
     fn with_capacity(capacity: usize, slot: Slot) -> Self;
     fn collect(&mut self, other: Self);
     fn add(
@@ -167,7 +167,7 @@ pub(crate) trait ShrinkCollectRefs<'a>: Sync + Send {
     fn alive_accounts(&self) -> &Vec<&'a AccountFromStorage>;
 }
 
-impl<'a> ShrinkCollectRefs<'a> for AliveAccounts<'a> {
+impl<'a> ShrinkCollector<'a> for AliveAccounts<'a> {
     fn collect(&mut self, mut other: Self) {
         self.bytes = self.bytes.saturating_add(other.bytes);
         self.accounts.append(&mut other.accounts);
@@ -199,7 +199,7 @@ impl<'a> ShrinkCollectRefs<'a> for AliveAccounts<'a> {
     }
 }
 
-impl<'a> ShrinkCollectRefs<'a> for ShrinkCollectAliveSeparatedByRefs<'a> {
+impl<'a> ShrinkCollector<'a> for ShrinkCollectAliveSeparatedByRefs<'a> {
     fn collect(&mut self, other: Self) {
         self.no_duplicates.collect(other.no_duplicates);
         self.newest_duplicate.collect(other.newest_duplicate);
@@ -1936,7 +1936,7 @@ impl AccountsDb {
     /// load the account index entry for the first `count` items in `accounts`
     /// store a reference to all alive accounts in `alive_accounts`
     /// return sum of account size for all alive accounts
-    fn load_accounts_index_for_shrink<'a, T: ShrinkCollectRefs<'a>>(
+    fn load_accounts_index_for_shrink<'a, T: ShrinkCollector<'a>>(
         &self,
         accounts: &'a [AccountFromStorage],
         stats: &ShrinkStats,
@@ -2040,7 +2040,7 @@ impl AccountsDb {
 
     /// shared code for shrinking normal slots and combining into ancient append vecs
     /// note 'unique_accounts' is passed by ref so we can return references to data within it, avoiding self-references
-    pub(crate) fn shrink_collect<'a: 'b, 'b, T: ShrinkCollectRefs<'b>>(
+    pub(crate) fn shrink_collect<'a: 'b, 'b, T: ShrinkCollector<'b>>(
         &self,
         store: &'a AccountStorageEntry,
         unique_accounts: &'b mut GetUniqueAccountsResult,
