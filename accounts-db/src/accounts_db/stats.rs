@@ -313,9 +313,9 @@ pub struct ShrinkAncientStats {
     pub bytes_from_must_shrink: AtomicU64,
     pub bytes_from_smallest_storages: AtomicU64,
     pub bytes_from_newest_storages: AtomicU64,
-    pub many_ref_slots_skipped: AtomicU64,
+    pub newest_duplicate_slots_skipped: AtomicU64,
     pub slots_cannot_move_count: AtomicU64,
-    pub many_refs_old_alive: AtomicU64,
+    pub not_newest_duplicate: AtomicU64,
     pub slots_eligible_to_shrink: AtomicU64,
     pub total_dead_bytes: AtomicU64,
     pub total_alive_bytes: AtomicU64,
@@ -753,8 +753,9 @@ impl ShrinkAncientStats {
                 i64
             ),
             (
-                "many_ref_slots_skipped",
-                self.many_ref_slots_skipped.swap(0, Ordering::Relaxed),
+                "newest_duplicate_slots_skipped",
+                self.newest_duplicate_slots_skipped
+                    .swap(0, Ordering::Relaxed),
                 i64
             ),
             (
@@ -763,8 +764,8 @@ impl ShrinkAncientStats {
                 i64
             ),
             (
-                "many_refs_old_alive",
-                self.many_refs_old_alive.swap(0, Ordering::Relaxed),
+                "not_newest_duplicate",
+                self.not_newest_duplicate.swap(0, Ordering::Relaxed),
                 i64
             ),
             ("slot", self.slot.load(Ordering::Relaxed), i64),

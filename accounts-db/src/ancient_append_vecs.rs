@@ -856,7 +856,7 @@ impl AccountsDb {
                     // We require `min_resulting_packed_slots` target slots. If we have not encountered enough slots already without `newest_duplicate` accounts, then keep trying.
                     // On the next pass, THIS slot will be older relative to newly ancient slot #s, so those newly ancient slots will be higher in this list.
                     self.shrink_ancient_stats
-                        .many_ref_slots_skipped
+                        .newest_duplicate_slots_skipped
                         .fetch_add(1, Ordering::Relaxed);
                     // since we're skipping this one, we don't count it as required target storages
                     alive_bytes = alive_bytes.saturating_sub(shrink_collect.alive_total_bytes);
@@ -918,7 +918,7 @@ impl AccountsDb {
             .slots_cannot_move_count
             .fetch_add(accounts_keep_slots.len() as u64, Ordering::Relaxed);
         self.shrink_ancient_stats
-            .many_refs_old_alive
+            .not_newest_duplicate
             .fetch_add(not_newest_duplicate_count as u64, Ordering::Relaxed);
         AccountsToCombine {
             accounts_to_combine,
