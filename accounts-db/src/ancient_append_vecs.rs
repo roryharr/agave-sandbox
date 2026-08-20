@@ -1223,7 +1223,7 @@ mod tests {
     /// Give every account backing `storages` a second index entry at slot 0. Sample-storage
     /// slots start at 1, so slot 0 is older than all of them: each account ends up with
     /// slot_list.len() == 2 while its storage slot stays newest
-    fn add_older_ref(db: &AccountsDb, storages: &[Arc<AccountStorageEntry>]) {
+    fn add_older_entry(db: &AccountsDb, storages: &[Arc<AccountStorageEntry>]) {
         storages.iter().for_each(|storage| {
             db.get_unique_accounts_from_storage(storage)
                 .stored_accounts
@@ -1702,7 +1702,7 @@ mod tests {
     fn test_finish_combine_ancient_slots_packed_internal(accounts_db_config: AccountsDbConfig) {
         // n storages
         // 1 account each
-        // all accounts have 1 ref
+        // all accounts are in 1 slot
         // nothing shrunk, so all storages and roots should be removed
         // or all slots shrunk so no roots or storages should be removed
         for in_shrink_candidate_slots in [false, true] {
@@ -1775,10 +1775,10 @@ mod tests {
     }
 
     #[test_case(ACCOUNTS_DB_CONFIG_APPEND_VEC)]
-    fn test_calc_accounts_to_combine_many_refs(accounts_db_config: AccountsDbConfig) {
+    fn test_calc_accounts_to_combine_multiple(accounts_db_config: AccountsDbConfig) {
         // n storages
         // 1 account each
-        // all accounts have 1 ref or all accounts have 2 refs
+        // all accounts are in 1 slot or all accounts are in 2 slots
         let data_size = 48;
         let alive_bytes_per_slot = AppendVec::calculate_stored_size(data_size as usize) as u64;
 
@@ -1790,7 +1790,7 @@ mod tests {
         for many_ref_slots in [IncludeManyRefSlots::Skip, IncludeManyRefSlots::Include] {
             for num_slots in 0..6 {
                 for unsorted_slots in [false, true] {
-                    for two_refs in [false, true] {
+                    for two_slots in [false, true] {
                         let db = AccountsDb::new_for_tests_with_config(
                             Vec::new(),
                             accounts_db_config.clone(),
@@ -1811,7 +1811,7 @@ mod tests {
                             .iter()
                             .map(|store| db.get_unique_accounts_from_storage(store))
                             .collect::<Vec<_>>();
-                        if two_refs {
+                        if two_slots {
                             original_results.iter().for_each(|results| {
                                 results.stored_accounts.iter().for_each(|account| {
                                     db.accounts_index.get_and_then(account.pubkey(), |entry| {
@@ -1835,14 +1835,14 @@ mod tests {
                             many_ref_slots,
                         );
                         let expected_accounts_to_combine = if num_slots >= 3
-                            && two_refs
+                            && two_slots
                             && many_ref_slots == IncludeManyRefSlots::Skip
                         {
                             // In this test setup, 2.5 regular slots fits into 1 ancient slot.
-                            // When there are two_refs and when slots < 3, all regular slots can fit into one ancient slots.
+                            // When there are two_slots and when slots < 3, all regular slots can fit into one ancient slots.
                             // Therefore, we should have all slots that can be combined for slots < 3.
                             // However, when slots >=3, we need more than one ancient slots. The pack algorithm will need to first
-                            // find at least [ceiling(num_slots/2.5) - 1] slots that's don't have many_refs before we can pack slots with many_refs.
+                            // find at least [ceiling(num_slots/2.5) - 1] slots that don't have newest_duplicate accounts before we can pack slots with them.
                             // Since we decrease the number of alive bytes we'll be writing, when we encounter slots that can't be packed,
                             // we now reduce the number required ideal packed storages. As a result, the last
                             // slot can be packed, and the number of accounts to combine should be 2.
@@ -1860,7 +1860,7 @@ mod tests {
                             });
 
                         log::debug!(
-                            "output slots: {:?}, num_slots: {num_slots}, two_refs: {two_refs}, \
+                            "output slots: {:?}, num_slots: {num_slots}, two_slots: {two_slots}, \
                              many_refs: {many_ref_slots:?}, expected accounts to combine: \
                              {expected_accounts_to_combine}, target slots: {:?}, \
                              accounts_to_combine: {}",
@@ -1871,7 +1871,7 @@ mod tests {
                         assert_eq!(
                             accounts_to_combine.accounts_to_combine.len(),
                             expected_accounts_to_combine,
-                            "num_slots: {num_slots}, two_refs: {two_refs}, many_refs: \
+                            "num_slots: {num_slots}, two_slots: {two_slots}, many_refs: \
                              {many_ref_slots:?}"
                         );
                     }
@@ -1884,7 +1884,7 @@ mod tests {
     fn test_calc_accounts_to_combine_simple(accounts_db_config: AccountsDbConfig) {
         // n storages
         // 1 account each
-        // all accounts have 1 ref or all accounts have 2 refs
+        // all accounts are in 1 slot or all accounts are in 2 slots
         let data_size = 48;
         let alive_bytes_per_account = AppendVec::calculate_stored_size(data_size as usize) as u64;
 
@@ -1898,7 +1898,7 @@ mod tests {
             for add_dead_account in [true, false] {
                 for num_slots in 0..3 {
                     for unsorted_slots in [false, true] {
-                        for two_refs in [false, true] {
+                        for two_slots in [false, true] {
                             let db = AccountsDb::new_for_tests_with_config(
                                 Vec::new(),
                                 accounts_db_config.clone(),
@@ -1918,8 +1918,8 @@ mod tests {
                                 slots_vec = slots.collect::<Vec<_>>()
                             }
 
-                            if two_refs {
-                                add_older_ref(&db, &storages);
+                            if two_slots {
+                                add_older_entry(&db, &storages);
                             }
 
                             if add_dead_account {
@@ -1972,11 +1972,11 @@ mod tests {
                                 &tuning,
                                 many_ref_slots,
                             );
-                            // if we are only trying to pack a single slot of multi-refs, it will succeed
-                            // if num_slots = 2 and skip multi-ref slots, accounts_to_combine should contain
+                            // if we are only trying to pack a single slot of duplicates, it will succeed
+                            // if num_slots = 2 and skip slots with duplicates, accounts_to_combine should contain
                             // one element (storage), because we don't count alive bytes of skipped accounts
                             // when we compute required target storages, and the second slot can be combined.
-                            let expected_number_accounts_to_combine = if !two_refs
+                            let expected_number_accounts_to_combine = if !two_slots
                                 || many_ref_slots == IncludeManyRefSlots::Include
                                 || num_slots == 1
                                 || (num_slots == 2 && many_ref_slots != IncludeManyRefSlots::Skip)
@@ -1991,11 +1991,11 @@ mod tests {
                             assert_eq!(
                                 accounts_to_combine.accounts_to_combine.len(),
                                 expected_number_accounts_to_combine,
-                                "num_slots: {num_slots}, two_refs: {two_refs}, many_refs: \
+                                "num_slots: {num_slots}, two_slots: {two_slots}, many_refs: \
                                  {many_ref_slots:?}"
                             );
 
-                            let expected_target_slots_sorted = if !two_refs
+                            let expected_target_slots_sorted = if !two_slots
                                 || many_ref_slots == IncludeManyRefSlots::Include
                                 || num_slots == 1
                             {
@@ -2025,7 +2025,7 @@ mod tests {
                                         .is_empty()
                                 }
                             ));
-                            if two_refs {
+                            if two_slots {
                                 assert!(accounts_to_combine.accounts_to_combine.iter().all(
                                     |shrink_collect| {
                                         shrink_collect
@@ -3766,7 +3766,7 @@ mod tests {
 
                     match i {
                         0 => {
-                            // empty slot list (ignored anyway) because ref_count = 1
+                            // empty slot list (ignored anyway) because there are no duplicates
                             let slot_list = vec![];
                             alive_accounts.add(1, &account, &slot_list);
                             assert!(!alive_accounts.no_duplicates.accounts.is_empty());
@@ -3811,7 +3811,7 @@ mod tests {
                             assert!(alive_accounts.newest_duplicate.accounts.is_empty());
                         }
                         3 => {
-                            // multiple slot list, ref_count=2, this is newest
+                            // multiple slot list, this is newest
                             let slot_list = vec![
                                 (
                                     slot,
