@@ -258,8 +258,8 @@ impl AncientSlotInfos {
             // It will take a lot of time for the pack algorithm to create that many, and that is bad for system performance.
             // This should be a limit that only affects extreme testing environments.
             // We do not stop including entries until we have dealt with all the high slot #s. This allows the algorithm to continue
-            // to make progress each time it is called. There are exceptions that can cause the pack to fail, such as accounts with multiple
-            // refs.
+            // to make progress each time it is called. There are exceptions that can cause the pack to fail, such as accounts with duplicates.
+
             if !info.is_high_slot
                 && (storages_remaining + ancient_storages_required < low_threshold
                     || ancient_storages_required as u64 > u64::from(tuning.max_resulting_storages))
@@ -461,7 +461,7 @@ impl AccountsDb {
             })
             .collect::<Vec<_>>();
 
-        // Sort highest slot to lowest slot. This way, we will put the multi ref accounts with the highest slots in the highest
+        // Sort highest slot to lowest slot. This way, we will put the `newest_duplicate` accounts with the highest slots in the highest
         // packed slot.
         newest_duplicate.sort_unstable_by_key(|b| cmp::Reverse(b.slot));
         metrics.newest_alive_packed_count += newest_duplicate.len();
@@ -480,8 +480,8 @@ impl AccountsDb {
             return;
         }
 
-        // for the accounts which are one ref and can be put anywhere, we want to put the accounts from the LARGEST storages at the end.
-        // This causes us to keep the accounts we're re-packing from already existing ancient storages together with other normal one ref accounts.
+        // for the accounts with no duplicates, which can be put anywhere, we want to put the accounts from the LARGEST storages at the end.
+        // This causes us to keep the accounts we're re-packing from already existing ancient storages together with other accounts that have no duplicates.
         // The alternative could cause us to mix newly ancient slots produced by flush (containing accounts touched more recently) with previously
         // packed ancient storages which over time contained enough dead accounts that the storage needed to be shrunk by being re-packed.
         // The end result of this sort should cause older, colder accounts (previously packed into large storages and then re-packed/shrunk) to
@@ -490,8 +490,8 @@ impl AccountsDb {
             .accounts_to_combine
             .sort_unstable_by_key(|a| a.written_bytes);
 
-        // pack the accounts with 1 ref or refs > 1 but the slot we're packing is the highest alive slot for the pubkey.
-        // Note the `chain` below combining the 2 types of refs.
+        // pack the accounts with no duplicates, and those whose newest duplicate is the slot we're packing.
+        // Note the `chain` below combining them
         let pack = PackedAncientStorage::pack(
             newest_duplicate.iter().chain(
                 accounts_to_combine
@@ -691,7 +691,7 @@ impl AccountsDb {
 
         let mut write_ancient_accounts = write_ancient_accounts.into_inner().unwrap();
 
-        // write new storages where contents were unable to move because ref_count > 1
+        // write new storages where contents were unable to move because a newer duplicate exists
         self.write_ancient_accounts_to_same_slot_not_newest_duplicate(
             accounts_to_combine.accounts_keep_slots.values(),
             &mut write_ancient_accounts,
@@ -775,8 +775,8 @@ impl AccountsDb {
     /// given all accounts per ancient slot, in slots that we want to combine together:
     /// 1. Look up each pubkey in the index
     /// 2. separate, by slot, into:
-    ///    2a. pubkeys with refcount = 1. This means this pubkey exists NOWHERE else in accounts db.
-    ///    2b. pubkeys with refcount > 1
+    ///    2a. pubkeys with no duplicates. This means this pubkey exists NOWHERE else in accounts db.
+    ///    2b. pubkeys with duplicates
     ///
     /// Note that the return value can contain fewer items than 'accounts_per_storage' if we find storages which won't be affected.
     /// 'accounts_per_storage' should be sorted by slot
@@ -841,19 +841,19 @@ impl AccountsDb {
             {
                 let mut required_packed_slots = min_resulting_packed_slots;
                 if not_newest_duplicate.accounts.is_empty() {
-                    // if THIS slot can be used as a target slot, then even if we have multi refs
+                    // if THIS slot can be used as a target slot, then even if we have duplicates
                     // this is ok.
                     required_packed_slots = required_packed_slots.saturating_sub(1);
                 }
 
                 if (target_slots_sorted.len() as u64) >= required_packed_slots {
                     // we have prepared to pack enough normal target slots, that form now on we can safely pack
-                    // any 'many ref' slots.
+                    // any slots holding `newest_duplicate` accounts.
                     many_ref_slots = IncludeManyRefSlots::Include;
                 } else {
                     // Skip this because too few valid slots have been processed so far.
-                    // There are 'many ref newest' accounts in this slot. They must be packed into slots that are >= the current slot value.
-                    // We require `min_resulting_packed_slots` target slots. If we have not encountered enough slots already without `many ref newest` accounts, then keep trying.
+                    // There are `newest_duplicate` accounts in this slot. They must be packed into slots that are >= the current slot value.
+                    // We require `min_resulting_packed_slots` target slots. If we have not encountered enough slots already without `newest_duplicate` accounts, then keep trying.
                     // On the next pass, THIS slot will be older relative to newly ancient slot #s, so those newly ancient slots will be higher in this list.
                     self.shrink_ancient_stats
                         .many_ref_slots_skipped
@@ -894,14 +894,14 @@ impl AccountsDb {
                         .accounts
                         .is_empty()
                 {
-                    // all accounts in this append vec are alive and have > 1 ref, so nothing to be done for this append vec
+                    // all accounts in this append vec are alive and have a newer duplicate, so nothing to be done for this append vec
                     remove.push(i);
                     continue;
                 }
                 accounts_keep_slots
                     .insert(shrink_collect.slot, std::mem::take(not_newest_duplicate));
             } else {
-                // No alive accounts in this slot have a ref_count > 1. So, ALL alive accounts in this slot can be written to any other slot
+                // No alive accounts in this slot have duplicates. So, ALL alive accounts in this slot can be written to any other slot
                 // we find convenient. There is NO other instance of any account to conflict with.
                 target_slots_sorted.push(shrink_collect.slot);
             }
@@ -954,10 +954,10 @@ impl AccountsDb {
 
     /// For each slot and alive accounts in 'accounts_to_combine'
     /// create a PackedAncientStorage that only contains the given alive accounts.
-    /// This will represent only the accounts with ref_count > 1 from the original storage.
+    /// This will represent only the `not_newest_duplicate` accounts from the original storage.
     /// These accounts need to be rewritten in their same slot, Ideally with no other accounts in the slot.
-    /// Other accounts would have ref_count = 1.
-    /// ref_count = 1 accounts will be combined together with other slots into larger append vecs elsewhere.
+    /// Other accounts have no duplicates.
+    /// Those accounts will be combined together with other slots into larger append vecs elsewhere.
     fn write_ancient_accounts_to_same_slot_not_newest_duplicate<'a, 'b: 'a>(
         &'b self,
         accounts_to_combine: impl Iterator<Item = &'a AliveAccounts<'a>>,
@@ -979,15 +979,15 @@ impl AccountsDb {
 struct AccountsToCombine<'a> {
     /// slots and alive accounts that must remain in the slot they are currently in
     /// because the account exists in more than 1 slot in accounts db
-    /// This hashmap contains an entry for each slot that contains at least one account with ref_count > 1.
-    /// The value of the entry is all alive accounts in that slot whose ref_count > 1.
-    /// Any OTHER accounts in that slot whose ref_count = 1 are in 'accounts_to_combine' because they can be moved
+    /// This hashmap contains an entry for each slot that contains at least one `not_newest_duplicate` account.
+    /// The value of the entry is all alive accounts in that slot that have a newer duplicate.
+    /// Any OTHER accounts in that slot with no duplicates are in 'accounts_to_combine' because they can be moved
     /// to any slot.
-    /// We want to keep the ref_count > 1 accounts by themselves, expecting the multiple ref_counts will be resolved
+    /// We want to keep those accounts by themselves, expecting the duplicates will be resolved
     /// soon and we can clean the duplicates up (which maybe THIS one).
     accounts_keep_slots: HashMap<Slot, AliveAccounts<'a>>,
     /// all the rest of alive accounts that can move slots and should be combined
-    /// This includes all accounts with ref_count = 1 from the slots in 'accounts_keep_slots'.
+    /// This includes all accounts with no duplicates from the slots in 'accounts_keep_slots'.
     /// There is one entry here for each storage we are processing. Even if all accounts are in 'accounts_keep_slots'.
     accounts_to_combine: Vec<ShrinkCollect<ShrinkCollectAliveSeparatedByRefs<'a>>>,
     /// slots that contain alive accounts that can move into ANY other ancient slot
@@ -996,7 +996,7 @@ struct AccountsToCombine<'a> {
     /// The rest will become dead slots with no accounts in them.
     /// Sort order is lowest to highest.
     target_slots_sorted: Vec<Slot>,
-    /// when scanning, this many slots contained accounts that could not be packed because accounts with ref_count > 1 existed.
+    /// when scanning, this many slots contained accounts that could not be packed because `newest_duplicate` accounts existed.
     unpackable_slots_count: usize,
 }
 
