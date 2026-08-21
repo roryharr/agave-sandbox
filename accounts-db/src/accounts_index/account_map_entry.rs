@@ -7,6 +7,7 @@ use {
     solana_clock::Slot,
     std::{
         fmt::Debug,
+        mem,
         ops::{Deref, DerefMut},
         sync::{
             RwLock, RwLockReadGuard, RwLockWriteGuard,
@@ -28,21 +29,13 @@ pub struct AccountMapEntry<T> {
 }
 
 // Ensure the size of AccountMapEntry never changes unexpectedly
-const _: () = assert!(size_of::<AccountMapEntry<AccountInfo>>() == 48);
+const _: () = assert!(size_of::<AccountMapEntry<AccountInfo>>() == 40);
 
 impl<T: IndexValue> AccountMapEntry<T> {
     pub fn new(slot_list: SlotList<T>, meta: AccountMapEntryMeta) -> Self {
         Self {
             slot_list: RwLock::new(slot_list),
             meta,
-        }
-    }
-
-    #[cfg(test)]
-    pub(super) fn empty_for_tests() -> Self {
-        Self {
-            slot_list: RwLock::default(),
-            meta: AccountMapEntryMeta::default(),
         }
     }
 
@@ -122,7 +115,7 @@ impl<T> SlotListReadGuard<'_, T> {
     where
         T: Copy,
     {
-        self.0.iter().copied().collect()
+        *self.0
     }
 }
 
@@ -131,30 +124,14 @@ impl<T> SlotListReadGuard<'_, T> {
 pub struct SlotListWriteGuard<'a, T>(RwLockWriteGuard<'a, SlotList<T>>);
 
 impl<T> SlotListWriteGuard<'_, T> {
-    /// Append element to the end of slot list
-    pub fn push(&mut self, item: SlotListItem<T>) {
-        self.0.push(item);
-    }
-
-    /// Retains only the elements specified by the predicate.
-    ///
-    /// Returns number of preserved elements (size of the slot list after processing).
-    pub fn retain_and_count<F>(&mut self, f: F) -> usize
-    where
-        F: FnMut(&mut SlotListItem<T>) -> bool,
-    {
-        self.0.retain(f);
-        self.0.len()
-    }
-
-    /// Clears the list, removing all elements.
-    pub fn clear(&mut self) {
-        self.0.clear();
+    /// Replace the entry with `item`, returning the entry that was there
+    pub fn replace(&mut self, item: SlotListItem<T>) -> SlotListItem<T> {
+        mem::replace(&mut self.0[0], item)
     }
 
     #[cfg(test)]
-    pub fn assign(&mut self, value: impl IntoIterator<Item = SlotListItem<T>>) {
-        *self.0 = value.into_iter().collect();
+    pub fn assign(&mut self, value: SlotListItem<T>) {
+        self.0[0] = value;
     }
 
     #[cfg(test)]
@@ -162,7 +139,7 @@ impl<T> SlotListWriteGuard<'_, T> {
     where
         T: Copy,
     {
-        self.0.iter().copied().collect()
+        *self.0
     }
 }
 
