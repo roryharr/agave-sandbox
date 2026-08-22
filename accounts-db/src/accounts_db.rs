@@ -2080,11 +2080,7 @@ impl AccountsDb {
         let mut unique_accounts =
             self.get_unique_accounts_from_storage_for_shrink(&store, &self.shrink_stats);
         debug!("do_shrink_slot_store: slot: {slot}");
-        let shrink_collect = self.shrink_collect(
-            &store,
-            &mut unique_accounts,
-            &self.shrink_stats,
-        );
+        let shrink_collect = self.shrink_collect(&store, &mut unique_accounts, &self.shrink_stats);
 
         let total_rewrite_bytes =
             shrink_collect.alive_total_bytes + shrink_collect.tombstones_total_bytes;
