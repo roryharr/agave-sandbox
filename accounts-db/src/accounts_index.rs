@@ -742,10 +742,7 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> AccountsIndex<T, U> {
     }
 
     /// use Vec<> because the internal vecs are already allocated per bin
-    pub(crate) fn take_startup_duplicates(
-        &self,
-        f: impl Fn(Vec<(Slot, Pubkey, T)>) + Sync + Send,
-    ) {
+    pub(crate) fn take_startup_duplicates(&self, f: impl Fn(Vec<(Slot, Pubkey, T)>) + Sync + Send) {
         (0..self.bins())
             .into_par_iter()
             .map(|pubkey_bin| self.account_maps[pubkey_bin].take_startup_duplicates())
@@ -869,7 +866,6 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> AccountsIndex<T, U> {
         // `None` means the pubkey is not in the index; nothing was removed.
         .unwrap_or(false)
     }
-
 }
 
 /// modes the system can be in
@@ -2039,8 +2035,7 @@ mod tests {
         }
     }
 
-    impl<T: IndexValue> AccountsIndex<T, T> {
-    }
+    impl<T: IndexValue> AccountsIndex<T, T> {}
 
     #[test]
     fn test_handle_dead_keys_return() {

@@ -9,8 +9,7 @@ use {
         account_storage::ShrinkInProgress,
         account_storage_entry::AccountStorageEntry,
         accounts_db::{
-            AccountFromStorage, AccountsDb, AliveAccounts,
-            GetUniqueAccountsResult, ShrinkCollect,
+            AccountFromStorage, AccountsDb, AliveAccounts, GetUniqueAccountsResult, ShrinkCollect,
             stats::{ShrinkAncientStats, SquashStatsSub},
         },
         active_stats::ActiveStatItem,
@@ -334,7 +333,6 @@ struct WriteAncientAccounts<'a> {
     metrics: SquashStatsSub,
 }
 
-
 impl AccountsDb {
     /// Combine account data from storages in 'sorted_slots' into packed storages.
     /// This keeps us from accumulating storages for each slot older than an epoch.
@@ -406,8 +404,7 @@ impl AccountsDb {
                 &ancient_slot_infos.all_infos[..],
             );
 
-        let mut accounts_to_combine =
-            self.calc_accounts_to_combine(&mut accounts_per_storage);
+        let mut accounts_to_combine = self.calc_accounts_to_combine(&mut accounts_per_storage);
 
         // for the accounts which can be put anywhere, we want to put the accounts from the LARGEST storages at the end.
         // This causes us to keep the accounts we're re-packing from already existing ancient storages together with other normal accounts.
@@ -757,7 +754,6 @@ impl AccountsDb {
             .fetch_add(1, Ordering::Relaxed);
         self.write_ancient_accounts(*bytes_total, accounts_to_write, write_ancient_accounts)
     }
-
 }
 
 /// hold all alive accounts to be shrunk and/or combined
