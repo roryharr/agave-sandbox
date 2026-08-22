@@ -142,31 +142,7 @@ pub(crate) struct AliveAccounts<'a> {
     pub(crate) bytes: usize,
 }
 
-/// separate alive accounts by whether a newer duplicate of the account exists
-#[derive(Debug)]
-pub(crate) struct AliveAccountsSeparated<'a> {
-    /// can be packed into any slot
-    pub(crate) no_duplicates: AliveAccounts<'a>,
-    /// can only be packed into a slot >= this one
-    pub(crate) newest_duplicate: AliveAccounts<'a>,
-    /// must stay in this slot
-    pub(crate) not_newest_duplicate: AliveAccounts<'a>,
-}
-
-pub(crate) trait ShrinkCollector<'a>: Sync + Send {
-    fn with_capacity(capacity: usize, slot: Slot) -> Self;
-    fn collect(&mut self, other: Self);
-    fn add(&mut self, account: &'a AccountFromStorage, slot_list: &[(Slot, AccountInfo)]);
-    fn len(&self) -> usize;
-    fn alive_bytes(&self) -> usize;
-    fn alive_accounts(&self) -> &Vec<&'a AccountFromStorage>;
-}
-
-impl<'a> ShrinkCollector<'a> for AliveAccounts<'a> {
-    fn collect(&mut self, mut other: Self) {
-        self.bytes = self.bytes.saturating_add(other.bytes);
-        self.accounts.append(&mut other.accounts);
-    }
+impl<'a> AliveAccounts<'a> {
     fn with_capacity(capacity: usize, slot: Slot) -> Self {
         Self {
             accounts: Vec::with_capacity(capacity),
@@ -174,75 +150,27 @@ impl<'a> ShrinkCollector<'a> for AliveAccounts<'a> {
             slot,
         }
     }
-    fn add(&mut self, account: &'a AccountFromStorage, _slot_list: &[(Slot, AccountInfo)]) {
+
+    fn collect(&mut self, mut other: Self) {
+        self.bytes = self.bytes.saturating_add(other.bytes);
+        self.accounts.append(&mut other.accounts);
+    }
+
+    fn add(&mut self, account: &'a AccountFromStorage) {
         self.accounts.push(account);
         self.bytes = self.bytes.saturating_add(account.stored_size());
     }
+
     fn len(&self) -> usize {
         self.accounts.len()
-    }
-    fn alive_bytes(&self) -> usize {
-        self.bytes
-    }
-    fn alive_accounts(&self) -> &Vec<&'a AccountFromStorage> {
-        &self.accounts
-    }
-}
-
-impl<'a> ShrinkCollector<'a> for AliveAccountsSeparated<'a> {
-    fn collect(&mut self, other: Self) {
-        self.no_duplicates.collect(other.no_duplicates);
-        self.newest_duplicate.collect(other.newest_duplicate);
-        self.not_newest_duplicate
-            .collect(other.not_newest_duplicate);
-    }
-    fn with_capacity(capacity: usize, slot: Slot) -> Self {
-        Self {
-            no_duplicates: AliveAccounts::with_capacity(capacity, slot),
-            newest_duplicate: AliveAccounts::with_capacity(0, slot),
-            not_newest_duplicate: AliveAccounts::with_capacity(0, slot),
-        }
-    }
-    fn add(&mut self, account: &'a AccountFromStorage, slot_list: &[(Slot, AccountInfo)]) {
-        assert!(!slot_list.is_empty());
-        let slot = self.no_duplicates.slot;
-        let other = if slot_list.len() == 1 {
-            &mut self.no_duplicates
-        } else if !slot_list
-            .iter()
-            .any(|(slot_list_slot, _info)| slot_list_slot > &slot)
-        {
-            // this entry is alive but is newer than any other slot in the index
-            &mut self.newest_duplicate
-        } else {
-            // This entry is alive but is older than at least one other slot in the index.
-            // We would expect clean to get rid of the entry for THIS slot at some point, but clean hasn't done that yet.
-            &mut self.not_newest_duplicate
-        };
-        other.add(account, slot_list);
-    }
-    fn len(&self) -> usize {
-        self.no_duplicates
-            .len()
-            .saturating_add(self.not_newest_duplicate.len())
-            .saturating_add(self.newest_duplicate.len())
-    }
-    fn alive_bytes(&self) -> usize {
-        self.no_duplicates
-            .alive_bytes()
-            .saturating_add(self.not_newest_duplicate.alive_bytes())
-            .saturating_add(self.newest_duplicate.alive_bytes())
-    }
-    fn alive_accounts(&self) -> &Vec<&'a AccountFromStorage> {
-        unimplemented!("illegal use");
     }
 }
 
 #[derive(Debug)]
-pub(crate) struct ShrinkCollect<T> {
+pub(crate) struct ShrinkCollect<'a> {
     pub(crate) slot: Slot,
     pub(crate) written_bytes: u64,
-    pub(crate) alive_accounts: T,
+    pub(crate) alive_accounts: AliveAccounts<'a>,
     /// Tombstones carried forward into the new storage because they are not yet purgeable.
     pub(crate) tombstones_to_carry_forward: Vec<AccountFromStorage>,
     /// total size in storage of all accounts in `tombstones_to_carry_forward`
@@ -252,9 +180,9 @@ pub(crate) struct ShrinkCollect<T> {
     pub(crate) total_starting_accounts: usize,
 }
 
-struct LoadAccountsIndexForShrink<T> {
+struct LoadAccountsIndexForShrink<'a> {
     /// all alive accounts
-    alive_accounts: T,
+    alive_accounts: AliveAccounts<'a>,
 }
 
 /// reference an account found during scanning a storage.
@@ -1914,14 +1842,14 @@ impl AccountsDb {
     /// load the account index entry for the first `count` items in `accounts`
     /// store a reference to all alive accounts in `alive_accounts`
     /// return sum of account size for all alive accounts
-    fn load_accounts_index_for_shrink<'a, T: ShrinkCollector<'a>>(
+    fn load_accounts_index_for_shrink<'a>(
         &self,
         accounts: &'a [AccountFromStorage],
         stats: &ShrinkStats,
         slot_to_shrink: Slot,
-    ) -> LoadAccountsIndexForShrink<T> {
+    ) -> LoadAccountsIndexForShrink<'a> {
         let count = accounts.len();
-        let mut alive_accounts = T::with_capacity(count, slot_to_shrink);
+        let mut alive_accounts = AliveAccounts::with_capacity(count, slot_to_shrink);
 
         let mut index = 0;
         let mut index_scan_returned_some_count = 0;
@@ -1939,17 +1867,15 @@ impl AccountsDb {
 
                     // All obsolete and tombstones have been filtered. Account MUST be alive in this slot
                     assert!(is_alive);
-                    alive_accounts.add(stored_account, slot_list);
                 } else {
                     index_scan_returned_none_count += 1;
-                    // getting None here means the account is 'normal' and was written to disk. This means it must have
-                    // slot_list.len() = 1. This means it must be alive in this slot. This is by far the most common case.
+                    // getting None here means the account is 'normal' and was written to disk. This means it must be
+                    // alive in this slot. This is by far the most common case.
                     // Note that we could get Some(...) here if the account is in the in mem index because it is hot.
                     // Note this could also mean the account isn't on disk either. That would indicate a bug in accounts db.
                     // Account is alive.
-                    let slot_list = [(slot_to_shrink, AccountInfo::default())];
-                    alive_accounts.add(stored_account, &slot_list);
                 }
+                alive_accounts.add(stored_account);
                 index += 1;
             },
             self.scan_filter_for_shrinking,
@@ -2017,12 +1943,12 @@ impl AccountsDb {
 
     /// shared code for shrinking normal slots and combining into ancient append vecs
     /// note 'unique_accounts' is passed by ref so we can return references to data within it, avoiding self-references
-    pub(crate) fn shrink_collect<'a: 'b, 'b, T: ShrinkCollector<'b>>(
+    pub(crate) fn shrink_collect<'a: 'b, 'b>(
         &self,
         store: &'a AccountStorageEntry,
         unique_accounts: &'b mut GetUniqueAccountsResult,
         stats: &ShrinkStats,
-    ) -> ShrinkCollect<T> {
+    ) -> ShrinkCollect<'b> {
         let slot = store.slot();
 
         let GetUniqueAccountsResult {
@@ -2074,7 +2000,7 @@ impl AccountsDb {
         let shrink_collect = Mutex::new(ShrinkCollect {
             slot,
             written_bytes: *written_bytes,
-            alive_accounts: T::with_capacity(len, slot),
+            alive_accounts: AliveAccounts::with_capacity(len, slot),
             tombstones_to_carry_forward,
             tombstones_total_bytes,
             total_starting_accounts,
@@ -2103,7 +2029,7 @@ impl AccountsDb {
         index_read_elapsed.stop();
 
         let mut shrink_collect = shrink_collect.into_inner().unwrap();
-        let alive_total_bytes = shrink_collect.alive_accounts.alive_bytes();
+        let alive_total_bytes = shrink_collect.alive_accounts.bytes;
         shrink_collect.alive_total_bytes = alive_total_bytes;
 
         stats
@@ -2180,7 +2106,7 @@ impl AccountsDb {
         let mut unique_accounts =
             self.get_unique_accounts_from_storage_for_shrink(&store, &self.shrink_stats);
         debug!("do_shrink_slot_store: slot: {slot}");
-        let shrink_collect = self.shrink_collect::<AliveAccounts<'_>>(
+        let shrink_collect = self.shrink_collect(
             &store,
             &mut unique_accounts,
             &self.shrink_stats,
@@ -2234,7 +2160,7 @@ impl AccountsDb {
         // here, we're writing back alive_accounts. That should be an atomic operation
         // without use of rather wide locks in this whole function, because we're
         // mutating rooted slots; There should be no writers to them.
-        let accounts = [(slot, &shrink_collect.alive_accounts.alive_accounts()[..])];
+        let accounts = [(slot, &shrink_collect.alive_accounts.accounts[..])];
         let storable_accounts = StorableAccountsBySlot::new(slot, &accounts, self);
         stats_sub.store_accounts_stats =
             self.store_accounts_for_shrink(storable_accounts, shrink_in_progress.new_storage());
