@@ -1289,7 +1289,10 @@ impl Bank {
         bank.transaction_processor =
             TransactionBatchProcessor::new_uninitialized(bank.slot, bank.epoch);
 
-        bank.accounts_data_size_initial = bank.calculate_accounts_data_size().unwrap();
+        // The accounts this bank starts with are stored by the caller, which is also where the
+        // initial size comes from: `process_genesis_config` accumulates it as it stores the
+        // genesis accounts, and `new_from_fields` takes it from the snapshot's bank fields.
+        bank.accounts_data_size_initial = 0;
 
         bank
     }
