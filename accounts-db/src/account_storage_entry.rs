@@ -1,6 +1,6 @@
 use {
     crate::{
-        account_info::Offset,
+        account_info::{Offset, StorageGeneration},
         account_storage::stored_account_info::{StoredAccountInfo, StoredAccountInfoWithoutData},
         accounts_db::AccountsFileId,
         accounts_file::{AccountsFile, AccountsFileError, AccountsFileProvider},
@@ -24,6 +24,10 @@ pub struct AccountStorageEntry {
     id: AccountsFileId,
 
     slot: Slot,
+
+    /// distinguishes this storage from the other one its slot holds while a shrink is in
+    /// progress. Index entries carry it so they resolve to the storage they were written to.
+    generation: StorageGeneration,
 
     /// storage holding the accounts
     pub accounts: AccountsFile,
@@ -66,6 +70,7 @@ impl AccountStorageEntry {
         Self {
             id,
             slot,
+            generation: false,
             accounts,
             num_alive_accounts: AtomicUsize::new(0),
             num_alive_bytes: AtomicUsize::new(0),
@@ -74,11 +79,23 @@ impl AccountStorageEntry {
         }
     }
 
+    /// A slot holds at most two storages at a time, while a shrink is in progress, so the
+    /// replacement takes the opposite generation from the one it replaces.
+    pub(crate) fn with_generation(mut self, generation: StorageGeneration) -> Self {
+        self.generation = generation;
+        self
+    }
+
+    pub fn generation(&self) -> StorageGeneration {
+        self.generation
+    }
+
     /// open a new instance of the storage that is readonly
     pub(crate) fn reopen_as_readonly(&self) -> Option<Self> {
         self.accounts.reopen_as_readonly().map(|accounts| Self {
             id: self.id,
             slot: self.slot,
+            generation: self.generation,
             num_alive_accounts: AtomicUsize::new(self.count()),
             num_alive_bytes: AtomicUsize::new(self.alive_bytes()),
             accounts,
@@ -96,6 +113,7 @@ impl AccountStorageEntry {
         Self {
             id,
             slot,
+            generation: false,
             accounts,
             num_alive_accounts: AtomicUsize::new(0),
             num_alive_bytes: AtomicUsize::new(0),

@@ -1,7 +1,7 @@
 //! Manage the map of slot -> append vec
 
 use {
-    crate::{account_storage_entry::AccountStorageEntry, accounts_db::AccountsFileId},
+    crate::{account_info::StorageGeneration, account_storage_entry::AccountStorageEntry},
     dashmap::DashMap,
     rand::seq::SliceRandom,
     rayon::iter::{IndexedParallelIterator, IntoParallelRefIterator, ParallelIterator},
@@ -52,11 +52,11 @@ impl AccountStorage {
     pub(crate) fn get_account_storage_entry(
         &self,
         slot: Slot,
-        store_id: AccountsFileId,
+        generation: StorageGeneration,
     ) -> Option<Arc<AccountStorageEntry>> {
         let lookup_in_map = || {
             self.map.get(&slot).and_then(|entry| {
-                (entry.value().id() == store_id).then_some(Arc::clone(entry.value()))
+                (entry.value().generation() == generation).then_some(Arc::clone(entry.value()))
             })
         };
 
@@ -66,7 +66,7 @@ impl AccountStorage {
                     .read()
                     .unwrap()
                     .get(&slot)
-                    .and_then(|entry| (entry.id() == store_id).then(|| Arc::clone(entry)))
+                    .and_then(|entry| (entry.generation() == generation).then(|| Arc::clone(entry)))
             })
             .or_else(lookup_in_map)
     }
@@ -520,9 +520,14 @@ mod tests {
         new_test_storage_with(0, 0)
     }
 
+    /// the generation a storage gets when its slot holds no other storage
+    const FIRST_GENERATION: StorageGeneration = false;
+    /// the generation the replacement storage gets while a shrink is in progress
+    const SHRUNK_GENERATION: StorageGeneration = true;
+
     fn new_test_storage_with(
         slot: Slot,
-        id: AccountsFileId,
+        id: crate::accounts_db::AccountsFileId,
     ) -> (TempDir, Arc<AccountStorageEntry>) {
         let temp_dir = TempDir::new().unwrap();
         let store_file_size = 4000;
@@ -543,28 +548,38 @@ mod tests {
         let slot = 0;
         let id = 0;
         // empty everything
-        assert!(storage.get_account_storage_entry(slot, id).is_none());
+        assert!(
+            storage
+                .get_account_storage_entry(slot, FIRST_GENERATION)
+                .is_none()
+        );
 
         // add a map store
         let common_store_path = TempDir::new().unwrap();
         let alive_bytes: usize = 4000;
         let alive_bytes2: usize = alive_bytes * 2;
-        // 2 append vecs with same id, but different sizes
-        let entry = Arc::new(AccountStorageEntry::new(
-            common_store_path.path(),
-            slot,
-            id,
-            alive_bytes as u64,
-            AccountsFileProvider::AppendVec,
-        ));
+        // 2 append vecs for the same slot, distinguished by generation
+        let entry = Arc::new(
+            AccountStorageEntry::new(
+                common_store_path.path(),
+                slot,
+                id,
+                alive_bytes as u64,
+                AccountsFileProvider::AppendVec,
+            )
+            .with_generation(FIRST_GENERATION),
+        );
         entry.num_alive_bytes.store(alive_bytes, Ordering::Release);
-        let entry2 = Arc::new(AccountStorageEntry::new(
-            common_store_path.path(),
-            slot,
-            id,
-            alive_bytes2 as u64,
-            AccountsFileProvider::AppendVec,
-        ));
+        let entry2 = Arc::new(
+            AccountStorageEntry::new(
+                common_store_path.path(),
+                slot,
+                id,
+                alive_bytes2 as u64,
+                AccountsFileProvider::AppendVec,
+            )
+            .with_generation(SHRUNK_GENERATION),
+        );
         entry2
             .num_alive_bytes
             .store(alive_bytes2, Ordering::Release);
@@ -574,7 +589,7 @@ mod tests {
         assert_eq!(
             alive_bytes,
             storage
-                .get_account_storage_entry(slot, id)
+                .get_account_storage_entry(slot, FIRST_GENERATION)
                 .map(|entry| entry.alive_bytes())
                 .unwrap_or_default()
         );
@@ -590,7 +605,7 @@ mod tests {
         assert_eq!(
             alive_bytes,
             storage
-                .get_account_storage_entry(slot, id)
+                .get_account_storage_entry(slot, FIRST_GENERATION)
                 .map(|entry| entry.alive_bytes())
                 .unwrap_or_default()
         );
@@ -602,7 +617,7 @@ mod tests {
         assert_eq!(
             alive_bytes2,
             storage
-                .get_account_storage_entry(slot, id)
+                .get_account_storage_entry(slot, SHRUNK_GENERATION)
                 .map(|entry| entry.alive_bytes())
                 .unwrap_or_default()
         );
@@ -764,23 +779,31 @@ mod tests {
         // verify data structures during and after shrink and then with subsequent shrink call
         let (_temp_dir, sample) = new_test_storage();
         let storage = AccountStorage::default();
-        let id = sample.id();
-        let missing_id = 9999;
+        let generation = sample.generation();
+        let missing_generation = !generation;
         let slot = sample.slot();
         // id is missing since not in maps at all
-        assert!(storage.get_account_storage_entry(slot, id).is_none());
+        assert!(
+            storage
+                .get_account_storage_entry(slot, generation)
+                .is_none()
+        );
         // missing should always be missing
         assert!(
             storage
-                .get_account_storage_entry(slot, missing_id)
+                .get_account_storage_entry(slot, missing_generation)
                 .is_none()
         );
         storage.map.insert(slot, sample.clone());
         // id is found in map
-        assert!(storage.get_account_storage_entry(slot, id).is_some());
         assert!(
             storage
-                .get_account_storage_entry(slot, missing_id)
+                .get_account_storage_entry(slot, generation)
+                .is_some()
+        );
+        assert!(
+            storage
+                .get_account_storage_entry(slot, missing_generation)
                 .is_none()
         );
         storage
@@ -791,18 +814,26 @@ mod tests {
         // id is found in map
         assert!(
             storage
-                .get_account_storage_entry(slot, missing_id)
+                .get_account_storage_entry(slot, missing_generation)
                 .is_none()
         );
-        assert!(storage.get_account_storage_entry(slot, id).is_some());
+        assert!(
+            storage
+                .get_account_storage_entry(slot, generation)
+                .is_some()
+        );
         storage.map.remove(&slot);
         // id is found in shrink_in_progress_map
         assert!(
             storage
-                .get_account_storage_entry(slot, missing_id)
+                .get_account_storage_entry(slot, missing_generation)
                 .is_none()
         );
-        assert!(storage.get_account_storage_entry(slot, id).is_some());
+        assert!(
+            storage
+                .get_account_storage_entry(slot, generation)
+                .is_some()
+        );
     }
 
     #[test]

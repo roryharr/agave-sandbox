@@ -979,7 +979,7 @@ mod tests {
                 storage
                     .scan_accounts(&mut reader, |offset, account| {
                         let info = AccountInfo::new(
-                            StorageLocation::AccountsFile(storage.id(), offset),
+                            StorageLocation::AccountsFile(storage.generation(), offset),
                             account.is_zero_lamport(),
                         );
                         db.accounts_index.upsert(

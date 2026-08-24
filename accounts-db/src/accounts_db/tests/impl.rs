@@ -1853,7 +1853,8 @@ fn test_accounts_db_purge_keep_live() {
         .unwrap();
     assert_eq!(slot1, current_slot);
     assert_eq!(slot1, slot2);
-    assert_eq!(account_info1.store_id(), account_info2.store_id());
+    // both accounts are in the same storage, so they share slot and generation
+    assert_eq!(account_info1.generation(), account_info2.generation());
 
     // Step B
     current_slot += 1;
