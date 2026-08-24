@@ -3208,6 +3208,36 @@ fn run_test_flush_accounts_cache_if_needed(num_roots: usize, num_unrooted: usize
     }
 }
 
+/// Flushing a newer version of an account drops that account's read cache entry, whatever slot
+/// it was cached at. `do_load` relies on this: it consults the read cache before the index, so a
+/// cached version that a later flush superseded would be served as current.
+#[test]
+fn test_read_only_accounts_cache_invalidated_by_flush() {
+    let db = AccountsDb::new_for_tests_with_config(Vec::new(), DEFAULT_ACCOUNTS_DB_CONFIG);
+    let account_key = Pubkey::new_unique();
+    let owner = *AccountSharedData::default().owner();
+
+    // The first version reaches storage, and loading it populates the read cache.
+    db.store_for_tests((1, &[(&account_key, &AccountSharedData::new(1, 0, &owner))][..]));
+    db.add_root_and_flush_write_cache(1);
+    let (account, slot) = db
+        .do_load_for_tests(&Ancestors::from(vec![1]), &account_key)
+        .unwrap();
+    assert_eq!((account.lamports(), slot), (1, 1));
+    assert_eq!(db.read_only_accounts_cache.load(account_key, 1).is_some(), true);
+
+    // Flushing a newer version must drop the entry cached at the older slot.
+    db.store_for_tests((2, &[(&account_key, &AccountSharedData::new(2, 0, &owner))][..]));
+    db.add_root_and_flush_write_cache(2);
+    assert!(db.read_only_accounts_cache.load(account_key, 1).is_none());
+
+    // ...so the load returns the newer version rather than the cached older one.
+    let (account, slot) = db
+        .do_load_for_tests(&Ancestors::from(vec![1, 2]), &account_key)
+        .unwrap();
+    assert_eq!((account.lamports(), slot), (2, 2));
+}
+
 #[test]
 fn test_read_only_accounts_cache() {
     let db = Arc::new(AccountsDb::new_for_tests_with_config(

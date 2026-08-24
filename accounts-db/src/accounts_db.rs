@@ -584,12 +584,12 @@ impl LoadedAccountAccessor {
                 // from the storage map after we grabbed the storage entry, the recycler should not
                 // reset the storage entry until we drop the reference to the storage entry.
 
-                // If there's a load filter, read only the account metadata first.
-                // This way we don't read the whole account (including its data)
-                // from disk, only to discard it later.
-                let should_load_account = maybe_storage_entry
+                // The account's metadata is inspected as part of the same read that produces its
+                // data, so a load filter rejects before any data work without costing a second
+                // read.
+                maybe_storage_entry
                     .accounts
-                    .get_stored_account_without_data_callback(*offset, |account| {
+                    .get_account_shared_data_if(*offset, |account| {
                         // The in-mem index is keyed by a 64 bit tag rather than by the pubkey, so
                         // two pubkeys in a bin that share a tag share an index entry. The record
                         // carries its own pubkey, so check it here rather than hand back another
@@ -605,17 +605,7 @@ impl LoadedAccountAccessor {
                     .expect(
                         "If a storage entry was found in the storage map, it must not have been \
                          reset yet",
-                    );
-
-                should_load_account.then(|| {
-                    maybe_storage_entry
-                        .accounts
-                        .get_account_shared_data(*offset)
-                        .expect(
-                            "If a storage entry was found in the storage map, it must not have \
-                             been reset yet",
-                        )
-                })
+                    )
             }
 
             // It is safe ("""safe""") to skip consulting `load_filter` here because this
@@ -3092,12 +3082,14 @@ impl AccountsDb {
             return should_load_account.then(|| (cached_account.account.clone(), cached_slot));
         }
 
-        let (slot, storage_location, _maybe_account_accessor) =
-            self.read_index_for_accessor_or_load_slow(ancestors, pubkey, false)?;
-        // Notice the subtle `?` at previous line, we bail out pretty early if missing.
-
-        let result = self.read_only_accounts_cache.load(*pubkey, slot);
-        if let Some(account) = result {
+        // Then the read cache. It holds one version per pubkey, and flushing a newer version
+        // drops that pubkey's entry, so a hit is the newest version in storage; anything newer
+        // than that is still in the write cache, checked above. So the slot the account was
+        // cached at only has to be visible from `ancestors`, and the index is not consulted.
+        if let Some((account, slot)) = self
+            .read_only_accounts_cache
+            .load_visible(pubkey, |slot| self.accounts_index.is_slot_visible(slot, ancestors))
+        {
             self.load_account_stats
                 .num_loaded_from_read_cache
                 .fetch_add(1, Ordering::Relaxed);
@@ -3108,6 +3100,10 @@ impl AccountsDb {
 
             return should_load_account.then_some((account, slot));
         }
+
+        let (slot, storage_location, _maybe_account_accessor) =
+            self.read_index_for_accessor_or_load_slow(ancestors, pubkey, false)?;
+        // Notice the subtle `?` at previous line, we bail out pretty early if missing.
 
         let (mut account_accessor, slot) = self.retry_to_get_account_accessor(
             slot,
@@ -3628,6 +3624,11 @@ impl AccountsDb {
             (
                 "store_accounts_total_us",
                 flush_stats.store_accounts_total_us.0,
+                i64
+            ),
+            (
+                "flush_read_cache_us",
+                flush_stats.flush_read_cache_us.0,
                 i64
             ),
             ("write_accounts_us", flush_stats.write_accounts_us.0, i64),
@@ -4688,6 +4689,19 @@ impl AccountsDb {
 
         debug_assert!(self.accounts_cache.contains_unflushed_root(slot));
 
+        // Drop the read cache entry for every account being written, whatever slot it was cached
+        // at, so the cache never holds a version that this flush supersedes. Done before the
+        // storage and index are updated, while the write cache still serves these accounts.
+        let flush_read_cache_time = Measure::start("flush_read_cache");
+        (0..accounts.len()).for_each(|index| {
+            // Based on the patterns of how a validator writes accounts, it is almost always
+            // the case that there is no read only cache entry for this pubkey.
+            // So, we can give that hint to the `remove` for performance.
+            self.read_only_accounts_cache
+                .remove_assume_not_present(accounts.pubkey(index));
+        });
+        let flush_read_cache_us = flush_read_cache_time.end_as_us();
+
         let storage = self.create_store(slot, size_for_new_storage);
 
         // Write the accounts to storage
@@ -4740,6 +4754,7 @@ impl AccountsDb {
         }
 
         StoreAccountsForFlushStats {
+            flush_read_cache_us,
             write_accounts_us,
             update_index_us,
             handle_reclaims_us,

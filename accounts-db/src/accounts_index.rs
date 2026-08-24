@@ -396,6 +396,14 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> AccountsIndex<T, U> {
         .unwrap_or(true)
     }
 
+    /// Is an entry at `slot` visible from `ancestors`?
+    ///
+    /// This is `latest_slot` for the single entry the index holds per pubkey, with the same
+    /// `max_root` bound that `get_with_and_then` applies.
+    pub(crate) fn is_slot_visible(&self, slot: Slot, ancestors: &Ancestors) -> bool {
+        ancestors.contains_key(&slot) || ancestors.min_slot().is_none_or(|max_root| slot <= max_root)
+    }
+
     // Given a SlotList `L`, a list of ancestors and a maximum slot, find the latest element
     // in `L`, where the slot `S` is an ancestor or root, and if `S` is a root, then `S <= max_root`
     pub(crate) fn latest_slot(
