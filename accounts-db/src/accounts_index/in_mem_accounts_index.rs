@@ -32,7 +32,7 @@ pub struct InMemAccountsIndex<T: IndexValue, U: DiskIndexValue + From<T> + Into<
     last_age_flushed: AtomicAge,
 
     // backing store
-    map_internal: RwLock<HashMap<Pubkey, Box<AccountMapEntry<T>>, ahash::RandomState>>,
+    map_internal: RwLock<HashMap<Pubkey, AccountMapEntry<T>, ahash::RandomState>>,
     storage: Arc<BucketMapHolder<T, U>>,
     _bin: usize,
 
@@ -288,7 +288,7 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
                         // If the entry is now dirty, then it must be put in the cache or the modifications will be lost.
                         if add_to_cache || disk_entry.dirty() {
                             stats.inc_mem_count();
-                            vacant.insert(Box::new(disk_entry));
+                            vacant.insert(disk_entry);
                         }
                         rt
                     }
@@ -318,10 +318,7 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
 
     /// return false if the entry is in the index (disk or memory) and has a slot list len > 0
     /// return true in all other cases, including if the entry is NOT in the index at all
-    fn remove_if_slot_list_empty_entry(
-        &self,
-        entry: Entry<Pubkey, Box<AccountMapEntry<T>>>,
-    ) -> bool {
+    fn remove_if_slot_list_empty_entry(&self, entry: Entry<Pubkey, AccountMapEntry<T>>) -> bool {
         match entry {
             Entry::Occupied(occupied) => {
                 let result =
@@ -646,7 +643,7 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
                             )
                         };
                         assert!(new_value.dirty());
-                        vacant.insert(Box::new(new_value));
+                        vacant.insert(new_value);
                         stats.inc_mem_count();
                     }
                 };
@@ -758,7 +755,7 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
                 if let Some(disk_entry) = disk_entry {
                     let (slot, account_info) = new_entry.into();
                     older_version = Some(disk_entry.replace_if_newer((slot, account_info), None));
-                    vacant.insert(Box::new(disk_entry));
+                    vacant.insert(disk_entry);
                     (
                         false, /* found in mem */
                         true,  /* already existed */
@@ -800,7 +797,7 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
 
     /// The footprint of a single element in the in-mem hashmap
     pub const fn size_of_uninitialized() -> usize {
-        size_of::<Pubkey>() + size_of::<Box<AccountMapEntry<T>>>()
+        size_of::<Pubkey>()
     }
 
     /// The size of an index value, with only a single entry in the slot list
@@ -818,7 +815,7 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
 
     /// Collect candidates to evict from `iter` by checking age
     fn gather_possible_evict_candidates<'a>(
-        iter: impl Iterator<Item = (&'a Pubkey, &'a Box<AccountMapEntry<T>>)>,
+        iter: impl Iterator<Item = (&'a Pubkey, &'a AccountMapEntry<T>)>,
         current_age: Age,
         ages_to_scan: Age,
         max_evictions: NonZeroUsize,
@@ -931,7 +928,7 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
                         let slot_list = SlotList::from([(*slot, index_value)]);
                         let meta = AccountMapEntryMeta::new_clean(&self.storage);
                         let account_map_entry = AccountMapEntry::new(slot_list, meta);
-                        vacant.insert(Box::new(account_map_entry));
+                        vacant.insert(account_map_entry);
                     }
                     Entry::Occupied(_occupied) => {
                         // If the account already has an entry in the in-mem index, then that means
@@ -1381,10 +1378,10 @@ mod tests {
         let pubkey = solana_pubkey::new_rand();
 
         // Insert an entry manually
-        let entry = Box::new(AccountMapEntry::new(
+        let entry = AccountMapEntry::new(
             SlotList::from([(0, 42)]),
             AccountMapEntryMeta::new_dirty(&accounts_index.storage, true),
-        ));
+        );
         accounts_index
             .map_internal
             .write()
@@ -1505,10 +1502,10 @@ mod tests {
         assert!(entry_dirty_old.dirty());
 
         accounts_index.map_internal.write().unwrap().extend([
-            (pubkey_clean_new, Box::new(entry_clean_new)),
-            (pubkey_clean_old, Box::new(entry_clean_old)),
-            (pubkey_dirty_new, Box::new(entry_dirty_new)),
-            (pubkey_dirty_old, Box::new(entry_dirty_old)),
+            (pubkey_clean_new, entry_clean_new),
+            (pubkey_clean_old, entry_clean_old),
+            (pubkey_dirty_new, entry_dirty_new),
+            (pubkey_dirty_old, entry_dirty_old),
         ]);
 
         accounts_index
@@ -1583,10 +1580,8 @@ mod tests {
             .map(|i| {
                 let pk = Pubkey::from([i as u8; 32]);
                 let one_element_slot_list = SlotList::from([(0, 0)]);
-                let one_element_slot_list_entry = Box::new(AccountMapEntry::new(
-                    one_element_slot_list,
-                    AccountMapEntryMeta::default(),
-                ));
+                let one_element_slot_list_entry =
+                    AccountMapEntry::new(one_element_slot_list, AccountMapEntryMeta::default());
                 if i % 2 == 0 {
                     one_element_slot_list_entry.mark_dirty();
                 }
@@ -1626,21 +1621,21 @@ mod tests {
 
         // Clean entry in the eviction window.
         let pubkey_clean = solana_pubkey::new_rand();
-        let entry_clean = Box::new(AccountMapEntry::new(
+        let entry_clean = AccountMapEntry::new(
             SlotList::from([(slot, 1)]),
             AccountMapEntryMeta::new_clean(&accounts_index.storage),
-        ));
+        );
         entry_clean.set_age(current_age);
 
         // Dirty entry in the eviction window.
         let pubkey_dirty = solana_pubkey::new_rand();
-        let entry_dirty = Box::new(AccountMapEntry::new(
+        let entry_dirty = AccountMapEntry::new(
             SlotList::from([(slot + 1, 2)]),
             AccountMapEntryMeta::new_dirty(&accounts_index.storage, false),
-        ));
+        );
         entry_dirty.set_age(current_age);
 
-        let map: HashMap<Pubkey, Box<AccountMapEntry<u64>>> =
+        let map: HashMap<Pubkey, AccountMapEntry<u64>> =
             HashMap::from([(pubkey_clean, entry_clean), (pubkey_dirty, entry_dirty)]);
 
         let max_evictions = NonZeroUsize::new(map.len()).unwrap();
@@ -1737,10 +1732,7 @@ mod tests {
 
         {
             // an indexed pubkey always has an entry, so it is never removed here
-            let val = Box::new(AccountMapEntry::<u64>::new(
-                [(1, 1)],
-                AccountMapEntryMeta::default(),
-            ));
+            let val = AccountMapEntry::<u64>::new([(1, 1)], AccountMapEntryMeta::default());
             map.insert(key, val);
             let entry = map.entry(key);
             assert!(!test.remove_if_slot_list_empty_entry(entry));
@@ -1956,10 +1948,10 @@ mod tests {
     fn test_update_entry_write_through(slot_list: SlotList<u64>, expect_write_through: bool) {
         let index = new_should_write_through_for_test(None);
         let pubkey = solana_pubkey::new_rand();
-        let entry = Box::new(AccountMapEntry::new(
+        let entry = AccountMapEntry::new(
             slot_list,
             AccountMapEntryMeta::new_dirty(&index.storage, false),
-        ));
+        );
         index.map_internal.write().unwrap().insert(pubkey, entry);
         index.update_entry(&pubkey, |(slot, _account_info)| ((slot, 2), ()));
 
@@ -2110,10 +2102,10 @@ mod tests {
         let index = new_should_write_through_for_test(Some((hwm, lwm)));
         for _ in 0..56 {
             let pubkey = solana_pubkey::new_rand();
-            let entry = Box::new(AccountMapEntry::new(
+            let entry = AccountMapEntry::new(
                 SlotList::from([(0, 0)]),
                 AccountMapEntryMeta::new_dirty(&index.storage, true),
-            ));
+            );
             index.map_internal.write().unwrap().insert(pubkey, entry);
         }
 
@@ -2146,10 +2138,10 @@ mod tests {
         let index = new_should_write_through_for_test(Some((hwm, lwm)));
         for _ in 0..60 {
             let pubkey = solana_pubkey::new_rand();
-            let entry = Box::new(AccountMapEntry::new(
+            let entry = AccountMapEntry::new(
                 SlotList::from([(0, 0)]),
                 AccountMapEntryMeta::new_dirty(&index.storage, true),
-            ));
+            );
             index.map_internal.write().unwrap().insert(pubkey, entry);
         }
         assert!(index.map_internal.read().unwrap().capacity() > lwm);
@@ -2167,10 +2159,10 @@ mod tests {
         let index = new_should_write_through_for_test(Some((hwm, lwm)));
         for _ in 0..4 {
             let pubkey = solana_pubkey::new_rand();
-            let entry = Box::new(AccountMapEntry::new(
+            let entry = AccountMapEntry::new(
                 SlotList::from([(0, 0)]),
                 AccountMapEntryMeta::new_dirty(&index.storage, true),
-            ));
+            );
             index.map_internal.write().unwrap().insert(pubkey, entry);
         }
 
@@ -2200,10 +2192,10 @@ mod tests {
         {
             let mut map = index.map_internal.write().unwrap();
             for pubkey in &pubkeys {
-                let entry = Box::new(AccountMapEntry::new(
+                let entry = AccountMapEntry::new(
                     SlotList::from([(0, 42)]),
                     AccountMapEntryMeta::new_dirty(&index.storage, true),
-                ));
+                );
                 map.insert(*pubkey, entry);
             }
         }
