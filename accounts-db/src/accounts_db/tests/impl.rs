@@ -3,8 +3,8 @@ use {
     crate::{
         accounts_file::AccountsFileProvider,
         accounts_index::{
-            ACCOUNTS_INDEX_CONFIG_FOR_TESTING, AccountIndex, AccountSecondaryIndexesIncludeExclude,
-            AccountsIndexConfig, IndexLimit, IndexLimitThreshold, test_utils::*,
+            ACCOUNTS_INDEX_CONFIG_FOR_TESTING, AccountIndex, AccountsIndexConfig, IndexLimit,
+            IndexLimitThreshold, test_utils::*,
         },
         append_vec::{AppendVec, STORE_META_OVERHEAD},
     },
@@ -65,7 +65,7 @@ impl AccountsDb {
                 let mut accessor = self.get_account_accessor(slot, &storage_location);
 
                 accessor
-                    .check_and_get_loaded_account_shared_data(NO_LOAD_FILTER)
+                    .check_and_get_loaded_account_shared_data(pubkey, NO_LOAD_FILTER)
                     .unwrap()
             },
         )
@@ -239,20 +239,6 @@ fn test_accountsdb_latest_ancestor() {
         &db.do_load_for_tests(&ancestors, &key).unwrap().0,
         &account1
     );
-
-    let mut accounts = Vec::new();
-    db.scan_accounts(
-        &ancestors,
-        0,
-        |scan_result| {
-            if let Some((_, account, _)) = scan_result {
-                accounts.push(account);
-            }
-        },
-        &ScanConfig::default(),
-    )
-    .expect("should scan accounts");
-    assert_eq!(accounts, vec![account1]);
 }
 
 #[test]
@@ -1630,31 +1616,7 @@ fn test_clean_old_with_both_normal_and_zero_lamport_accounts() {
     assert!(found_accounts.contains(&pubkey2));
 
     {
-        accounts.account_indexes.keys = Some(AccountSecondaryIndexesIncludeExclude {
-            exclude: true,
-            keys: [mint_key].iter().cloned().collect::<HashSet<Pubkey>>(),
-        });
-        // Secondary index can't be used - do normal scan: should still find both pubkeys
-        let mut found_accounts = HashSet::new();
-        let used_index = accounts
-            .index_scan_accounts(
-                &Ancestors::default(),
-                bank_id,
-                index_key,
-                |account| {
-                    found_accounts.insert(*account.unwrap().0);
-                },
-                &ScanConfig::default(),
-            )
-            .unwrap();
-        assert!(!used_index);
-        assert_eq!(found_accounts.len(), 1);
-        assert!(!found_accounts.contains(&pubkey1));
-        assert!(found_accounts.contains(&pubkey2));
-
-        accounts.account_indexes.keys = None;
-
-        // Secondary index can now be used since it isn't marked as excluded
+        // Secondary index can be used since it isn't marked as excluded
         let mut found_accounts = HashSet::new();
         let used_index = accounts
             .index_scan_accounts(
@@ -1930,50 +1892,6 @@ fn test_accounts_db_purge1() {
     // slot 1 & 2 should not have any stores
     assert_no_stores(&accounts, 1);
     assert_no_stores(&accounts, 2);
-}
-
-#[test]
-fn test_accountsdb_scan_accounts() {
-    let db = AccountsDb::new_for_tests_with_config(Vec::new(), DEFAULT_ACCOUNTS_DB_CONFIG);
-    let key = Pubkey::default();
-    let key0 = solana_pubkey::new_rand();
-    let account0 = AccountSharedData::new(1, 0, &key);
-
-    db.store_for_tests((0, [(&key0, &account0)].as_slice()));
-
-    let key1 = solana_pubkey::new_rand();
-    let account1 = AccountSharedData::new(2, 0, &key);
-    db.store_for_tests((1, [(&key1, &account1)].as_slice()));
-
-    let ancestors = Ancestors::from(vec![0]);
-    let mut accounts = Vec::new();
-    db.scan_accounts(
-        &ancestors,
-        0,
-        |scan_result| {
-            if let Some((_, account, _)) = scan_result {
-                accounts.push(account);
-            }
-        },
-        &ScanConfig::default(),
-    )
-    .expect("should scan accounts");
-    assert_eq!(accounts, vec![account0]);
-
-    let ancestors = Ancestors::from(vec![1, 0]);
-    let mut accounts = Vec::new();
-    db.scan_accounts(
-        &ancestors,
-        0,
-        |scan_result| {
-            if let Some((_, account, _)) = scan_result {
-                accounts.push(account);
-            }
-        },
-        &ScanConfig::default(),
-    )
-    .expect("should scan accounts");
-    assert_eq!(accounts.len(), 2);
 }
 
 #[test]

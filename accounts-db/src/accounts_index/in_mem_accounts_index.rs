@@ -4,6 +4,7 @@ use {
         account_map_entry::{AccountMapEntry, AccountMapEntryMeta, PreAllocatedAccountMapEntry},
         bucket_map_holder::{AGE_MASK, Age, AtomicAge, BucketMapHolder, age_distance},
         stats::Stats,
+        tag::{Tag, TagCalculator, TagHasherBuilder},
     },
     rand::{Rng, rng},
     solana_bucket_map::bucket_api::BucketApi,
@@ -32,7 +33,9 @@ pub struct InMemAccountsIndex<T: IndexValue, U: DiskIndexValue + From<T> + Into<
     last_age_flushed: AtomicAge,
 
     // backing store
-    map_internal: RwLock<HashMap<Pubkey, AccountMapEntry<T>, ahash::RandomState>>,
+    map_internal: RwLock<HashMap<Tag, AccountMapEntry<T>, TagHasherBuilder>>,
+    /// computes the `Tag` this bin's map is keyed by
+    tag_calculator: TagCalculator,
     storage: Arc<BucketMapHolder<T, U>>,
     _bin: usize,
 
@@ -111,7 +114,7 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
             let capacity_per_bin = num_initial_accounts / storage.bins;
             RwLock::new(HashMap::with_capacity_and_hasher(
                 capacity_per_bin,
-                ahash::RandomState::default(),
+                TagHasherBuilder,
             ))
         } else {
             RwLock::default()
@@ -119,6 +122,7 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
 
         Self {
             map_internal,
+            tag_calculator: TagCalculator::default(),
             storage: Arc::clone(storage),
             _bin: bin,
             bucket: storage
@@ -158,22 +162,38 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
         self.last_age_flushed.load(Ordering::Acquire)
     }
 
+    /// the `Tag` this bin's map is keyed by
+    #[inline]
+    fn tag(&self, pubkey: &Pubkey) -> Tag {
+        self.tag_calculator.tag_from_pubkey(pubkey)
+    }
+
     /// return all keys in this bin
+    ///
+    /// The in-mem map is keyed by `Tag`, so the pubkeys come from the disk index, which holds
+    /// every pubkey in the bin: write-through writes an entry to disk as soon as it is modified,
+    /// and index generation writes every entry to disk before the in-mem index is populated.
+    ///
+    /// Panics without a disk index. `in_mem_entries` enumerates the bin in that case, and the
+    /// pubkey of each entry is recoverable from the account record it points at.
     pub fn keys(&self) -> Vec<Pubkey> {
         Self::update_stat(&self.stats().keys, 1);
 
-        // Collect keys from the in-memory map first.
-        let mut keys: HashSet<_> = self.map_internal.read().unwrap().keys().cloned().collect();
+        let disk = self
+            .bucket
+            .as_ref()
+            .expect("keys() requires a disk index to recover pubkeys from");
+        disk.keys()
+    }
 
-        // Next, collect keys from the disk.
-        if let Some(disk) = self.bucket.as_ref() {
-            let disk_keys = disk.keys();
-            keys.reserve(disk_keys.len());
-            for key in disk_keys {
-                keys.insert(key);
-            }
-        }
-        keys.into_iter().collect()
+    /// return the entry of every pubkey held in memory in this bin
+    pub fn in_mem_entries(&self) -> Vec<SlotListItem<T>> {
+        self.map_internal
+            .read()
+            .unwrap()
+            .values()
+            .map(|entry| entry.entry())
+            .collect()
     }
 
     fn load_from_disk(&self, pubkey: &Pubkey) -> Option<SlotList<U>> {
@@ -220,10 +240,11 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
         callback: impl for<'a> FnOnce(Option<&'a AccountMapEntry<T>>) -> RT,
     ) -> RT {
         let mut found = true;
+        let tag = self.tag(pubkey);
         let mut m = Measure::start("get");
         let result = {
             let map = self.map_internal.read().unwrap();
-            let result = map.get(pubkey);
+            let result = map.get(&tag);
             m.stop();
 
             callback(if let Some(entry) = result {
@@ -277,7 +298,7 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
                 let disk_entry = disk_entry.unwrap();
                 let mut map = self.map_internal.write().unwrap();
                 let capacity_pre = map.capacity();
-                let entry = map.entry(*pubkey);
+                let entry = map.entry(self.tag(pubkey));
                 let retval = match entry {
                     Entry::Occupied(occupied) => callback(Some(occupied.get())).1,
                     Entry::Vacant(vacant) => {
@@ -318,7 +339,11 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
 
     /// return false if the entry is in the index (disk or memory) and has a slot list len > 0
     /// return true in all other cases, including if the entry is NOT in the index at all
-    fn remove_if_slot_list_empty_entry(&self, entry: Entry<Pubkey, AccountMapEntry<T>>) -> bool {
+    fn remove_if_slot_list_empty_entry(
+        &self,
+        pubkey: &Pubkey,
+        entry: Entry<Tag, AccountMapEntry<T>>,
+    ) -> bool {
         match entry {
             Entry::Occupied(occupied) => {
                 let result =
@@ -330,21 +355,21 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
                     // We have to have a write lock to the map here, which means nobody else can get
                     //  the arc, but someone may already have retrieved a clone of it.
                     // account index in_mem flushing is one such possibility
-                    self.delete_disk_key(occupied.key());
+                    self.delete_disk_key(pubkey);
                     self.stats().dec_mem_count();
                     occupied.remove();
                 }
                 result
             }
-            Entry::Vacant(vacant) => {
+            Entry::Vacant(_vacant) => {
                 // not in cache, look on disk
-                let entry_disk = self.load_from_disk(vacant.key());
+                let entry_disk = self.load_from_disk(pubkey);
                 match entry_disk {
                     Some(entry_disk) => {
                         // on disk
                         if self.remove_if_slot_list_empty_value(entry_disk.is_empty()) {
                             // not in cache, but on disk, so just delete from disk
-                            self.delete_disk_key(vacant.key());
+                            self.delete_disk_key(pubkey);
                             true
                         } else {
                             // could insert into cache here, but not required for correctness and value is unclear
@@ -361,24 +386,24 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
     /// Does nothing if `pubkey` was never indexed.
     pub fn delete(&self, pubkey: &Pubkey, reclaims: &mut ReclaimsSlotList<T>) {
         let mut map = self.map_internal.write().unwrap();
-        match map.entry(*pubkey) {
+        match map.entry(self.tag(pubkey)) {
             Entry::Occupied(occupied) => {
                 reclaims.extend(occupied.get().slot_list().iter().copied());
-                self.delete_disk_key(occupied.key());
+                self.delete_disk_key(pubkey);
                 self.stats().dec_mem_count();
                 self.stats().inc_delete();
                 occupied.remove();
             }
-            Entry::Vacant(vacant) => {
+            Entry::Vacant(_vacant) => {
                 // Disk-only entry: load the entry from disk and drain slot list into reclaims
                 // then delete the entry from disk.
-                if let Some(slot_list) = self.load_from_disk(vacant.key()) {
+                if let Some(slot_list) = self.load_from_disk(pubkey) {
                     reclaims.extend(
                         slot_list
                             .into_iter()
                             .map(|(slot, account_info)| (slot, account_info.into())),
                     );
-                    self.delete_disk_key(vacant.key());
+                    self.delete_disk_key(pubkey);
                     self.stats().inc_delete();
                 }
             }
@@ -391,10 +416,10 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
         let mut m = Measure::start("entry");
         let mut map = self.map_internal.write().unwrap();
         let capacity_pre = map.capacity();
-        let entry = map.entry(pubkey);
+        let entry = map.entry(self.tag(&pubkey));
         m.stop();
         let found = matches!(entry, Entry::Occupied(_));
-        let result = self.remove_if_slot_list_empty_entry(entry);
+        let result = self.remove_if_slot_list_empty_entry(&pubkey, entry);
         let capacity_post = map.capacity();
         drop(map);
         self.stats()
@@ -521,8 +546,8 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
 
         if should_remove {
             let mut map = self.map_internal.write().unwrap();
-            if let Entry::Occupied(occupied) = map.entry(*pubkey) {
-                self.delete_disk_key(occupied.key());
+            if let Entry::Occupied(occupied) = map.entry(self.tag(pubkey)) {
+                self.delete_disk_key(pubkey);
                 self.stats().dec_mem_count();
                 self.stats().inc_delete();
                 occupied.remove();
@@ -592,6 +617,7 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
                 callback(entry);
             } else {
                 let stats = self.stats();
+                let tag = self.tag(pubkey);
                 let mut m = Measure::start("entry");
                 let mut map = self.map_internal.write().unwrap();
                 let capacity_pre = map.capacity();
@@ -603,21 +629,17 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
                 // This is a rare case; background eviction clears the excess over time.
                 if self.should_write_through
                     && self.storage.should_evict_based_on_count(map.len())
-                    && !map.contains_key(pubkey)
+                    && !map.contains_key(&tag)
                 {
-                    let evict_key = map.iter().find(|(_, v)| !v.dirty()).map(|(k, _)| *k);
-                    if let Some(key) = evict_key {
-                        debug_assert!(
-                            self.load_from_disk(&key).is_some(),
-                            "inline eviction target must be on disk"
-                        );
-                        map.remove(&key);
+                    let evict_tag = map.iter().find(|(_, v)| !v.dirty()).map(|(k, _)| *k);
+                    if let Some(evict_tag) = evict_tag {
+                        map.remove(&evict_tag);
                         stats.sub_mem_count(1);
                         Self::update_stat(&stats.flush_entries_evicted_from_mem_immediate, 1);
                     }
                 }
 
-                let entry = map.entry(*pubkey);
+                let entry = map.entry(tag);
                 m.stop();
                 let found = matches!(entry, Entry::Occupied(_));
                 match entry {
@@ -630,7 +652,7 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
                         updated_in_mem = false;
 
                         // go to in-mem cache first
-                        let disk_entry = self.load_account_entry_from_disk(vacant.key());
+                        let disk_entry = self.load_account_entry_from_disk(pubkey);
                         let new_value = if let Some(disk_entry) = disk_entry {
                             // on disk, so update what was on disk
                             callback(&disk_entry);
@@ -737,7 +759,7 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
         new_entry: PreAllocatedAccountMapEntry<T>,
     ) -> InsertNewEntryResults<T> {
         let mut map = self.map_internal.write().unwrap();
-        let entry = map.entry(pubkey);
+        let entry = map.entry(self.tag(&pubkey));
         let mut older_version = None;
         let (found_in_mem, already_existed) = match entry {
             Entry::Occupied(occupied) => {
@@ -753,7 +775,7 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
             }
             Entry::Vacant(vacant) => {
                 // not in cache, look on disk
-                let disk_entry = self.load_account_entry_from_disk(vacant.key());
+                let disk_entry = self.load_account_entry_from_disk(&pubkey);
                 if let Some(disk_entry) = disk_entry {
                     let (slot, account_info) = new_entry.into();
                     older_version = Some(disk_entry.replace_if_newer((slot, account_info), None));
@@ -799,7 +821,7 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
 
     /// The footprint of a single element in the in-mem hashmap
     pub const fn size_of_uninitialized() -> usize {
-        size_of::<Pubkey>()
+        size_of::<Tag>()
     }
 
     /// The size of an index value, with only a single entry in the slot list
@@ -817,7 +839,7 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
 
     /// Collect candidates to evict from `iter` by checking age
     fn gather_possible_evict_candidates<'a>(
-        iter: impl Iterator<Item = (&'a Pubkey, &'a AccountMapEntry<T>)>,
+        iter: impl Iterator<Item = (&'a Tag, &'a AccountMapEntry<T>)>,
         current_age: Age,
         ages_to_scan: Age,
         max_evictions: NonZeroUsize,
@@ -924,7 +946,7 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
                 .filter(|(address, _entry)| !duplicate_addresses.contains(address)) // <- skip known duplicates
                 .take(num_available)
             {
-                match map.entry(*address) {
+                match map.entry(self.tag(address)) {
                     Entry::Vacant(vacant) => {
                         let index_value = (*disk_index_value).into();
                         let slot_list = SlotList::from([(*slot, index_value)]);
@@ -951,7 +973,7 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
             // a duplicate we do not know it is a duplicate, so it will have been inserted
             // in mem.)  We must remove them here.
             for duplicate_address in duplicate_addresses {
-                map.remove(duplicate_address);
+                map.remove(&self.tag(duplicate_address));
             }
             drop(map);
         } else {
@@ -1140,7 +1162,7 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
     }
 
     // evict keys in 'evictions' from in-mem cache, likely due to age
-    fn evict_from_cache(&self, evictions: &[Pubkey], current_age: Age, ages_to_scan: Age) {
+    fn evict_from_cache(&self, evictions: &[Tag], current_age: Age, ages_to_scan: Age) {
         if evictions.is_empty() {
             return;
         }
@@ -1225,14 +1247,14 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
 /// State of reservoir sampling algorithm for eviction candidates.
 #[derive(Debug)]
 struct ReservoirState {
-    samples: Vec<Pubkey>,
+    samples: Vec<Tag>,
     seen: usize,
     max_samples: NonZeroUsize,
 }
 
 impl ReservoirState {
     /// Select a candidate, keeping a bounded roughly uniform sample set.
-    fn select(&mut self, candidate: Pubkey, rng: &mut impl Rng) {
+    fn select(&mut self, candidate: Tag, rng: &mut impl Rng) {
         self.seen += 1;
         if self.samples.len() < self.max_samples.get() {
             self.samples.push(candidate);
@@ -1279,7 +1301,7 @@ impl Drop for FlushGuard<'_> {
 ///
 /// Note, entries must be 'clean' to be a candidate for eviction.
 #[derive(Debug)]
-struct CandidatesToEvict(Vec<Pubkey>);
+struct CandidatesToEvict(Vec<Tag>);
 
 #[cfg(test)]
 mod tests {
@@ -1388,7 +1410,7 @@ mod tests {
             .map_internal
             .write()
             .unwrap()
-            .insert(pubkey, entry);
+            .insert(accounts_index.tag(&pubkey), entry);
 
         let mut callback_called = false;
         accounts_index.get_or_create_index_entry_for_pubkey(&pubkey, (1, 43), |entry| {
@@ -1504,10 +1526,10 @@ mod tests {
         assert!(entry_dirty_old.dirty());
 
         accounts_index.map_internal.write().unwrap().extend([
-            (pubkey_clean_new, entry_clean_new),
-            (pubkey_clean_old, entry_clean_old),
-            (pubkey_dirty_new, entry_dirty_new),
-            (pubkey_dirty_old, entry_dirty_old),
+            (accounts_index.tag(&pubkey_clean_new), entry_clean_new),
+            (accounts_index.tag(&pubkey_clean_old), entry_clean_old),
+            (accounts_index.tag(&pubkey_dirty_new), entry_dirty_new),
+            (accounts_index.tag(&pubkey_dirty_old), entry_dirty_old),
         ]);
 
         accounts_index
@@ -1578,9 +1600,8 @@ mod tests {
         let max_evictions = NonZeroUsize::new(5).unwrap();
 
         // Create a map with 256 entries
-        let map: HashMap<_, _> = (0..total_entries)
+        let map: HashMap<Tag, _> = (0..total_entries)
             .map(|i| {
-                let pk = Pubkey::from([i as u8; 32]);
                 let one_element_slot_list = SlotList::from([(0, 0)]);
                 let one_element_slot_list_entry =
                     AccountMapEntry::new(one_element_slot_list, AccountMapEntryMeta::default());
@@ -1588,7 +1609,7 @@ mod tests {
                     one_element_slot_list_entry.mark_dirty();
                 }
                 one_element_slot_list_entry.set_age(current_age);
-                (pk, one_element_slot_list_entry)
+                (i as Tag, one_element_slot_list_entry)
             })
             .collect();
 
@@ -1637,8 +1658,10 @@ mod tests {
         );
         entry_dirty.set_age(current_age);
 
-        let map: HashMap<Pubkey, AccountMapEntry<u64>> =
-            HashMap::from([(pubkey_clean, entry_clean), (pubkey_dirty, entry_dirty)]);
+        let tag_clean = accounts_index.tag(&pubkey_clean);
+        let tag_dirty = accounts_index.tag(&pubkey_dirty);
+        let map: HashMap<Tag, AccountMapEntry<u64>> =
+            HashMap::from([(tag_clean, entry_clean), (tag_dirty, entry_dirty)]);
 
         let max_evictions = NonZeroUsize::new(map.len()).unwrap();
         let to_evict = InMemAccountsIndex::<u64, u64>::gather_possible_evict_candidates(
@@ -1648,8 +1671,8 @@ mod tests {
             max_evictions,
         );
 
-        assert!(!to_evict.0.contains(&pubkey_dirty));
-        assert!(to_evict.0.contains(&pubkey_clean));
+        assert!(!to_evict.0.contains(&tag_dirty));
+        assert!(to_evict.0.contains(&tag_clean));
     }
 
     #[test]
@@ -1718,27 +1741,29 @@ mod tests {
 
         let test = new_for_test::<u64>();
 
+        let unknown_tag = test.tag(&unknown_key);
+        let tag = test.tag(&key);
         let mut map = test.map_internal.write().unwrap();
 
         {
             // item is NOT in index at all, still return true from remove_if_slot_list_empty_entry
             // make sure not initially in index
-            let entry = map.entry(unknown_key);
+            let entry = map.entry(unknown_tag);
             assert_matches!(entry, Entry::Vacant(_));
-            let entry = map.entry(unknown_key);
-            assert!(test.remove_if_slot_list_empty_entry(entry));
+            let entry = map.entry(unknown_tag);
+            assert!(test.remove_if_slot_list_empty_entry(&unknown_key, entry));
             // make sure still not in index
-            let entry = map.entry(unknown_key);
+            let entry = map.entry(unknown_tag);
             assert_matches!(entry, Entry::Vacant(_));
         }
 
         {
             // an indexed pubkey always has an entry, so it is never removed here
             let val = AccountMapEntry::<u64>::new([(1, 1)], AccountMapEntryMeta::default());
-            map.insert(key, val);
-            let entry = map.entry(key);
-            assert!(!test.remove_if_slot_list_empty_entry(entry));
-            let entry = map.entry(key);
+            map.insert(tag, val);
+            let entry = map.entry(tag);
+            assert!(!test.remove_if_slot_list_empty_entry(&key, entry));
+            let entry = map.entry(tag);
             assert_matches!(entry, Entry::Occupied(_));
         }
     }
@@ -1763,7 +1788,13 @@ mod tests {
         index.delete(&pubkey, &mut reclaims);
 
         assert_eq!(reclaims, vec![(2, 20)]);
-        assert!(!index.map_internal.read().unwrap().contains_key(&pubkey));
+        assert!(
+            !index
+                .map_internal
+                .read()
+                .unwrap()
+                .contains_key(&index.tag(&pubkey))
+        );
     }
 
     /// `delete` on a pubkey that was never indexed reclaims nothing and does not create an
@@ -1777,7 +1808,13 @@ mod tests {
         index.delete(&pubkey, &mut reclaims);
 
         assert!(reclaims.is_empty());
-        assert!(!index.map_internal.read().unwrap().contains_key(&pubkey));
+        assert!(
+            !index
+                .map_internal
+                .read()
+                .unwrap()
+                .contains_key(&index.tag(&pubkey))
+        );
     }
 
     /// `delete` on a disk-only entry (present in the disk bucket, evicted from memory) drains
@@ -1803,13 +1840,23 @@ mod tests {
         assert!(index.load_from_disk(&pubkey).is_some());
 
         // Evict the entry from memory so only the disk copy remains
-        index.map_internal.write().unwrap().remove(&pubkey);
+        index
+            .map_internal
+            .write()
+            .unwrap()
+            .remove(&index.tag(&pubkey));
 
         index.delete(&pubkey, &mut reclaims);
 
         assert_eq!(reclaims, vec![(slot, info)]);
         assert!(index.load_from_disk(&pubkey).is_none());
-        assert!(!index.map_internal.read().unwrap().contains_key(&pubkey));
+        assert!(
+            !index
+                .map_internal
+                .read()
+                .unwrap()
+                .contains_key(&index.tag(&pubkey))
+        );
     }
 
     #[test]
@@ -1941,7 +1988,7 @@ mod tests {
                 .map_internal
                 .read()
                 .unwrap()
-                .contains_key(&duplicate_pubkey)
+                .contains_key(&index.tag(&duplicate_pubkey))
         );
     }
 
@@ -1954,7 +2001,11 @@ mod tests {
             slot_list,
             AccountMapEntryMeta::new_dirty(&index.storage, false),
         );
-        index.map_internal.write().unwrap().insert(pubkey, entry);
+        index
+            .map_internal
+            .write()
+            .unwrap()
+            .insert(index.tag(&pubkey), entry);
         index.update_entry(&pubkey, |(slot, _account_info)| ((slot, 2), ()));
 
         index.get_only_in_mem(&pubkey, false, |entry| {
@@ -2108,7 +2159,11 @@ mod tests {
                 SlotList::from([(0, 0)]),
                 AccountMapEntryMeta::new_dirty(&index.storage, true),
             );
-            index.map_internal.write().unwrap().insert(pubkey, entry);
+            index
+                .map_internal
+                .write()
+                .unwrap()
+                .insert(index.tag(&pubkey), entry);
         }
 
         let map = index.map_internal.read().unwrap();
@@ -2144,7 +2199,11 @@ mod tests {
                 SlotList::from([(0, 0)]),
                 AccountMapEntryMeta::new_dirty(&index.storage, true),
             );
-            index.map_internal.write().unwrap().insert(pubkey, entry);
+            index
+                .map_internal
+                .write()
+                .unwrap()
+                .insert(index.tag(&pubkey), entry);
         }
         assert!(index.map_internal.read().unwrap().capacity() > lwm);
 
@@ -2165,7 +2224,11 @@ mod tests {
                 SlotList::from([(0, 0)]),
                 AccountMapEntryMeta::new_dirty(&index.storage, true),
             );
-            index.map_internal.write().unwrap().insert(pubkey, entry);
+            index
+                .map_internal
+                .write()
+                .unwrap()
+                .insert(index.tag(&pubkey), entry);
         }
 
         assert!(index.exceeds_thresholds());
@@ -2198,7 +2261,7 @@ mod tests {
                     SlotList::from([(0, 42)]),
                     AccountMapEntryMeta::new_dirty(&index.storage, true),
                 );
-                map.insert(*pubkey, entry);
+                map.insert(index.tag(pubkey), entry);
             }
         }
         let capacity_after_inserts = index.map_internal.read().unwrap().capacity();
@@ -2207,7 +2270,7 @@ mod tests {
         // for each tombstone created, so we should see a capacity drop here.
         let mut map = index.map_internal.write().unwrap();
         for pubkey in &pubkeys[..num_removes] {
-            map.remove(pubkey);
+            map.remove(&index.tag(pubkey));
         }
         drop(map);
 
@@ -2223,7 +2286,7 @@ mod tests {
         // All remaining entries should survive the realloc.
         assert_eq!(map.len(), num_inserts - num_removes);
         for pubkey in &pubkeys[num_removes..] {
-            assert!(map.contains_key(pubkey));
+            assert!(map.contains_key(&index.tag(pubkey)));
         }
 
         // Tombstones cleared: the new map sized for `len()` lands on the same raw
