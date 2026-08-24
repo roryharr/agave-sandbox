@@ -49,6 +49,7 @@ itertools = { workspace = true }
 log = { workspace = true }
 modular-bitfield = { workspace = true }
 num_cpus = { workspace = true }
+portable-atomic = { workspace = true }
 qualifier_attr = { workspace = true, optional = true }
 rand = { workspace = true }
 rayon = { workspace = true }

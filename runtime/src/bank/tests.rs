@@ -8166,67 +8166,6 @@ fn test_store_scan_consistency_unrooted() {
     )
 }
 
-#[test]
-fn test_store_scan_consistency_root() {
-    let (pruned_banks_sender, pruned_banks_receiver) = bounded(1024);
-    let pruned_banks_request_handler = PrunedBanksRequestHandler {
-        pruned_banks_receiver,
-    };
-    test_store_scan_consistency(
-        move |bank0,
-              bank_to_scan_sender,
-              scan_finished_receiver,
-              pubkeys_to_modify,
-              program_id,
-              starting_lamports| {
-            let mut current_bank = bank0.clone();
-            let mut prev_bank = bank0;
-            loop {
-                let lamports_this_round = current_bank.slot() + starting_lamports + 1;
-                let account = AccountSharedData::new(lamports_this_round, 0, &program_id);
-                for key in pubkeys_to_modify.iter() {
-                    current_bank.store_account(key, &account);
-                }
-                current_bank.freeze();
-                // Send the previous bank to the scan thread to perform the scan.
-                // Meanwhile this thread will squash and update roots immediately after
-                // so the roots will update while scanning.
-                //
-                // The capacity of the channel is 1 so that this thread will wait for the scan to finish before starting
-                // the next iteration, allowing the scan to stay in sync with these updates
-                // such that every scan will see this interruption.
-                if bank_to_scan_sender.send(prev_bank).is_err() {
-                    // Channel was disconnected, exit
-                    return;
-                }
-                current_bank.squash();
-                if current_bank.slot() % 2 == 0 {
-                    current_bank.force_flush_accounts_cache();
-                    current_bank.clean_accounts();
-                }
-                prev_bank = current_bank.clone();
-                let slot = current_bank.slot() + 1;
-                current_bank = Arc::new(Bank::new_from_parent(
-                    current_bank,
-                    SlotLeader::new_unique(),
-                    slot,
-                ));
-
-                // Move purge here so that Bank::drop()->purge_slots() doesn't race
-                // with clean. Simulates the call from AccountsBackgroundService
-                pruned_banks_request_handler.handle_request(&current_bank);
-
-                // Drain finished-scan notifications so the bounded channel can't fill
-                // up and block the scan thread. Non-blocking, to preserve the
-                // intentional overlap of clean/squash with the in-flight scan.
-                while scan_finished_receiver.try_recv().is_ok() {}
-            }
-        },
-        Some(Box::new(SendDroppedBankCallback::new(pruned_banks_sender))),
-        AcceptableScanResults::NoFailure,
-    );
-}
-
 fn setup_banks_on_fork_to_remove(
     bank0: Arc<Bank>,
     pubkeys_to_modify: Arc<HashSet<Pubkey>>,

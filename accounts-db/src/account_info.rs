@@ -72,7 +72,15 @@ impl IsZeroLamport for AccountInfo {
     }
 }
 
-impl IndexValue for AccountInfo {}
+impl IndexValue for AccountInfo {
+    fn to_bits(self) -> u64 {
+        // AccountInfo is two u32 fields, asserted to be exactly 8 bytes above
+        unsafe { std::mem::transmute::<AccountInfo, u64>(self) }
+    }
+    fn from_bits(bits: u64) -> Self {
+        unsafe { std::mem::transmute::<u64, AccountInfo>(bits) }
+    }
+}
 
 impl DiskIndexValue for AccountInfo {}
 
