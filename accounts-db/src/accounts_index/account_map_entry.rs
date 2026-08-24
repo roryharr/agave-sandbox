@@ -205,7 +205,7 @@ impl AccountMapEntryMeta {
 
 /// can be used to pre-allocate structures for insertion into accounts index outside of lock
 pub enum PreAllocatedAccountMapEntry<T: IndexValue> {
-    Entry(Box<AccountMapEntry<T>>),
+    Entry(AccountMapEntry<T>),
     Raw(SlotListItem<T>),
 }
 
@@ -250,18 +250,15 @@ impl<T: IndexValue> PreAllocatedAccountMapEntry<T> {
         slot: Slot,
         account_info: T,
         storage: &BucketMapHolder<T, U>,
-    ) -> Box<AccountMapEntry<T>> {
+    ) -> AccountMapEntry<T> {
         let meta = AccountMapEntryMeta::new_dirty(storage, false);
-        Box::new(AccountMapEntry::new(
-            SlotList::from([(slot, account_info)]),
-            meta,
-        ))
+        AccountMapEntry::new(SlotList::from([(slot, account_info)]), meta)
     }
 
     pub fn into_account_map_entry<U: DiskIndexValue + From<T> + Into<T>>(
         self,
         storage: &BucketMapHolder<T, U>,
-    ) -> Box<AccountMapEntry<T>> {
+    ) -> AccountMapEntry<T> {
         match self {
             Self::Entry(entry) => entry,
             Self::Raw((slot, account_info)) => Self::allocate(slot, account_info, storage),
