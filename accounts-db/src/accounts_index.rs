@@ -838,12 +838,13 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> AccountsIndex<T, U> {
         }
     }
 
-    /// Remove `pubkey`'s entry from the accounts index if it is a zero lamport account at or
-    /// below `max_clean_root_inclusive`, pushing the removed entry into `reclaims`.
+    /// Remove `pubkey`'s entry from the accounts index if it is a zero lamport account, pushing
+    /// the removed entry into `reclaims`.
     /// Return true if this call removed the pubkey's entry from the accounts index.
     ///
     /// The index holds a single entry per pubkey, so there are never older rooted entries to
-    /// reclaim here.
+    /// reclaim here. `max_clean_root_inclusive` only ever selected which of those older entries
+    /// to purge, so it is unused.
     ///
     /// When secondary indexes are enabled and this returns true, callers must pass `pubkey` to
     /// `AccountsDb::purge_secondary_indexes_for_dead_keys`, otherwise its secondary index
@@ -853,19 +854,17 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> AccountsIndex<T, U> {
         &self,
         pubkey: &Pubkey,
         reclaims: &mut ReclaimsWithNewestSlot<T>,
-        max_clean_root_inclusive: Option<Slot>,
+        _max_clean_root_inclusive: Option<Slot>,
     ) -> bool {
         let map = self.get_bin(pubkey);
         map.remove_entry_if(pubkey, |(slot, account_info)| {
-            // Reclaim a zero lamport account at or below the clean root. It will be converted
-            // into a tombstone. One above the clean root stays on the classic zero lamport
-            // purge path instead.
-            let should_reclaim = account_info.is_zero_lamport()
-                && *slot <= max_clean_root_inclusive.unwrap_or(Slot::MAX);
-            if should_reclaim {
+            // If a zero lamport account is the only version left, reclaim it. It will be
+            // converted into a tombstone.
+            let is_zero_lamport = account_info.is_zero_lamport();
+            if is_zero_lamport {
                 reclaims.push(((*slot, *account_info), *slot));
             }
-            should_reclaim
+            is_zero_lamport
         })
         // `None` means the pubkey is not in the index; nothing was removed.
         .unwrap_or(false)

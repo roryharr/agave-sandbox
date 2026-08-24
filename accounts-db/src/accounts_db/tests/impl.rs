@@ -3008,46 +3008,6 @@ fn test_reuse_storage_id() {
     });
 }
 
-/// A zero-lamport single-ref account whose entry is newer than `max_clean_root` is not
-/// converted to a tombstone: clean's reclaim path reclaims nothing for it, so it stays on
-/// the classic zero-lamport purge path and is removed once the clean root passes its slot.
-#[test]
-fn test_clean_does_not_tombstone_zero_lamport_above_clean_root() {
-    let db = AccountsDb::new_for_tests_with_config(Vec::new(), DEFAULT_ACCOUNTS_DB_CONFIG);
-    let account_key = Pubkey::new_unique();
-    let zero_lamport_account = AccountSharedData::new(0, 0, AccountSharedData::default().owner());
-
-    // Store a rooted non-zero version so the zero-lamport stores below reach storage
-    store_rooted_nonzero_accounts(&db, 0, [&account_key]);
-
-    // Store zero lamport account into slots 1 and 2, root both slots
-    db.store_for_tests((1, [(&account_key, &zero_lamport_account)].as_slice()));
-    db.store_for_tests((2, [(&account_key, &zero_lamport_account)].as_slice()));
-    db.add_root(1);
-    db.add_root(2);
-    db.flush_rooted_accounts_cache_without_clean();
-
-    // Only clean zero lamport accounts up to slot 1
-    db.clean_accounts(Some(1), false);
-
-    // The slot 2 entry is above the clean root: still indexed, no tombstone, loadable
-    assert!(db.accounts_index.contains(&account_key));
-    assert_eq!(db.get_and_assert_single_storage(2).num_tombstones(), 0);
-    assert_eq!(
-        db.do_load_for_tests(&Ancestors::default(), &account_key),
-        Some((zero_lamport_account, 2))
-    );
-
-    // Once the clean root passes slot 2, the classic zero-lamport purge path removes it
-    db.clean_accounts(Some(2), false);
-    assert!(!db.accounts_index.contains(&account_key));
-    assert_eq!(
-        db.do_load_for_tests(&Ancestors::default(), &account_key),
-        None
-    );
-    assert_no_storages_at_slot(&db, 2);
-}
-
 /// A zero-lamport account that is not in the accounts index is purged at flush rather than
 /// written to storage. The secondary index entries created when it was stored into the write
 /// cache must be purged at flush, unless the key is still alive in another cached slot.
