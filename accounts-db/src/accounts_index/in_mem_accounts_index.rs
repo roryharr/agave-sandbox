@@ -366,6 +366,7 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
                 reclaims.extend(occupied.get().slot_list().iter().copied());
                 self.delete_disk_key(occupied.key());
                 self.stats().dec_mem_count();
+                self.stats().inc_delete();
                 occupied.remove();
             }
             Entry::Vacant(vacant) => {
@@ -523,6 +524,7 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
             if let Entry::Occupied(occupied) = map.entry(*pubkey) {
                 self.delete_disk_key(occupied.key());
                 self.stats().dec_mem_count();
+                self.stats().inc_delete();
                 occupied.remove();
             }
         }
