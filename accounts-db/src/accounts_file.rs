@@ -152,9 +152,25 @@ impl AccountsFile {
     }
 
     /// return an `AccountSharedData` for an account at `offset`, if any.  Otherwise return None.
+    #[cfg(test)]
     pub(crate) fn get_account_shared_data(&self, offset: usize) -> Option<AccountSharedData> {
         match self {
             Self::AppendVec(av) => av.get_account_shared_data(offset),
+        }
+    }
+
+    /// return an `AccountSharedData` for an account at `offset`, if `should_load` accepts it.
+    ///
+    /// Returns `None` if there is no account at `offset`, and `Some(None)` if `should_load`
+    /// rejected the account.  The metadata `should_load` inspects and the account data come from
+    /// the same read.
+    pub(crate) fn get_account_shared_data_if(
+        &self,
+        offset: usize,
+        should_load: impl for<'local> FnOnce(StoredAccountInfoWithoutData<'local>) -> bool,
+    ) -> Option<Option<AccountSharedData>> {
+        match self {
+            Self::AppendVec(av) => av.get_account_shared_data_if(offset, should_load),
         }
     }
 
