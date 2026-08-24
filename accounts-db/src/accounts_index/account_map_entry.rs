@@ -1,12 +1,15 @@
 use {
     super::{
         DiskIndexValue, IndexValue, SlotList, SlotListItem,
-        bucket_map_holder::{Age, BucketMapHolder},
+        bucket_map_holder::{AGE_MASK, Age, BucketMapHolder},
     },
     crate::{account_info::AccountInfo, is_zero_lamport::IsZeroLamport},
-    portable_atomic::AtomicU128,
     solana_clock::Slot,
-    std::{fmt::Debug, marker::PhantomData, sync::atomic::Ordering},
+    std::{
+        fmt::Debug,
+        marker::PhantomData,
+        sync::atomic::{AtomicU64, Ordering},
+    },
 };
 
 /// one entry in the in-mem accounts index
@@ -16,48 +19,57 @@ use {
 /// the `dirty` and `age` metadata, so updates are a compare-and-exchange rather than a lock.
 #[derive(Debug)]
 pub struct AccountMapEntry<T> {
-    entry: AtomicU128,
+    entry: AtomicU64,
     _phantom: PhantomData<T>,
 }
 
-/// bit layout of `AccountMapEntry::entry`
-const VALUE_BITS: u32 = 64;
-const SLOT_BITS: u32 = 40;
+/// bit layout of `AccountMapEntry::entry`: the account info, the slot it is stored at, and the
+/// metadata the in-mem index keeps for it
+const VALUE_BITS: u32 = 26;
+const VALUE_MASK: u64 = (1 << VALUE_BITS) - 1;
+const SLOT_BITS: u32 = 30;
 const SLOT_SHIFT: u32 = VALUE_BITS;
-const SLOT_MASK: u128 = (1 << SLOT_BITS) - 1;
+const SLOT_MASK: u64 = (1 << SLOT_BITS) - 1;
+/// 2^30 slots, ~13 years at 400ms per slot
+pub const MAX_INDEXED_SLOT: Slot = SLOT_MASK;
 const DIRTY_SHIFT: u32 = SLOT_SHIFT + SLOT_BITS;
 const AGE_SHIFT: u32 = DIRTY_SHIFT + 1;
-const AGE_MASK: u128 = u8::MAX as u128;
 
 // Ensure the size of AccountMapEntry never changes unexpectedly
-const _: () = assert!(size_of::<AccountMapEntry<AccountInfo>>() == 16);
+const _: () = assert!(size_of::<AccountMapEntry<AccountInfo>>() == 8);
 
 impl<T: IndexValue> AccountMapEntry<T> {
     pub fn new(slot_list: SlotList<T>, meta: AccountMapEntryMeta) -> Self {
         let (slot, account_info) = slot_list[0];
         Self {
-            entry: AtomicU128::new(Self::pack(slot, account_info, meta.dirty, meta.age)),
+            entry: AtomicU64::new(Self::pack(slot, account_info, meta.dirty, meta.age)),
             _phantom: PhantomData,
         }
     }
 
-    fn pack(slot: Slot, account_info: T, dirty: bool, age: Age) -> u128 {
+    fn pack(slot: Slot, account_info: T, dirty: bool, age: Age) -> u64 {
         assert!(
-            slot <= SLOT_MASK as Slot,
+            slot <= MAX_INDEXED_SLOT,
             "slot {slot} does not fit in the index entry"
         );
-        u128::from(account_info.to_bits())
-            | ((slot as u128 & SLOT_MASK) << SLOT_SHIFT)
-            | ((dirty as u128) << DIRTY_SHIFT)
-            | ((age as u128) << AGE_SHIFT)
+        let value = account_info.to_bits();
+        debug_assert_eq!(
+            value & !VALUE_MASK,
+            0,
+            "account info does not fit the entry"
+        );
+        (value & VALUE_MASK)
+            | ((slot & SLOT_MASK) << SLOT_SHIFT)
+            | ((dirty as u64) << DIRTY_SHIFT)
+            | ((age as u64) << AGE_SHIFT)
     }
 
-    fn unpack_entry(packed: u128) -> SlotListItem<T> {
-        let slot = ((packed >> SLOT_SHIFT) & SLOT_MASK) as Slot;
-        (slot, T::from_bits(packed as u64))
+    fn unpack_entry(packed: u64) -> SlotListItem<T> {
+        let slot = (packed >> SLOT_SHIFT) & SLOT_MASK;
+        (slot, T::from_bits(packed & VALUE_MASK))
     }
 
-    fn load(&self) -> u128 {
+    fn load(&self) -> u64 {
         self.entry.load(Ordering::Acquire)
     }
 
@@ -120,16 +132,16 @@ impl<T: IndexValue> AccountMapEntry<T> {
         }
     }
 
-    fn age_of(packed: u128) -> Age {
-        ((packed >> AGE_SHIFT) & AGE_MASK) as Age
+    fn age_of(packed: u64) -> Age {
+        ((packed >> AGE_SHIFT) as Age) & AGE_MASK
     }
 
     /// set the bit at `shift` to `value`, returning the previous packed cell
-    fn set_bit(&self, shift: u32, value: bool) -> u128 {
+    fn set_bit(&self, shift: u32, value: bool) -> u64 {
         if value {
             self.entry.fetch_or(1 << shift, Ordering::AcqRel)
         } else {
-            self.entry.fetch_and(!(1u128 << shift), Ordering::AcqRel)
+            self.entry.fetch_and(!(1u64 << shift), Ordering::AcqRel)
         }
     }
 
@@ -154,7 +166,7 @@ impl<T: IndexValue> AccountMapEntry<T> {
     /// new age is dropped rather than retried.
     pub fn set_age(&self, value: Age) {
         let current = self.load();
-        let next = (current & !(AGE_MASK << AGE_SHIFT)) | ((value as u128) << AGE_SHIFT);
+        let next = (current & !((AGE_MASK as u64) << AGE_SHIFT)) | ((value as u64) << AGE_SHIFT);
         let _ = self
             .entry
             .compare_exchange(current, next, Ordering::AcqRel, Ordering::Relaxed);
@@ -166,7 +178,7 @@ impl<T: IndexValue> AccountMapEntry<T> {
         if Self::age_of(current) != expected_age {
             return;
         }
-        let next = (current & !(AGE_MASK << AGE_SHIFT)) | ((next_age as u128) << AGE_SHIFT);
+        let next = (current & !((AGE_MASK as u64) << AGE_SHIFT)) | ((next_age as u64) << AGE_SHIFT);
         let _ = self
             .entry
             .compare_exchange(current, next, Ordering::AcqRel, Ordering::Relaxed);

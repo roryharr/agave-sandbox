@@ -611,11 +611,10 @@ mod tests {
                     let raw2_accounts_from_storage: Vec<_> = raw2
                         .iter()
                         .map(|account| {
-                            let storage_id = 0; // does not matter
                             let offset = 0; // does not matter
                             AccountFromStorage {
                                 index_info: AccountInfo::new(
-                                    StorageLocation::AccountsFile(storage_id, offset),
+                                    StorageLocation::AccountsFile(false, offset),
                                     account.is_zero_lamport(),
                                 ),
                                 data_len: account.data.len() as u64,
@@ -654,7 +653,7 @@ mod tests {
                             .zip(offsets.offsets.iter())
                             .for_each(|(account, offset)| {
                                 account.index_info = AccountInfo::new(
-                                    StorageLocation::AccountsFile(0, *offset),
+                                    StorageLocation::AccountsFile(false, *offset),
                                     account.is_zero_lamport(),
                                 )
                             });
@@ -737,11 +736,10 @@ mod tests {
             let raw2_accounts_from_storage: Vec<_> = raw2
                 .iter()
                 .map(|account| {
-                    let storage_id = 0; // does not matter
                     let offset = 0; // does not matter
                     AccountFromStorage {
                         index_info: AccountInfo::new(
-                            StorageLocation::AccountsFile(storage_id, offset),
+                            StorageLocation::AccountsFile(false, offset),
                             account.is_zero_lamport(),
                         ),
                         data_len: account.data.len() as u64,
@@ -781,7 +779,7 @@ mod tests {
                                         result.iter_mut().zip(offsets.offsets.iter()).for_each(
                                             |(account, offset)| {
                                                 account.index_info = AccountInfo::new(
-                                                    StorageLocation::AccountsFile(0, *offset),
+                                                    StorageLocation::AccountsFile(false, *offset),
                                                     account.is_zero_lamport(),
                                                 )
                                             },
@@ -826,12 +824,11 @@ mod tests {
     #[test]
     fn test_find_internal_index_with_multiple_entries_multiple_slots() {
         let db = AccountsDb::default_for_tests();
-        let storage_id = 0; // does not matter
         let offset = 0; // does not matter
         let account = AccountSharedData::default();
         let account_from_storage = AccountFromStorage {
             index_info: AccountInfo::new(
-                StorageLocation::AccountsFile(storage_id, offset),
+                StorageLocation::AccountsFile(false, offset),
                 account.is_zero_lamport(),
             ),
             data_len: account.data().len() as u64,
@@ -869,7 +866,7 @@ mod tests {
         let accounts_db = AccountsDb::default_for_tests();
         let all_accounts: Vec<_> = iter::repeat_with(|| AccountFromStorage {
             index_info: AccountInfo::new(
-                StorageLocation::AccountsFile(0, 0), // id and offset do not matter
+                StorageLocation::AccountsFile(false, 0), // generation and offset do not matter
                 false,
             ),
             data_len: 0,
@@ -896,7 +893,7 @@ mod tests {
         let accounts_db = AccountsDb::default_for_tests();
         let all_accounts: Vec<_> = iter::repeat_with(|| AccountFromStorage {
             index_info: AccountInfo::new(
-                StorageLocation::AccountsFile(0, 0), // id and offset do not matter
+                StorageLocation::AccountsFile(false, 0), // generation and offset do not matter
                 false,
             ),
             data_len: 0,

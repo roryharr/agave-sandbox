@@ -4,7 +4,6 @@
 //! Note that AccountInfo is saved to disk buckets during runtime, but disk buckets are recreated at startup.
 use {
     crate::{
-        accounts_db::AccountsFileId,
         accounts_index::{DiskIndexValue, IndexValue},
         is_zero_lamport::IsZeroLamport,
     },
@@ -13,12 +12,15 @@ use {
 
 /// offset within an accounts file to account data
 pub type Offset = u32;
-pub const MAX_OFFSET: Offset = (1 << 31) - 1;
+pub const MAX_OFFSET: Offset = (1 << 24) - 1;
+
+/// distinguishes the two storages a slot has while a shrink is in progress
+pub type StorageGeneration = bool;
 
 /// specify where account data is located
 #[derive(Debug, PartialEq, Eq)]
 pub enum StorageLocation {
-    AccountsFile(AccountsFileId, Offset),
+    AccountsFile(StorageGeneration, Offset),
 }
 
 impl StorageLocation {
@@ -29,48 +31,58 @@ impl StorageLocation {
             },
         }
     }
-    pub fn is_store_id_equal(&self, other: &StorageLocation) -> bool {
+    /// within a slot, the generation identifies which storage this refers to
+    pub fn is_generation_equal(&self, other: &StorageLocation) -> bool {
         match self {
-            StorageLocation::AccountsFile(store_id, _) => match other {
-                StorageLocation::AccountsFile(other_store_id, _) => other_store_id == store_id,
+            StorageLocation::AccountsFile(generation, _) => match other {
+                StorageLocation::AccountsFile(other_generation, _) => {
+                    other_generation == generation
+                }
             },
         }
     }
 }
 
-#[bitfield(bits = 32)]
+/// The account's location within its slot's storage, packed into 26 bits so that the index
+/// entry can carry it alongside the slot and its `dirty` and `age` metadata in one 64 bit cell.
+/// The slot itself lives in the index entry, which is where every caller already reads it from.
+#[bitfield(bits = 26)]
 #[repr(C)]
 #[derive(Debug, Default, Copy, Clone, Eq, PartialEq)]
-pub struct PackedOffsetAndFlags {
-    /// logical offset of an account in an accounts storage file
-    /// this provides 2^31 bits, which when multiplied by 8 (sizeof(u64)) = 16G, which is the maximum size of an append vec
-    offset: B31,
+pub struct PackedAccountInfo {
+    /// offset = 'offset_reduced' * ALIGN_BOUNDARY_OFFSET into the storage.
+    /// 2^24 * 8 = 128MiB, the size of an ancient storage
+    offset_reduced: B24,
     /// use 1 bit to specify that the entry is zero lamport
-    is_zero_lamport: bool,
+    zero_lamport: bool,
+    /// which of the slot's storages this refers to while a shrink is in progress
+    generation: bool,
 }
 
 #[derive(Default, Debug, PartialEq, Eq, Clone, Copy)]
 pub struct AccountInfo {
-    store_id: AccountsFileId,
-    account_offset_and_flags: PackedOffsetAndFlags,
+    packed: PackedAccountInfo,
 }
 
 // Ensure the size of AccountInfo never changes unexpectedly
-const _: () = assert!(size_of::<AccountInfo>() == 8);
+const _: () = assert!(size_of::<AccountInfo>() == 4);
 
 impl IsZeroLamport for AccountInfo {
     fn is_zero_lamport(&self) -> bool {
-        self.account_offset_and_flags.is_zero_lamport()
+        self.packed.zero_lamport()
     }
 }
 
 impl IndexValue for AccountInfo {
     fn to_bits(self) -> u64 {
-        // AccountInfo is two u32 fields, asserted to be exactly 8 bytes above
-        unsafe { std::mem::transmute::<AccountInfo, u64>(self) }
+        let bytes = self.packed.into_bytes();
+        u64::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3], 0, 0, 0, 0])
     }
     fn from_bits(bits: u64) -> Self {
-        unsafe { std::mem::transmute::<u64, AccountInfo>(bits) }
+        let bytes = bits.to_le_bytes();
+        Self {
+            packed: PackedAccountInfo::from_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
+        }
     }
 }
 
@@ -78,31 +90,28 @@ impl DiskIndexValue for AccountInfo {}
 
 impl AccountInfo {
     pub fn new(storage_location: StorageLocation, is_zero_lamport: bool) -> Self {
-        let mut packed_offset_and_flags = PackedOffsetAndFlags::default();
-        let store_id = match storage_location {
-            StorageLocation::AccountsFile(store_id, offset) => {
+        let mut packed = PackedAccountInfo::default();
+        match storage_location {
+            StorageLocation::AccountsFile(generation, offset) => {
                 assert!(offset <= MAX_OFFSET, "illegal offset");
-                packed_offset_and_flags.set_offset(offset);
-                store_id
+                packed.set_offset_reduced(offset);
+                packed.set_generation(generation);
             }
-        };
-        packed_offset_and_flags.set_is_zero_lamport(is_zero_lamport);
-        Self {
-            store_id,
-            account_offset_and_flags: packed_offset_and_flags,
         }
+        packed.set_zero_lamport(is_zero_lamport);
+        Self { packed }
     }
 
-    pub fn store_id(&self) -> AccountsFileId {
-        self.store_id
+    pub fn generation(&self) -> StorageGeneration {
+        self.packed.generation()
     }
 
     pub fn offset(&self) -> Offset {
-        self.account_offset_and_flags.offset()
+        self.packed.offset_reduced()
     }
 
     pub fn storage_location(&self) -> StorageLocation {
-        StorageLocation::AccountsFile(self.store_id, self.offset())
+        StorageLocation::AccountsFile(self.generation(), self.offset())
     }
 }
 
@@ -113,7 +122,7 @@ mod test {
     #[test]
     fn test_limits() {
         for offset in [0, 1, MAX_OFFSET - 1, MAX_OFFSET] {
-            let info = AccountInfo::new(StorageLocation::AccountsFile(0, offset), true);
+            let info = AccountInfo::new(StorageLocation::AccountsFile(false, offset), true);
             assert_eq!(info.offset(), offset);
         }
     }
@@ -122,6 +131,6 @@ mod test {
     #[should_panic(expected = "illegal offset")]
     fn test_offset_too_large() {
         let offset = MAX_OFFSET + 1;
-        AccountInfo::new(StorageLocation::AccountsFile(0, offset), true);
+        AccountInfo::new(StorageLocation::AccountsFile(false, offset), true);
     }
 }
