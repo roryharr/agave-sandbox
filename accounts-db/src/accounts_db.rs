@@ -211,13 +211,12 @@ impl AccountFromStorage {
     }
     #[cfg(test)]
     pub(crate) fn new(offset: Offset, account: &StoredAccountInfoWithoutData) -> Self {
-        // the id is irrelevant in this account info. This structure is only used DURING shrink operations.
-        // In those cases, there is only 1 append vec id per slot when we read the accounts.
-        // Any value of storage id in account info works fine when we want the 'normal' storage.
-        let storage_id = 0;
+        // the slot and generation are irrelevant in this account info. This structure is only
+        // used DURING shrink operations, where there is only 1 storage per slot when we read the
+        // accounts, so any value works when we want the 'normal' storage.
         AccountFromStorage {
             index_info: AccountInfo::new(
-                StorageLocation::AccountsFile(storage_id, offset),
+                StorageLocation::AccountsFile(false, offset),
                 account.is_zero_lamport(),
             ),
             pubkey: *account.pubkey(),
@@ -1902,11 +1901,9 @@ impl AccountsDb {
         store
             .accounts
             .scan_accounts_without_data(|offset, account| {
-                // file_id is unused and can be anything. We will always be loading whatever storage is in the slot.
-                let file_id = 0;
                 stored_accounts.push(AccountFromStorage {
                     index_info: AccountInfo::new(
-                        StorageLocation::AccountsFile(file_id, offset),
+                        StorageLocation::AccountsFile(store.generation(), offset),
                         account.is_zero_lamport(),
                     ),
                     pubkey: *account.pubkey(),
@@ -3014,7 +3011,7 @@ impl AccountsDb {
                 .read_index_for_accessor_or_load_slow(ancestors, pubkey, fallback_to_slow_path)?;
             // Notice the subtle `?` at previous line, we bail out pretty early if missing.
 
-            if new_slot == slot && new_storage_location.is_store_id_equal(&storage_location) {
+            if new_slot == slot && new_storage_location.is_generation_equal(&storage_location) {
                 self.accounts_index
                     .get_and_then(pubkey, |entry| -> (_, ()) {
                         let message = format!(
@@ -3156,10 +3153,10 @@ impl AccountsDb {
         storage_location: &StorageLocation,
     ) -> LoadedAccountAccessor {
         match storage_location {
-            StorageLocation::AccountsFile(store_id, offset) => {
+            StorageLocation::AccountsFile(generation, offset) => {
                 let maybe_storage_entry = self
                     .storage
-                    .get_account_storage_entry(slot, *store_id)
+                    .get_account_storage_entry(slot, *generation)
                     .map(|account_storage_entry| (account_storage_entry, *offset));
                 LoadedAccountAccessor::Stored(maybe_storage_entry)
             }
@@ -3173,6 +3170,15 @@ impl AccountsDb {
             .fetch_add(1, Ordering::Relaxed);
         let paths = &self.paths;
         let path_index = rng().random_range(0..paths.len());
+        // A slot holds at most two storages at a time, while a shrink is in progress, so a
+        // replacement takes the opposite generation from the storage it replaces. Index entries
+        // carry the generation, so they keep resolving to the storage they were written to.
+        // A shrink on some other slot may be in progress, so this uses the lookup that tolerates
+        // that. This slot's entry in `map` is the storage being replaced, if there is one.
+        let generation = self
+            .storage
+            .get_slot_storage_entry_shrinking_in_progress_ok(slot)
+            .is_none_or(|existing| !existing.generation());
         AccountStorageEntry::new(
             Path::new(&paths[path_index]),
             slot,
@@ -3180,6 +3186,7 @@ impl AccountsDb {
             size,
             self.accounts_file_provider,
         )
+        .with_generation(generation)
     }
 
     pub fn enable_bank_drop_callback(&self) {
@@ -4810,7 +4817,7 @@ impl AccountsDb {
 
         for (i, offset) in stored_accounts_info.offsets.iter().enumerate() {
             infos.push(AccountInfo::new(
-                StorageLocation::AccountsFile(store_id, *offset),
+                StorageLocation::AccountsFile(storage.generation(), *offset),
                 accounts_and_meta_to_store.is_zero_lamport(i),
             ));
         }
@@ -4979,6 +4986,8 @@ impl AccountsDb {
         storage: &'a AccountStorageEntry,
     ) {
         let slot = storage.slot();
+        let generation = storage.generation();
+        // `storage_info` is keyed by the storage's id, while index entries carry its generation
         let store_id = storage.id();
 
         let mut capitalization = 0_u64;
@@ -5023,7 +5032,7 @@ impl AccountsDb {
                 keyed_account_infos.push((
                     *account.pubkey,
                     AccountInfo::new(
-                        StorageLocation::AccountsFile(store_id, offset), // will never be cached
+                        StorageLocation::AccountsFile(generation, offset), // will never be cached
                         is_account_zero_lamport,
                     ),
                 ));
@@ -5248,7 +5257,7 @@ impl AccountsDb {
             info!("Verifying index...");
             let start = Instant::now();
             storages.par_iter().for_each(|storage| {
-                let store_id = storage.id();
+                let generation = storage.generation();
                 let slot = storage.slot();
                 storage
                     .scan_accounts_without_data(|offset, account| {
@@ -5261,7 +5270,7 @@ impl AccountsDb {
                                 if *slot2 == slot {
                                     count += 1;
                                     let ai = AccountInfo::new(
-                                        StorageLocation::AccountsFile(store_id, offset), // will never be cached
+                                        StorageLocation::AccountsFile(generation, offset), // will never be cached
                                         account.is_zero_lamport(),
                                     );
                                     assert_eq!(&ai, account_info2);
@@ -5519,7 +5528,7 @@ impl AccountsDb {
         for (slot, pubkey, account_info) in duplicates {
             let maybe_storage_entry = self
                 .storage
-                .get_account_storage_entry(*slot, account_info.store_id());
+                .get_account_storage_entry(*slot, account_info.generation());
             let mut accessor = LoadedAccountAccessor::Stored(
                 maybe_storage_entry.map(|entry| (entry, account_info.offset())),
             );

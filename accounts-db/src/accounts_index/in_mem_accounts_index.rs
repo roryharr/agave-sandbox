@@ -2,7 +2,7 @@ use {
     super::{
         DiskIndexValue, IndexValue, ReclaimsSlotList, SlotList, SlotListItem, UpsertReclaim,
         account_map_entry::{AccountMapEntry, AccountMapEntryMeta, PreAllocatedAccountMapEntry},
-        bucket_map_holder::{Age, AtomicAge, BucketMapHolder},
+        bucket_map_holder::{AGE_MASK, Age, AtomicAge, BucketMapHolder, age_distance},
         stats::Stats,
     },
     rand::{Rng, rng},
@@ -105,7 +105,7 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
         bin: usize,
         num_initial_accounts: Option<usize>,
     ) -> Self {
-        let num_ages_to_distribute_scans = Age::MAX - storage.ages_to_stay_in_cache;
+        let num_ages_to_distribute_scans = AGE_MASK - storage.ages_to_stay_in_cache;
 
         let map_internal = if let Some(num_initial_accounts) = num_initial_accounts {
             // Never reserve past the memory threshold: entries above it get evicted to disk, so the
@@ -815,7 +815,7 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
         entry: &AccountMapEntry<T>,
         ages_to_scan: Age,
     ) -> bool {
-        current_age.wrapping_sub(entry.age()) <= ages_to_scan
+        age_distance(current_age, entry.age()) <= ages_to_scan
     }
 
     /// Collect candidates to evict from `iter` by checking age

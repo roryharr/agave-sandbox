@@ -23,6 +23,15 @@ use {
 };
 pub type Age = u8;
 pub type AtomicAge = AtomicU8;
+/// Ages are stored in the index entry alongside the account info, so they are kept to 7 bits.
+/// Every age value is `< 1 << AGE_BITS`, and distances between them are taken modulo that.
+pub const AGE_BITS: u32 = 7;
+pub const AGE_MASK: Age = (1 << AGE_BITS) - 1;
+
+/// how many ages have elapsed from `earlier` to `later`
+pub fn age_distance(later: Age, earlier: Age) -> Age {
+    later.wrapping_sub(earlier) & AGE_MASK
+}
 const _: () = assert!(std::mem::size_of::<Age>() == std::mem::size_of::<AtomicAge>());
 
 /// The number of entries below an in-mem index bin's usable capacity at which to begin evicting.
@@ -165,6 +174,8 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> BucketMapHolder<T, U>
         let previous = self.count_buckets_flushed.swap(0, Ordering::AcqRel);
         // fetch_add is defined to wrap.
         // That's what we want. 0..255, then back to 0.
+        // Ages are masked to `AGE_BITS` when read, which is consistent because the counter
+        // wraps at a multiple of `1 << AGE_BITS`.
         self.age.fetch_add(1, Ordering::Release);
         self.future_age_to_flush.fetch_add(1, Ordering::Release);
         self.future_age_to_flush_cached
@@ -185,6 +196,7 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> BucketMapHolder<T, U>
             &self.future_age_to_flush
         }
         .load(Ordering::Acquire)
+            & AGE_MASK
     }
 
     fn has_age_interval_elapsed(&self) -> bool {
@@ -220,14 +232,14 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> BucketMapHolder<T, U>
                 .wait_timeout(Duration::from_millis(self.age_interval_ms()));
             // when age has incremented twice or more from the starting age, we know that we have
             // made it through scanning all bins since we started waiting, so we are then 'idle'
-            if self.current_age().wrapping_sub(start_age) > 1 {
+            if age_distance(self.current_age(), start_age) > 1 {
                 break;
             }
         }
     }
 
     pub fn current_age(&self) -> Age {
-        self.age.load(Ordering::Acquire)
+        self.age.load(Ordering::Acquire) & AGE_MASK
     }
 
     pub fn bucket_flushed_at_current_age(&self, can_advance_age: bool) {
@@ -355,7 +367,7 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> BucketMapHolder<T, U>
             // future age = age (=0) + ages_to_stay_in_cache
             future_age_to_flush: AtomicAge::new(ages_to_stay_in_cache),
             // effectively age (0) - 1. So, the oldest possible age from 'now'
-            future_age_to_flush_cached: AtomicAge::new(Age::MAX),
+            future_age_to_flush_cached: AtomicAge::new(AGE_MASK),
             stats: Stats::new(bins),
             wait_dirty_or_aged: Arc::default(),
             next_bucket_to_flush: AtomicUsize::new(0),
@@ -574,7 +586,7 @@ mod tests {
         let test = BucketMapHolder::<u64, u64>::new(bins, &AccountsIndexConfig::default(), 1);
         assert_eq!(0, test.current_age());
         assert_eq!(test.ages_to_stay_in_cache, test.future_age_to_flush(false));
-        assert_eq!(Age::MAX, test.future_age_to_flush(true));
+        assert_eq!(AGE_MASK, test.future_age_to_flush(true));
         (0..bins).for_each(|_| {
             test.bucket_flushed_at_current_age(false);
         });
@@ -592,7 +604,10 @@ mod tests {
         let bins = 4;
         let test = BucketMapHolder::<u64, u64>::new(bins, &AccountsIndexConfig::default(), 1);
         for age in 0..513 {
-            assert_eq!(test.current_age(), (age % 256) as Age);
+            assert_eq!(
+                test.current_age(),
+                (age % ((AGE_MASK as u32 + 1) as usize)) as Age
+            );
 
             // inc all
             for _ in 0..bins {

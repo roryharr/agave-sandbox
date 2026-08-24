@@ -26,7 +26,7 @@ pub fn append_single_account_with_default_hash(
 
     if let Some(index) = add_to_index {
         let account_info = AccountInfo::new(
-            StorageLocation::AccountsFile(storage.id(), stored_accounts_info.offsets[0]),
+            StorageLocation::AccountsFile(storage.generation(), stored_accounts_info.offsets[0]),
             account.lamports() == 0,
         );
         index.upsert(
