@@ -158,18 +158,32 @@ impl ReadOnlyAccountsCache {
 
     #[cfg_attr(feature = "dev-context-only-utils", qualifiers(pub))]
     pub(crate) fn load(&self, pubkey: Pubkey, slot: Slot) -> Option<AccountSharedData> {
-        let (account, load_us) = measure_us!({
+        self.load_visible(&pubkey, |cached_slot| cached_slot == slot)
+            .map(|(account, _slot)| account)
+    }
+
+    /// Load `pubkey`'s cached account, and the slot it was cached at, if `is_visible` accepts
+    /// that slot.
+    ///
+    /// The cache holds one version per pubkey, and flushing a newer version to storage drops
+    /// that pubkey's entry, so a hit is the newest version in storage.
+    pub(crate) fn load_visible(
+        &self,
+        pubkey: &Pubkey,
+        is_visible: impl FnOnce(Slot) -> bool,
+    ) -> Option<(AccountSharedData, Slot)> {
+        let (found, load_us) = measure_us!({
             let mut found = None;
-            if let Some(entry) = self.cache.get(&pubkey)
-                && entry.slot == slot
+            if let Some(entry) = self.cache.get(pubkey)
+                && is_visible(entry.slot)
             {
                 entry
                     .last_update_time
                     .store(self.timestamp(), Ordering::Relaxed);
-                let account = entry.account.clone();
+                let account_and_slot = (entry.account.clone(), entry.slot);
                 drop(entry);
                 self.stats.hits.fetch_add(1, Ordering::Relaxed);
-                found = Some(account);
+                found = Some(account_and_slot);
             }
 
             if found.is_none() {
@@ -178,7 +192,7 @@ impl ReadOnlyAccountsCache {
             found
         });
         self.stats.load_us.fetch_add(load_us, Ordering::Relaxed);
-        account
+        found
     }
 
     fn account_size(account: &AccountSharedData) -> usize {

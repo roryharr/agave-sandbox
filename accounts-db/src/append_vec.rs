@@ -587,13 +587,27 @@ impl AppendVec {
         }))
     }
 
-    /// return an `AccountSharedData` for an account at `logical_offset`.
+   /// return an `AccountSharedData` for an account at `offset`.
     /// This fn can efficiently return exactly what is needed by a caller.
     /// This is on the critical path of tx processing for accounts not in the read or write caches.
-    pub fn get_account_shared_data(
+    pub fn get_account_shared_data(&self, offset: LogicalOffset) -> Option<AccountSharedData> {
+        self.get_account_shared_data_if(offset, |_account| true)
+            .flatten()
+    }
+
+    /// return an `AccountSharedData` for an account at `offset`, if `should_load` accepts it.
+    ///
+    /// `should_load` is called with the account's metadata as soon as it is parsed, before any
+    /// work is done to assemble the account data, so rejecting is cheap.
+    ///
+    /// Returns `None` if there is no account at `offset`, and `Some(None)` if `should_load`
+    /// rejected the account. This is on the critical path of tx processing for accounts not in
+    /// the read or write caches, so the metadata and the data come from the same read.
+    pub fn get_account_shared_data_if(
         &self,
         logical_offset: LogicalOffset,
-    ) -> Option<AccountSharedData> {
+        should_load: impl for<'local> FnOnce(StoredAccountInfoWithoutData<'local>) -> bool,
+    ) -> Option<Option<AccountSharedData>> {
         let offset = file_offset_from_logical(logical_offset);
         let mut buf = MaybeUninit::<[u8; PAGE_SIZE]>::uninit();
         let bytes_read = read_into_buffer(&self.file, self.len() as FileSize, offset, unsafe {
@@ -607,8 +621,18 @@ impl AppendVec {
         let (account_meta, next) = Self::get_type::<AccountMeta>(valid_bytes, next)?;
         let (_hash, next) = Self::get_type::<ObsoleteAccountHash>(valid_bytes, next)?;
         let data_len = meta.data_len;
+        if !should_load(StoredAccountInfoWithoutData {
+            pubkey: &meta.pubkey,
+            lamports: account_meta.lamports,
+            owner: &account_meta.owner,
+            data_len: data_len as usize,
+            executable: account_meta.executable,
+            rent_epoch: account_meta.rent_epoch,
+        }) {
+            return Some(None);
+        }
         let remaining_bytes_for_data = bytes_read - next;
-        Some(if remaining_bytes_for_data >= data_len as usize {
+        Some(Some(if remaining_bytes_for_data >= data_len as usize {
             // we already read enough data to load this account
             let (data, next) = Self::get_slice(valid_bytes, next, meta.data_len as usize)?;
             let stored_size = next;
@@ -650,7 +674,7 @@ impl AppendVec {
                 account_meta.executable,
                 account_meta.rent_epoch,
             )
-        })
+        }))
     }
 
     /// Returns the path to the file where the data is stored
