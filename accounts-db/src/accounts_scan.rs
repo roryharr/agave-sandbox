@@ -70,6 +70,10 @@ pub struct ScanTracker {
     // on any of these slots fails. This is safe to purge once the associated Bank is dropped and
     // scanning the fork with that Bank at the tip is no longer possible.
     pub removed_bank_ids: Mutex<HashSet<BankId>>,
+    /// # times banks have been marked removed in `removed_bank_ids`. In-flight scans compare this
+    /// against the count they saw at their start, so their per-account check for a removal is a
+    /// load instead of taking the `removed_bank_ids` mutex.
+    bank_removals: AtomicU64,
     /// # scans active currently
     pub active_scans: AtomicUsize,
     /// # of slots between latest max and latest scan
@@ -84,6 +88,18 @@ impl ScanTracker {
     pub fn min_ongoing_scan_root(&self) -> Option<Slot> {
         Self::min_ongoing_scan_root_from_btree(&self.ongoing_scan_roots.read().unwrap())
     }
+
+    /// Mark `bank_ids` as removed: new scan attempts on them fail, and in-flight scans on them
+    /// abort at their next account.
+    pub(crate) fn mark_banks_removed(&self, bank_ids: impl Iterator<Item = BankId>) {
+        let mut removed_bank_ids = self.removed_bank_ids.lock().unwrap();
+        for bank_id in bank_ids {
+            removed_bank_ids.insert(bank_id);
+        }
+        // bumped while holding the lock, so a scan that sees the new count and then takes the
+        // mutex sees the ids inserted above
+        self.bank_removals.fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 /// Guard that protects account state during an accounts scan.
@@ -95,6 +111,8 @@ pub(crate) struct ScanGuard<'a> {
     scan_tracker: &'a ScanTracker,
     max_root: Slot,
     scan_bank_id: BankId,
+    /// `ScanTracker::bank_removals` as of this scan's last check of `removed_bank_ids`.
+    bank_removals_seen: AtomicU64,
 }
 
 impl<'a> ScanGuard<'a> {
@@ -109,12 +127,15 @@ impl<'a> ScanGuard<'a> {
         scan_bank_id: BankId,
         max_root_inclusive_fn: impl FnOnce() -> Slot,
     ) -> Option<Self> {
-        {
+        // read the removal count under the lock, so a removal landing right after this can't be
+        // mistaken for one this scan has already accounted for
+        let bank_removals_seen = {
             let locked_removed_bank_ids = scan_tracker.removed_bank_ids.lock().unwrap();
             if locked_removed_bank_ids.contains(&scan_bank_id) {
                 return None;
             }
-        }
+            scan_tracker.bank_removals.load(Ordering::Relaxed)
+        };
 
         let max_root_inclusive = {
             let mut w_ongoing_scan_roots = scan_tracker
@@ -148,7 +169,27 @@ impl<'a> ScanGuard<'a> {
             scan_tracker,
             max_root: max_root_inclusive,
             scan_bank_id,
+            bank_removals_seen: AtomicU64::new(bank_removals_seen),
         })
+    }
+
+    /// True if the scanned bank was removed mid-scan. Checked by scan loops so they abort
+    /// promptly instead of scanning to completion; `was_scan_corrupted` classifies the result.
+    ///
+    /// The `removed_bank_ids` mutex is shared by every scan, so it's only taken once a removal
+    /// has happened since this scan's last check.
+    pub(crate) fn is_bank_removed(&self) -> bool {
+        let bank_removals = self.scan_tracker.bank_removals.load(Ordering::Relaxed);
+        if bank_removals == self.bank_removals_seen.load(Ordering::Relaxed) {
+            return false;
+        }
+        self.bank_removals_seen
+            .store(bank_removals, Ordering::Relaxed);
+        self.scan_tracker
+            .removed_bank_ids
+            .lock()
+            .unwrap()
+            .contains(&self.scan_bank_id)
     }
 
     /// The inclusive max root pinned by this scan guard.
@@ -356,6 +397,23 @@ mod tests {
         // guard should still have cleaned up
         assert_eq!(tracker.active_scans.load(Ordering::Relaxed), 0);
         assert!(tracker.min_ongoing_scan_root().is_none());
+    }
+
+    #[test]
+    fn test_is_bank_removed_only_for_removed_bank() {
+        let tracker = ScanTracker::default();
+        let guard_on_removed_bank = ScanGuard::try_new(&tracker, 1, || 10).unwrap();
+        let guard_on_other_bank = ScanGuard::try_new(&tracker, 2, || 10).unwrap();
+        assert!(!guard_on_removed_bank.is_bank_removed());
+        assert!(!guard_on_other_bank.is_bank_removed());
+
+        tracker.mark_banks_removed(std::iter::once(1));
+
+        assert!(guard_on_removed_bank.is_bank_removed());
+        // the removal bumps the count seen by every scan, but bank 2 is still scannable, both on
+        // the check that catches up to the new count and on every check after it
+        assert!(!guard_on_other_bank.is_bank_removed());
+        assert!(!guard_on_other_bank.is_bank_removed());
     }
 
     #[test]

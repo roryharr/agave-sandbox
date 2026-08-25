@@ -692,6 +692,169 @@ fn test_remove_unrooted_slot_purges_secondary_index_for_cache_only_account() {
     );
 }
 
+/// A scan whose bank is removed via `remove_unrooted_slots` mid-scan aborts at the next account
+/// instead of scanning to completion. The scan's caller holds a reference to the bank at the tip
+/// of the fork it's scanning, so a scan that ran to completion would delay dropping the removed
+/// fork's banks.
+#[test]
+fn test_remove_unrooted_slots_aborts_ongoing_scan() {
+    let db = AccountsDb::new_for_tests_with_config(Vec::new(), DEFAULT_ACCOUNTS_DB_CONFIG);
+    let slot = 1;
+    let bank_id = 1;
+    let num_accounts = 10;
+    let account = AccountSharedData::new(1, 0, &Pubkey::default());
+    let pubkeys: Vec<_> = (0..num_accounts).map(|_| Pubkey::new_unique()).collect();
+    let accounts: Vec<_> = pubkeys.iter().map(|pubkey| (pubkey, &account)).collect();
+    db.store_for_tests((slot, accounts.as_slice()));
+
+    let mut visited = 0;
+    let result = db.scan_accounts(
+        &Ancestors::from(vec![slot, 0]),
+        bank_id,
+        |scan_result| {
+            if scan_result.is_some() {
+                visited += 1;
+                if visited == 1 {
+                    // remove the scanned bank mid-scan, as ReplayStage does when dumping a
+                    // duplicate fork
+                    db.remove_unrooted_slots(&[(slot, bank_id)]);
+                }
+            }
+        },
+        &ScanConfig::default(),
+    );
+    assert_eq!(result, Err(ScanError::SlotRemoved { slot, bank_id }));
+    assert_eq!(
+        visited, 1,
+        "scan must abort instead of visiting all {num_accounts} accounts"
+    );
+}
+
+/// Same as `test_remove_unrooted_slots_aborts_ongoing_scan`, but for accounts in the accounts
+/// index rather than the write cache: the index scan loop must also observe the removal at the
+/// next account. Marks the bank removed directly, standing in for `remove_unrooted_slots` on
+/// another thread.
+#[test]
+fn test_scan_accounts_aborts_when_bank_removed_during_index_scan() {
+    let db = AccountsDb::new_for_tests_with_config(Vec::new(), DEFAULT_ACCOUNTS_DB_CONFIG);
+    let slot = 1;
+    let bank_id = 1;
+    let num_accounts = 10;
+    let account = AccountSharedData::new(1, 0, &Pubkey::default());
+    let pubkeys: Vec<_> = (0..num_accounts).map(|_| Pubkey::new_unique()).collect();
+    let accounts: Vec<_> = pubkeys.iter().map(|pubkey| (pubkey, &account)).collect();
+    db.store_for_tests((slot, accounts.as_slice()));
+    db.add_root_and_flush_write_cache(slot);
+
+    let mut visited = 0;
+    let result = db.scan_accounts(
+        &Ancestors::from(vec![slot]),
+        bank_id,
+        |scan_result| {
+            if scan_result.is_some() {
+                visited += 1;
+                if visited == 1 {
+                    db.scan_tracker.mark_banks_removed(iter::once(bank_id));
+                }
+            }
+        },
+        &ScanConfig::default(),
+    );
+    assert_eq!(result, Err(ScanError::SlotRemoved { slot, bank_id }));
+    assert_eq!(
+        visited, 1,
+        "scan must abort instead of visiting all {num_accounts} accounts"
+    );
+}
+
+/// Removing some other bank must not abort this scan. `was_scan_corrupted` only fails a scan
+/// whose own bank was removed, so a scan that broke out of its loop for someone else's removal
+/// would return `Ok` with partial results.
+#[test]
+fn test_scan_accounts_not_aborted_by_other_bank_removal() {
+    let db = AccountsDb::new_for_tests_with_config(Vec::new(), DEFAULT_ACCOUNTS_DB_CONFIG);
+    let slot = 1;
+    let bank_id = 1;
+    let other_bank_id = 2;
+    let num_accounts = 10;
+    let account = AccountSharedData::new(1, 0, &Pubkey::default());
+    let pubkeys: Vec<_> = (0..num_accounts).map(|_| Pubkey::new_unique()).collect();
+    let accounts: Vec<_> = pubkeys.iter().map(|pubkey| (pubkey, &account)).collect();
+    db.store_for_tests((slot, accounts.as_slice()));
+    db.add_root_and_flush_write_cache(slot);
+
+    let mut visited = 0;
+    let result = db.scan_accounts(
+        &Ancestors::from(vec![slot]),
+        bank_id,
+        |scan_result| {
+            if scan_result.is_some() {
+                visited += 1;
+                if visited == 1 {
+                    db.scan_tracker
+                        .mark_banks_removed(iter::once(other_bank_id));
+                }
+            }
+        },
+        &ScanConfig::default(),
+    );
+    assert_eq!(result, Ok(()));
+    assert_eq!(
+        visited, num_accounts,
+        "scan must visit every account despite the unrelated removal"
+    );
+}
+
+/// `index_scan_accounts` scans the secondary index rather than the accounts index, so its loop
+/// needs its own check for the scanned bank being removed mid-scan. This is the path RPC's
+/// `getProgramAccounts` takes, so it's the scan most likely to be in flight when a fork is
+/// dumped. Marks the bank removed directly, standing in for `remove_unrooted_slots` on another
+/// thread.
+#[test]
+fn test_index_scan_accounts_aborts_when_bank_removed() {
+    let db = AccountsDb {
+        account_indexes: program_id_index_enabled(),
+        ..AccountsDb::new_for_tests_with_config(Vec::new(), DEFAULT_ACCOUNTS_DB_CONFIG)
+    };
+    let slot = 1;
+    let bank_id = 1;
+    let num_accounts = 10;
+    let owner = Pubkey::new_unique();
+    let account = AccountSharedData::new(1, 0, &owner);
+    let pubkeys: Vec<_> = (0..num_accounts).map(|_| Pubkey::new_unique()).collect();
+    let accounts: Vec<_> = pubkeys.iter().map(|pubkey| (pubkey, &account)).collect();
+    db.store_for_tests((slot, accounts.as_slice()));
+    db.add_root_and_flush_write_cache(slot);
+    // all of them are reachable through the secondary index, so a scan that doesn't abort
+    // visits every one
+    assert_eq!(
+        db.accounts_index
+            .get_index_key_size(&AccountIndex::ProgramId, &owner),
+        Some(num_accounts as usize)
+    );
+
+    let mut visited = 0;
+    let result = db.index_scan_accounts(
+        &Ancestors::from(vec![slot]),
+        bank_id,
+        IndexKey::ProgramId(owner),
+        |scan_result| {
+            if scan_result.is_some() {
+                visited += 1;
+                if visited == 1 {
+                    db.scan_tracker.mark_banks_removed(iter::once(bank_id));
+                }
+            }
+        },
+        &ScanConfig::default(),
+    );
+    assert_eq!(result, Err(ScanError::SlotRemoved { slot, bank_id }));
+    assert_eq!(
+        visited, 1,
+        "scan must abort instead of visiting all {num_accounts} accounts"
+    );
+}
+
 // Test that removing a rooted storage works correctly. This is behaviour specific to
 // the snapshot minimizer
 #[test]
