@@ -1132,6 +1132,13 @@ impl Validator {
             BankForksControllerHandle::new();
         let bank_forks_controller = Arc::new(bank_forks_controller);
 
+        // TEMPORARY: see `scan_abort_injection`. Delete before merge.
+        let _scan_abort_injection = crate::scan_abort_injection::spawn(
+            bank_forks.clone(),
+            bank_forks_controller.clone(),
+            exit.clone(),
+        );
+
         let (banking_tracer, tracer_thread) =
             BankingTracer::new((config.banking_trace_dir_byte_limit > 0).then_some((
                 &blockstore.banking_trace_path(),

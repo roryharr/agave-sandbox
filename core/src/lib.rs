@@ -31,6 +31,8 @@ pub mod replay_stage;
 pub mod resource_limits;
 mod result;
 pub mod sample_performance_service;
+// TEMPORARY: validation harness for prompt scan aborts. Delete before merge.
+pub mod scan_abort_injection;
 #[cfg(unix)]
 mod scheduler_bindings_server;
 mod shred_fetch_stage;
