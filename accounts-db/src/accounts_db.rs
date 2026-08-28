@@ -1476,7 +1476,7 @@ impl AccountsDb {
                                 );
                                 return (false, ());
                             };
-                            let slot_list = index_entry.slot_list_read_lock();
+                            let slot_list = index_entry.slot_list();
                             // Slots newer than `max_slot_inclusive` are in the index but were
                             // excluded from the storage scan, so exclude them from the comparison
                             // too.
@@ -5255,7 +5255,7 @@ impl AccountsDb {
                         let key = account.pubkey();
                         self.accounts_index.get_and_then(key, |entry| {
                             let index_entry = entry.unwrap();
-                            let slot_list = index_entry.slot_list_read_lock();
+                            let slot_list = index_entry.slot_list();
                             let mut count = 0;
                             for (slot2, account_info2) in slot_list.iter() {
                                 if *slot2 == slot {
@@ -5592,7 +5592,7 @@ impl AccountsDb {
             for pubkey in map.keys() {
                 self.accounts_index.get_and_then(&pubkey, |account_entry| {
                     if let Some(account_entry) = account_entry {
-                        let list_r = account_entry.slot_list_read_lock();
+                        let list_r = account_entry.slot_list();
                         info!(" key: {pubkey} slots: {list_r:?}");
                     }
                     let add_to_in_mem_cache = false;

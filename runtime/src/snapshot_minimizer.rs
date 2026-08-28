@@ -224,14 +224,9 @@ impl<'a> SnapshotMinimizer<'a> {
                 .accounts_index
                 .get_and_then(&pubkey, |entry| {
                     if let Some(entry) = entry {
-                        let max_slot = entry
-                            .slot_list_read_lock()
-                            .iter()
-                            .map(|(slot, _)| *slot)
-                            .max();
-                        if let Some(max_slot) = max_slot {
-                            minimized_slot_set.insert(max_slot);
-                        }
+                        // the index holds a single entry per pubkey, at its newest slot
+                        let (slot, _account_info) = entry.entry();
+                        minimized_slot_set.insert(slot);
                     }
                     (false, ())
                 });

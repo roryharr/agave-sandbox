@@ -2395,8 +2395,7 @@ fn test_verify_index_small_dataset_detects_mismatch() {
 
     // point the slot list entry at a slot that doesn't contain this pubkey
     accounts.accounts_index.get_and_then(&pubkey, |entry| {
-        let mut slot_list = entry.unwrap().slot_list_write_lock();
-        slot_list.replace((slot + 1, AccountInfo::default()));
+        entry.unwrap().replace((slot + 1, AccountInfo::default()));
         (false, ())
     });
 
@@ -3867,7 +3866,7 @@ fn test_alive_bytes() {
                 .accounts_index
                 .get_and_then(account.pubkey(), |entry| {
                     // Should only be one entry per key, since every key was only stored to slot 0
-                    (false, entry.unwrap().slot_list_read_lock()[0])
+                    (false, entry.unwrap().slot_list()[0])
                 });
             assert_eq!(account_info.0, slot);
             let reclaims = [account_info];

@@ -1,159 +1,175 @@
 use {
     super::{
         DiskIndexValue, IndexValue, SlotList, SlotListItem,
-        bucket_map_holder::{Age, AtomicAge, BucketMapHolder},
+        bucket_map_holder::{Age, BucketMapHolder},
     },
     crate::{account_info::AccountInfo, is_zero_lamport::IsZeroLamport},
+    portable_atomic::AtomicU128,
     solana_clock::Slot,
-    std::{
-        fmt::Debug,
-        mem,
-        ops::{Deref, DerefMut},
-        sync::{
-            RwLock, RwLockReadGuard, RwLockWriteGuard,
-            atomic::{AtomicBool, Ordering},
-        },
-    },
+    std::{fmt::Debug, marker::PhantomData, sync::atomic::Ordering},
 };
 
 /// one entry in the in-mem accounts index
 /// Represents the value for an account key in the in-memory accounts index
+///
+/// The index holds a single `(Slot, T)` per pubkey, packed into one 128 bit cell together with
+/// the `dirty` and `age` metadata, so updates are a compare-and-exchange rather than a lock.
 #[derive(Debug)]
 pub struct AccountMapEntry<T> {
-    /// list of slots in which this pubkey was updated
-    /// Note that 'clean' removes outdated entries (ie. older roots) from this slot_list
-    /// purge_slot() also removes non-rooted slots from this list
-    slot_list: RwLock<SlotList<T>>,
-    /// synchronization metadata for in-memory state since last flush to disk accounts index
-    meta: AccountMapEntryMeta,
+    entry: AtomicU128,
+    _phantom: PhantomData<T>,
 }
 
+/// bit layout of `AccountMapEntry::entry`
+const VALUE_BITS: u32 = 64;
+const SLOT_BITS: u32 = 40;
+const SLOT_SHIFT: u32 = VALUE_BITS;
+const SLOT_MASK: u128 = (1 << SLOT_BITS) - 1;
+const DIRTY_SHIFT: u32 = SLOT_SHIFT + SLOT_BITS;
+const AGE_SHIFT: u32 = DIRTY_SHIFT + 1;
+const AGE_MASK: u128 = u8::MAX as u128;
+
 // Ensure the size of AccountMapEntry never changes unexpectedly
-const _: () = assert!(size_of::<AccountMapEntry<AccountInfo>>() == 40);
+const _: () = assert!(size_of::<AccountMapEntry<AccountInfo>>() == 16);
 
 impl<T: IndexValue> AccountMapEntry<T> {
     pub fn new(slot_list: SlotList<T>, meta: AccountMapEntryMeta) -> Self {
+        let (slot, account_info) = slot_list[0];
         Self {
-            slot_list: RwLock::new(slot_list),
-            meta,
+            entry: AtomicU128::new(Self::pack(slot, account_info, meta.dirty, meta.age)),
+            _phantom: PhantomData,
+        }
+    }
+
+    fn pack(slot: Slot, account_info: T, dirty: bool, age: Age) -> u128 {
+        assert!(
+            slot <= SLOT_MASK as Slot,
+            "slot {slot} does not fit in the index entry"
+        );
+        u128::from(account_info.to_bits())
+            | ((slot as u128 & SLOT_MASK) << SLOT_SHIFT)
+            | ((dirty as u128) << DIRTY_SHIFT)
+            | ((age as u128) << AGE_SHIFT)
+    }
+
+    fn unpack_entry(packed: u128) -> SlotListItem<T> {
+        let slot = ((packed >> SLOT_SHIFT) & SLOT_MASK) as Slot;
+        (slot, T::from_bits(packed as u64))
+    }
+
+    fn load(&self) -> u128 {
+        self.entry.load(Ordering::Acquire)
+    }
+
+    /// The single `(slot, account_info)` this pubkey is stored at
+    pub fn entry(&self) -> SlotListItem<T> {
+        Self::unpack_entry(self.load())
+    }
+
+    /// The index holds exactly one entry per pubkey
+    pub fn slot_list(&self) -> SlotList<T> {
+        [self.entry()]
+    }
+
+    /// Replace the entry, returning the entry that was there
+    pub fn replace(&self, item: SlotListItem<T>) -> SlotListItem<T> {
+        let mut current = self.load();
+        loop {
+            // replacing an entry always dirties it
+            let next = Self::pack(item.0, item.1, true, Self::age_of(current));
+            match self.entry.compare_exchange_weak(
+                current,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return Self::unpack_entry(current),
+                Err(actual) => current = actual,
+            }
+        }
+    }
+
+    /// Replace the entry with `item` unless the entry held is from a newer slot, in which case
+    /// `item` is the older duplicate. `other_slot` names an entry to replace regardless of
+    /// ordering. Returns whichever version did not survive.
+    ///
+    /// The comparison is inside the compare-exchange loop: deciding it against a stale load
+    /// could overwrite an entry newer than `item`.
+    pub fn replace_if_newer(
+        &self,
+        item: SlotListItem<T>,
+        other_slot: Option<Slot>,
+    ) -> SlotListItem<T> {
+        let old_slot = other_slot.unwrap_or(item.0);
+        let mut current = self.load();
+        loop {
+            let (current_slot, current_account_info) = Self::unpack_entry(current);
+            if current_slot > item.0 && current_slot != old_slot {
+                return item;
+            }
+            let next = Self::pack(item.0, item.1, true, Self::age_of(current));
+            match self.entry.compare_exchange_weak(
+                current,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return (current_slot, current_account_info),
+                Err(actual) => current = actual,
+            }
+        }
+    }
+
+    fn age_of(packed: u128) -> Age {
+        ((packed >> AGE_SHIFT) & AGE_MASK) as Age
+    }
+
+    /// set the bit at `shift` to `value`, returning the previous packed cell
+    fn set_bit(&self, shift: u32, value: bool) -> u128 {
+        if value {
+            self.entry.fetch_or(1 << shift, Ordering::AcqRel)
+        } else {
+            self.entry.fetch_and(!(1u128 << shift), Ordering::AcqRel)
         }
     }
 
     pub fn dirty(&self) -> bool {
-        self.meta.dirty.load(Ordering::Acquire)
+        (self.load() >> DIRTY_SHIFT) & 1 == 1
     }
 
     pub fn mark_dirty(&self) {
-        self.meta.dirty.store(true, Ordering::Release)
+        self.set_bit(DIRTY_SHIFT, true);
     }
 
     /// set dirty to false, return true if was dirty
     pub fn clear_dirty(&self) -> bool {
-        self.meta
-            .dirty
-            .compare_exchange(true, false, Ordering::AcqRel, Ordering::Relaxed)
-            .is_ok()
+        (self.set_bit(DIRTY_SHIFT, false) >> DIRTY_SHIFT) & 1 == 1
     }
 
     pub fn age(&self) -> Age {
-        self.meta.age.load(Ordering::Acquire)
+        Self::age_of(self.load())
     }
 
+    /// Age is only a hint for eviction, so this is best effort: a racing update wins and the
+    /// new age is dropped rather than retried.
     pub fn set_age(&self, value: Age) {
-        self.meta.age.store(value, Ordering::Release)
+        let current = self.load();
+        let next = (current & !(AGE_MASK << AGE_SHIFT)) | ((value as u128) << AGE_SHIFT);
+        let _ = self
+            .entry
+            .compare_exchange(current, next, Ordering::AcqRel, Ordering::Relaxed);
     }
 
     /// set age to 'next_age' if 'self.age' is 'expected_age'
     pub fn try_exchange_age(&self, next_age: Age, expected_age: Age) {
-        let _ = self.meta.age.compare_exchange(
-            expected_age,
-            next_age,
-            Ordering::AcqRel,
-            Ordering::Relaxed,
-        );
-    }
-
-    /// Return length of the slot list
-    ///
-    /// Do not call it while guard from any locking function (`slot_list_*lock`) is active.
-    pub fn slot_list_lock_read_len(&self) -> usize {
-        self.slot_list.read().unwrap().len()
-    }
-
-    /// Acquire a read lock on the slot list and return accessor for interpreting its representation
-    ///
-    /// Do not call any locking function (`slot_list_*lock*`) on the same `AccountMapEntry` until accessor
-    /// they return is dropped.
-    pub fn slot_list_read_lock(&self) -> SlotListReadGuard<'_, T> {
-        SlotListReadGuard(self.slot_list.read().unwrap())
-    }
-
-    /// Acquire a write lock on the slot list and return accessor for modifying it
-    ///
-    /// Do not call any locking function (`slot_list_*lock*`) on the same `AccountMapEntry` until accessor
-    /// they return is dropped.
-    pub fn slot_list_write_lock(&self) -> SlotListWriteGuard<'_, T> {
-        SlotListWriteGuard(self.slot_list.write().unwrap())
-    }
-}
-
-/// Holds slot list lock for reading and provides read access to its contents.
-#[derive(Debug)]
-pub struct SlotListReadGuard<'a, T>(RwLockReadGuard<'a, SlotList<T>>);
-
-impl<T> Deref for SlotListReadGuard<'_, T> {
-    type Target = [SlotListItem<T>];
-
-    fn deref(&self) -> &Self::Target {
-        self.0.as_slice()
-    }
-}
-
-impl<T> SlotListReadGuard<'_, T> {
-    #[cfg(test)]
-    pub fn clone_list(&self) -> SlotList<T>
-    where
-        T: Copy,
-    {
-        *self.0
-    }
-}
-
-/// Holds slot list lock for writing and provides mutable API translating changes to the slot list.
-#[derive(Debug)]
-pub struct SlotListWriteGuard<'a, T>(RwLockWriteGuard<'a, SlotList<T>>);
-
-impl<T> SlotListWriteGuard<'_, T> {
-    /// Replace the entry with `item`, returning the entry that was there
-    pub fn replace(&mut self, item: SlotListItem<T>) -> SlotListItem<T> {
-        mem::replace(&mut self.0[0], item)
-    }
-
-    #[cfg(test)]
-    pub fn assign(&mut self, value: SlotListItem<T>) {
-        self.0[0] = value;
-    }
-
-    #[cfg(test)]
-    pub fn clone_list(&self) -> SlotList<T>
-    where
-        T: Copy,
-    {
-        *self.0
-    }
-}
-
-impl<T> Deref for SlotListWriteGuard<'_, T> {
-    type Target = [SlotListItem<T>];
-
-    fn deref(&self) -> &Self::Target {
-        self.0.as_slice()
-    }
-}
-
-impl<T> DerefMut for SlotListWriteGuard<'_, T> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        self.0.as_mut_slice()
+        let current = self.load();
+        if Self::age_of(current) != expected_age {
+            return;
+        }
+        let next = (current & !(AGE_MASK << AGE_SHIFT)) | ((next_age as u128) << AGE_SHIFT);
+        let _ = self
+            .entry
+            .compare_exchange(current, next, Ordering::AcqRel, Ordering::Relaxed);
     }
 }
 
@@ -162,9 +178,9 @@ impl<T> DerefMut for SlotListWriteGuard<'_, T> {
 #[derive(Debug, Default)]
 pub struct AccountMapEntryMeta {
     /// true if entry in in-mem idx has changes and needs to be written to disk
-    dirty: AtomicBool,
+    dirty: bool,
     /// 'age' at which this entry should be purged from the cache (implements lru)
-    age: AtomicAge,
+    age: Age,
 }
 
 impl AccountMapEntryMeta {
@@ -173,16 +189,16 @@ impl AccountMapEntryMeta {
         is_cached: bool,
     ) -> Self {
         AccountMapEntryMeta {
-            dirty: AtomicBool::new(true),
-            age: AtomicAge::new(storage.future_age_to_flush(is_cached)),
+            dirty: true,
+            age: storage.future_age_to_flush(is_cached),
         }
     }
     pub fn new_clean<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>>(
         storage: &BucketMapHolder<T, U>,
     ) -> Self {
         AccountMapEntryMeta {
-            dirty: AtomicBool::new(false),
-            age: AtomicAge::new(storage.future_age_to_flush(false)),
+            dirty: false,
+            age: storage.future_age_to_flush(false),
         }
     }
 }
@@ -196,9 +212,7 @@ pub enum PreAllocatedAccountMapEntry<T: IndexValue> {
 impl<T: IndexValue> IsZeroLamport for PreAllocatedAccountMapEntry<T> {
     fn is_zero_lamport(&self) -> bool {
         match self {
-            PreAllocatedAccountMapEntry::Entry(entry) => {
-                entry.slot_list_read_lock()[0].1.is_zero_lamport()
-            }
+            PreAllocatedAccountMapEntry::Entry(entry) => entry.slot_list()[0].1.is_zero_lamport(),
             PreAllocatedAccountMapEntry::Raw(raw) => raw.1.is_zero_lamport(),
         }
     }
@@ -207,7 +221,7 @@ impl<T: IndexValue> IsZeroLamport for PreAllocatedAccountMapEntry<T> {
 impl<T: IndexValue> From<PreAllocatedAccountMapEntry<T>> for SlotListItem<T> {
     fn from(source: PreAllocatedAccountMapEntry<T>) -> SlotListItem<T> {
         match source {
-            PreAllocatedAccountMapEntry::Entry(entry) => entry.slot_list_read_lock()[0],
+            PreAllocatedAccountMapEntry::Entry(entry) => entry.slot_list()[0],
             PreAllocatedAccountMapEntry::Raw(raw) => raw,
         }
     }

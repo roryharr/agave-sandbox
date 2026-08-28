@@ -123,7 +123,11 @@ pub enum UpsertReclaim {
     /// in the 'reclaims'
     ReclaimOldSlots,
 }
-pub trait IndexValue: 'static + IsZeroLamport + DiskIndexValue {}
+pub trait IndexValue: 'static + IsZeroLamport + DiskIndexValue {
+    /// pack into the low 64 bits of an index entry
+    fn to_bits(self) -> u64;
+    fn from_bits(bits: u64) -> Self;
+}
 
 pub trait DiskIndexValue:
     'static + Clone + Debug + PartialEq + Copy + Default + Sync + Send
@@ -289,7 +293,7 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> AccountsIndex<T, U> {
         max_root: Option<Slot>,
         callback: impl FnOnce(SlotListItem<T>) -> R,
     ) -> Option<R> {
-        let slot_list = entry.slot_list_read_lock();
+        let slot_list = entry.slot_list();
         self.latest_slot(ancestors, &slot_list, max_root)
             .map(|found_index| callback(slot_list[found_index]))
     }
@@ -341,7 +345,7 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> AccountsIndex<T, U> {
             for pubkey in pubkeys {
                 self.get_and_then(&pubkey, |entry| {
                     if let Some(list) = entry {
-                        let list_r = &list.slot_list_read_lock();
+                        let list_r = &list.slot_list();
                         if let Some(index) =
                             self.latest_slot(Some(ancestors), list_r, Some(max_root))
                         {
@@ -469,7 +473,7 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> AccountsIndex<T, U> {
 
             let mut internal_callback = |entry: Option<&AccountMapEntry<T>>| {
                 if let Some(locked_entry) = entry {
-                    let slot_list = locked_entry.slot_list_read_lock();
+                    let slot_list = locked_entry.slot_list();
                     callback(pubkey, Some(slot_list.as_ref()));
                 } else {
                     callback(pubkey, None);
@@ -492,7 +496,7 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> AccountsIndex<T, U> {
                             .get_only_in_mem(pubkey, false, |mut entry| {
                                 if matches!(filter, ScanFilter::OnlyAbnormalTest)
                                     && let Some(local_entry) = entry
-                                    && local_entry.slot_list_lock_read_len() == 1
+                                    && local_entry.slot_list().len() == 1
                                 {
                                     // Account was found in memory, but is a single slot account.
                                     // For testing purposes, return None as this can be treated like
@@ -506,7 +510,7 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> AccountsIndex<T, U> {
                         lock.as_ref().unwrap().get_internal_inner(pubkey, |entry| {
                             assert!(entry.is_some(), "{pubkey}, entry: {entry:?}");
                             let entry = entry.unwrap();
-                            assert_eq!(entry.slot_list_lock_read_len(), 1, "{pubkey}");
+                            assert_eq!(entry.slot_list().len(), 1, "{pubkey}");
                             (false, ())
                         });
                     }
@@ -805,7 +809,7 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> AccountsIndex<T, U> {
             (
                 false,
                 entry
-                    .map(|entry| entry.slot_list_lock_read_len())
+                    .map(|entry| entry.slot_list().len())
                     .unwrap_or_default(),
             )
         })
@@ -1030,7 +1034,14 @@ mod tests {
 
     type AccountInfoTest = f64;
 
-    impl IndexValue for AccountInfoTest {}
+    impl IndexValue for AccountInfoTest {
+        fn to_bits(self) -> u64 {
+            self.to_bits()
+        }
+        fn from_bits(bits: u64) -> Self {
+            Self::from_bits(bits)
+        }
+    }
     impl DiskIndexValue for AccountInfoTest {}
 
     impl IsZeroLamport for AccountInfoTest {
@@ -1134,11 +1145,8 @@ mod tests {
                     to_raw_first,
                 )
                 .into_account_map_entry(&index.storage.storage);
-                assert_eq!(new_entry.slot_list_lock_read_len(), 1);
-                assert_eq!(
-                    new_entry.slot_list_read_lock().to_vec(),
-                    vec![(slot, account_info)]
-                );
+                assert_eq!(new_entry.slot_list().len(), 1);
+                assert_eq!(new_entry.slot_list().to_vec(), vec![(slot, account_info)]);
             }
         }
     }
@@ -1162,7 +1170,7 @@ mod tests {
         for (i, key) in [key0, key1].iter().enumerate() {
             index.get_and_then(key, |entry| {
                 assert_eq!(
-                    entry.unwrap().slot_list_read_lock().as_ref(),
+                    entry.unwrap().slot_list().as_ref(),
                     &[(slot0, account_infos[i])],
                 );
                 (false, ())
@@ -1207,7 +1215,7 @@ mod tests {
         // verify the added entry matches expected
         index.get_and_then(&key, |entry| {
             let entry = entry.unwrap();
-            let slot_list = entry.slot_list_read_lock();
+            let slot_list = entry.slot_list();
             assert_eq!(slot_list.as_ref(), &[(slot0, account_infos[0])]);
             let new_entry = PreAllocatedAccountMapEntry::new(
                 slot0,
@@ -1216,7 +1224,7 @@ mod tests {
                 false,
             )
             .into_account_map_entry(&index.storage.storage);
-            assert_eq!(slot_list.as_ref(), new_entry.slot_list_read_lock().as_ref(),);
+            assert_eq!(slot_list.as_ref(), new_entry.slot_list().as_ref(),);
             (false, ())
         });
 
@@ -1256,7 +1264,7 @@ mod tests {
 
         let last_item = index.get_and_then(&key, |entry| {
             let entry = entry.unwrap();
-            let slot_list = entry.slot_list_read_lock();
+            let slot_list = entry.slot_list();
 
             if should_have_reclaims {
                 assert_eq!(slot_list.as_ref(), &[(slot1, account_infos[1])],);
@@ -1467,9 +1475,7 @@ mod tests {
         index.replace(slot, slot, &key, account_info);
 
         // Slot list now holds the new account_info at the same slot.
-        let slot_list = index.get_and_then(&key, |entry| {
-            (false, entry.unwrap().slot_list_read_lock().clone_list())
-        });
+        let slot_list = index.get_and_then(&key, |entry| (false, entry.unwrap().slot_list()));
         assert_eq!(slot_list, SlotList::from([(slot, account_info)]));
         // Replace doesn't change the slot list length.
         assert_eq!(index.slot_list_len(&key), 1);
@@ -1497,9 +1503,7 @@ mod tests {
 
         index.replace(new_slot, old_slot, &key, account_info);
 
-        let slot_list = index.get_and_then(&key, |entry| {
-            (false, entry.unwrap().slot_list_read_lock().clone_list())
-        });
+        let slot_list = index.get_and_then(&key, |entry| (false, entry.unwrap().slot_list()));
         assert_eq!(slot_list, SlotList::from([(new_slot, account_info)]));
         // Moving an entry between slots must not change the slot list length.
         assert_eq!(index.slot_list_len(&key), 1);
@@ -2018,8 +2022,22 @@ mod tests {
         }
     }
 
-    impl IndexValue for bool {}
-    impl IndexValue for u64 {}
+    impl IndexValue for bool {
+        fn to_bits(self) -> u64 {
+            self as u64
+        }
+        fn from_bits(bits: u64) -> Self {
+            bits != 0
+        }
+    }
+    impl IndexValue for u64 {
+        fn to_bits(self) -> u64 {
+            self
+        }
+        fn from_bits(bits: u64) -> Self {
+            bits
+        }
+    }
     impl DiskIndexValue for bool {}
     impl DiskIndexValue for u64 {}
 
