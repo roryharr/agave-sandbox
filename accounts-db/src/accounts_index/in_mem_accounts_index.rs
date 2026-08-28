@@ -188,7 +188,7 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
     fn load_from_disk(&self, pubkey: &Pubkey) -> Option<SlotList<U>> {
         self.bucket.as_ref().and_then(|disk| {
             let m = Measure::start("load_disk_found_count");
-            let entry_disk = disk.read_value(pubkey).into();
+            let entry_disk = disk.read_value(pubkey, |slot_list| slot_list.to_vec());
             match &entry_disk {
                 Some(_) => {
                     Self::update_time_stat(&self.stats().load_disk_found_us, m);

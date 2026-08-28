@@ -67,13 +67,13 @@ impl<T: Clone + Copy + PartialEq + std::fmt::Debug> BucketApi<T> {
             .map_or_else(Vec::default, |bucket| bucket.keys())
     }
 
-    /// Get the values for Pubkey `key`
-    pub fn read_value<C: for<'a> From<&'a [T]>>(&self, key: &Pubkey) -> Option<C> {
+    /// Get the values for Pubkey `key`, passing them to `callback`
+    pub fn read_value<R>(&self, key: &Pubkey, callback: impl FnOnce(&[T]) -> R) -> Option<R> {
         self.bucket
             .read()
             .unwrap()
             .as_ref()
-            .and_then(|bucket| bucket.read_value(key).map(|value| C::from(value)))
+            .and_then(|bucket| bucket.read_value(key).map(callback))
     }
 
     pub fn bucket_len(&self) -> u64 {
