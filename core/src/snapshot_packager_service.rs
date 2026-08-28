@@ -13,11 +13,13 @@ use {
     solana_perf::thread::renice_this_thread,
     solana_runtime::{
         accounts_background_service::PendingSnapshotPackages,
+        epoch_stakes::VersionedEpochStakes,
         snapshot_controller::SnapshotController,
         snapshot_package::{BankSnapshotPackage, SnapshotPackage},
         snapshot_utils,
     },
     std::{
+        collections::HashMap,
         sync::{
             Arc, Mutex,
             atomic::{AtomicBool, Ordering},
@@ -97,6 +99,7 @@ impl SnapshotPackagerService {
                             teardown_state = Some(TeardownState {
                                 snapshot_slot: snapshot_package.slot,
                                 snapshot_storages: snapshot_package.snapshot_storages.clone(),
+                                versioned_epoch_stakes: snapshot_package.bank_snapshot_package.bank_fields.versioned_epoch_stakes.clone(),
                                 bank_snapshot_package: Some(snapshot_package.bank_snapshot_package),
                             });
 
@@ -112,6 +115,7 @@ impl SnapshotPackagerService {
                             teardown_state = Some(TeardownState {
                                 snapshot_slot: snapshot_package.slot,
                                 snapshot_storages: snapshot_package.snapshot_storages.clone(),
+                                versioned_epoch_stakes: snapshot_package.bank_snapshot_package.bank_fields.versioned_epoch_stakes.clone(),
                                 bank_snapshot_package: None,
                             });
                         }
@@ -124,15 +128,32 @@ impl SnapshotPackagerService {
                     let io_setup = IoSetupState::default()
                         .with_direct_io(false)
                         .with_buffers_registered(snapshot_config.use_registered_io_uring_buffers);
+
+                    // For incremental snapshots, only retain the leader schedule
+                    // epoch's stakes. The remaining epoch stakes are already in
+                    // the full snapshot.
+                    let mut bank_snapshot_package = snapshot_package.bank_snapshot_package;
+                    if snapshot_kind.is_incremental_snapshot() {
+                        let leader_schedule_epoch = bank_snapshot_package
+                            .bank_fields
+                            .epoch_schedule
+                            .get_leader_schedule_epoch(bank_snapshot_package.bank_fields.slot);
+                        bank_snapshot_package
+                            .bank_fields
+                            .versioned_epoch_stakes
+                            .retain(|epoch, _| *epoch == leader_schedule_epoch);
+                    }
+
                     // Serializing the snapshot package is not allowed to fail, as archiving is
                     // not allowed to fail (see comment on archive_snapshot_package below
                     let bank_snapshot_info = snapshot_utils::serialize_snapshot(
                         &snapshot_config.bank_snapshots_dir,
                         snapshot_config.snapshot_version,
-                        snapshot_package.bank_snapshot_package,
+                        bank_snapshot_package,
                         snapshot_package.snapshot_storages.as_slice(),
                         exit_backpressure.is_none(),
                         &io_setup,
+                        true, // include epoch stakes in archive snapshots
                     );
 
                     let Ok(bank_snapshot_info) = bank_snapshot_info else {
@@ -237,6 +258,7 @@ impl SnapshotPackagerService {
             snapshot_slot,
             snapshot_storages,
             bank_snapshot_package,
+            versioned_epoch_stakes,
         } = state;
 
         // Teardown, expedite IO using sqpoll thread, but fallback in case of error.
@@ -260,6 +282,7 @@ impl SnapshotPackagerService {
                 snapshot_storages.as_slice(),
                 false,
                 &io_setup,
+                false, // epoch stakes are written to a separate file for fastboot
             );
             if let Err(err) = result {
                 warn!(
@@ -333,6 +356,20 @@ impl SnapshotPackagerService {
         }
         info!("Saving obsolete accounts... Done in {:?}", start.elapsed());
 
+        info!("Saving epoch stakes...");
+        let start = Instant::now();
+        let result = snapshot_utils::write_epoch_stakes_to_snapshot(
+            &bank_snapshot_dir,
+            &versioned_epoch_stakes,
+        );
+        if let Err(err) = result {
+            warn!("Failed to serialize epoch stakes: {err}");
+            // If serializing the epoch stakes failed, we do *NOT* want to mark the bank snapshot
+            // as loadable so return early.
+            return;
+        }
+        info!("Saving epoch stakes... Done in {:?}", start.elapsed());
+
         let result = snapshot_utils::mark_bank_snapshot_as_loadable(&bank_snapshot_dir);
         if let Err(err) = result {
             warn!("Failed to mark bank snapshot as loadable: {err}");
@@ -353,4 +390,8 @@ struct TeardownState {
     /// `bank_snapshot_package` will be `None` because the serialization would have already occurred
     /// when the snapshot archive was written.
     bank_snapshot_package: Option<BankSnapshotPackage>,
+    /// Epoch stakes to be serialized to a separate file during teardown for fastboot.
+    /// These are stored separately from the bank snapshot stream so they can be excluded
+    /// from incremental snapshots.
+    versioned_epoch_stakes: HashMap<u64, VersionedEpochStakes>,
 }

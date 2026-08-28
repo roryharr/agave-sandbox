@@ -382,7 +382,7 @@ pub fn bank_from_snapshot_dir(
 
     let next_append_vec_id = Arc::new(AtomicAccountsFileId::new(0));
 
-    let ((storage, bank_fields, accounts_db_fields), measure_rebuild_storages) = measure_time!(
+    let ((storage, mut bank_fields, accounts_db_fields), measure_rebuild_storages) = measure_time!(
         rebuild_storages_from_snapshot_dir(
             bank_snapshot,
             account_paths,
@@ -391,6 +391,19 @@ pub fn bank_from_snapshot_dir(
         "rebuild storages from snapshot dir"
     );
     info!("{measure_rebuild_storages}");
+
+    // With fastboot_version >= 3, epoch stakes are stored in a separate file
+    // rather than in the bank snapshot stream
+    if bank_snapshot
+        .fastboot_version
+        .as_ref()
+        .is_some_and(|v| v.major >= 3)
+    {
+        let epoch_stakes = snapshot_utils::deserialize_epoch_stakes_from_snapshot(
+            &bank_snapshot.snapshot_dir,
+        )?;
+        bank_fields.versioned_epoch_stakes = epoch_stakes;
+    }
 
     let next_append_vec_id =
         Arc::try_unwrap(next_append_vec_id).expect("this is the only strong reference");
@@ -735,6 +748,7 @@ pub fn bank_to_full_snapshot_archive(
         snapshot_storages.as_slice(),
         false, // we do not intend to fastboot, so skip flushing and hard linking the storages
         &io_setup,
+        true,  // full snapshot, include epoch stakes
     )?;
 
     let snapshot_archive_info = snapshot_utils::archive_snapshot_package(
@@ -801,13 +815,26 @@ pub fn bank_to_incremental_snapshot_archive(
         .with_buffers_registered(snapshot_config.use_registered_io_uring_buffers)
         .with_direct_io(snapshot_config.use_direct_io)
         .with_shared_sqpoll()?;
+    // For incremental snapshots, only retain the leader schedule epoch's stakes.
+    // The remaining epoch stakes are already in the full snapshot.
+    let mut bank_snapshot_package = snapshot_package.bank_snapshot_package;
+    let leader_schedule_epoch = bank_snapshot_package
+        .bank_fields
+        .epoch_schedule
+        .get_leader_schedule_epoch(bank_snapshot_package.bank_fields.slot);
+    bank_snapshot_package
+        .bank_fields
+        .versioned_epoch_stakes
+        .retain(|epoch, _| *epoch == leader_schedule_epoch);
+
     let bank_snapshot_info = snapshot_utils::serialize_snapshot(
         &snapshot_config.bank_snapshots_dir,
         snapshot_config.snapshot_version,
-        snapshot_package.bank_snapshot_package,
+        bank_snapshot_package,
         snapshot_storages.as_slice(),
         false, // we do not intend to fastboot, so skip flushing and hard linking the storages
         &io_setup,
+        true,  // include epoch stakes in archive snapshots
     )?;
 
     let snapshot_archive_info = snapshot_utils::archive_snapshot_package(
@@ -950,6 +977,7 @@ mod tests {
             snapshot_storages.as_slice(),
             should_finalize,
             &IoSetupState::default(),
+            true, // include epoch stakes in the bank snapshot for tests
         )?;
 
         Ok(())
