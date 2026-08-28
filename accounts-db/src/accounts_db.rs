@@ -48,7 +48,7 @@ use {
         accounts_index::{
             AccountSecondaryIndexes, AccountsIndex, IndexKey, ReclaimsSlotList,
             ReclaimsWithNewestSlot, ScanFilter, Startup, UpsertReclaim,
-            in_mem_accounts_index::StartupStats,
+            in_mem_accounts_index::{InMemAccountsIndex, StartupStats},
         },
         accounts_scan::{ScanConfig, ScanError, ScanGuard, ScanResult, ScanTracker},
         accounts_update_notifier_interface::{AccountForGeyser, AccountsUpdateNotifier},
@@ -570,6 +570,7 @@ pub enum LoadedAccountAccessor {
 impl LoadedAccountAccessor {
     fn check_and_get_loaded_account_shared_data(
         &mut self,
+        expected_pubkey: &Pubkey,
         load_filter: Option<impl Fn(u64, &Pubkey, usize) -> bool>,
     ) -> Option<AccountSharedData> {
         // all of these following .expect() and .unwrap() are like serious logic errors,
@@ -586,17 +587,25 @@ impl LoadedAccountAccessor {
                 // If there's a load filter, read only the account metadata first.
                 // This way we don't read the whole account (including its data)
                 // from disk, only to discard it later.
-                let should_load_account = load_filter.is_none_or(|load_filter| {
-                    maybe_storage_entry
-                        .accounts
-                        .get_stored_account_without_data_callback(*offset, |account| {
+                let should_load_account = maybe_storage_entry
+                    .accounts
+                    .get_stored_account_without_data_callback(*offset, |account| {
+                        // The in-mem index is keyed by a 64 bit tag rather than by the pubkey, so
+                        // two pubkeys in a bin that share a tag share an index entry. The record
+                        // carries its own pubkey, so check it here rather than hand back another
+                        // account's data.
+                        assert_eq!(
+                            account.pubkey, expected_pubkey,
+                            "index tag collision: entry points at a record for another pubkey"
+                        );
+                        load_filter.as_ref().is_none_or(|load_filter| {
                             load_filter(account.lamports, account.owner, account.data_len)
                         })
-                        .expect(
-                            "If a storage entry was found in the storage map, it must not have \
-                             been reset yet",
-                        )
-                });
+                    })
+                    .expect(
+                        "If a storage entry was found in the storage map, it must not have been \
+                         reset yet",
+                    );
 
                 should_load_account.then(|| {
                     maybe_storage_entry
@@ -3112,7 +3121,7 @@ impl AccountsDb {
             .fetch_add(1, Ordering::Relaxed);
 
         let maybe_account =
-            account_accessor.check_and_get_loaded_account_shared_data(load_filter.as_ref());
+            account_accessor.check_and_get_loaded_account_shared_data(pubkey, load_filter.as_ref());
 
         if let Some(ref account) = maybe_account
             && populate_read_cache == PopulateReadCache::True
@@ -3950,6 +3959,40 @@ impl AccountsDb {
         );
     }
 
+    /// Returns the entry of every pubkey in one index bin that is visible from `ancestors`.
+    ///
+    /// The in-mem index is keyed by a tag rather than by the pubkey, so the pubkey of an entry
+    /// is not recoverable from the index. Callers that need it read it from the account record
+    /// the entry points at.
+    fn index_entries_in_bin(
+        &self,
+        bin: &InMemAccountsIndex<AccountInfo, AccountInfo>,
+        ancestors: &Ancestors,
+    ) -> Vec<(Slot, AccountInfo)> {
+        if self.accounts_index.is_disk_index_enabled() {
+            // the disk index holds every pubkey in the bin, so enumerate from there
+            bin.keys()
+                .into_iter()
+                .filter_map(|pubkey| {
+                    self.accounts_index
+                        .get_with_and_then(&pubkey, ancestors, false, |entry| entry)
+                })
+                .collect()
+        } else {
+            // keep only the entries visible from `ancestors`, the check `get_with_and_then`
+            // applies on the disk path above
+            let max_root = ancestors.min_slot();
+            bin.in_mem_entries()
+                .into_iter()
+                .filter(|entry| {
+                    self.accounts_index
+                        .latest_slot(Some(ancestors), std::slice::from_ref(entry), max_root)
+                        .is_some()
+                })
+                .collect()
+        }
+    }
+
     /// Calculates the accounts lt hash
     ///
     /// Only intended to be called at startup (or by tests).
@@ -3973,27 +4016,21 @@ impl AccountsDb {
             .fold(
                 LtHash::identity,
                 |mut accumulator_lt_hash, accounts_index_bin| {
-                    for pubkey in accounts_index_bin.keys() {
-                        let account_lt_hash = self
-                            .accounts_index
-                            .get_with_and_then(&pubkey, ancestors, false, |(slot, account_info)| {
-                                (!account_info.is_zero_lamport()).then(|| {
-                                    self.get_account_accessor(
-                                        slot,
-                                        &account_info.storage_location(),
-                                    )
-                                    .get_loaded_account(|loaded_account| {
-                                        Self::lt_hash_account(&loaded_account, &pubkey)
-                                    })
-                                    // SAFETY: The index said this pubkey exists, so
-                                    // there must be an account to load.
-                                    .unwrap()
-                                })
-                            })
-                            .flatten();
-                        if let Some(account_lt_hash) = account_lt_hash {
-                            accumulator_lt_hash.mix_in(&account_lt_hash.0);
+                    for (slot, account_info) in
+                        self.index_entries_in_bin(accounts_index_bin, ancestors)
+                    {
+                        if account_info.is_zero_lamport() {
+                            continue;
                         }
+                        let account_lt_hash = self
+                            .get_account_accessor(slot, &account_info.storage_location())
+                            .get_loaded_account(|loaded_account| {
+                                Self::lt_hash_account(&loaded_account, loaded_account.pubkey())
+                            })
+                            // SAFETY: The index said this account exists, so
+                            // there must be an account to load.
+                            .unwrap();
+                        accumulator_lt_hash.mix_in(&account_lt_hash.0);
                     }
                     accumulator_lt_hash
                 },
@@ -4046,18 +4083,21 @@ impl AccountsDb {
     ///
     /// Only intended to be called at startup by ledger-tool or tests.
     pub fn calculate_capitalization_at_startup_from_index(&self, ancestors: &Ancestors) -> u64 {
+        let stored_lamports_of_entry = |(slot, account_info): (Slot, AccountInfo)| {
+            if account_info.is_zero_lamport() {
+                return 0;
+            }
+            self.get_account_accessor(slot, &account_info.storage_location())
+                .get_loaded_account(|loaded_account| loaded_account.lamports())
+                // SAFETY: The index said this account exists, so
+                // there must be an account to load.
+                .unwrap()
+        };
         let stored_lamports = |pubkey: &Pubkey| {
             self.accounts_index
-                .get_with_and_then(pubkey, ancestors, false, |(slot, account_info)| {
-                    (!account_info.is_zero_lamport()).then(|| {
-                        self.get_account_accessor(slot, &account_info.storage_location())
-                            .get_loaded_account(|loaded_account| loaded_account.lamports())
-                            // SAFETY: The index said this pubkey exists, so
-                            // there must be an account to load.
-                            .unwrap()
-                    })
+                .get_with_and_then(pubkey, ancestors, false, |entry| {
+                    stored_lamports_of_entry(entry)
                 })
-                .flatten()
                 .unwrap_or(0)
         };
 
@@ -4066,10 +4106,9 @@ impl AccountsDb {
             .account_maps
             .par_iter()
             .map(|accounts_index_bin| {
-                accounts_index_bin
-                    .keys()
+                self.index_entries_in_bin(accounts_index_bin, ancestors)
                     .into_iter()
-                    .map(|pubkey| stored_lamports(&pubkey))
+                    .map(stored_lamports_of_entry)
                     .try_fold(0, u64::checked_add)
             })
             .try_reduce(|| 0, u64::checked_add)
@@ -5598,15 +5637,8 @@ impl AccountsDb {
 
     fn print_index(&self) {
         self.accounts_index.account_maps.iter().for_each(|map| {
-            for pubkey in map.keys() {
-                self.accounts_index.get_and_then(&pubkey, |account_entry| {
-                    if let Some(account_entry) = account_entry {
-                        let list_r = account_entry.slot_list();
-                        info!(" key: {pubkey} slots: {list_r:?}");
-                    }
-                    let add_to_in_mem_cache = false;
-                    (add_to_in_mem_cache, ())
-                });
+            for entry in map.in_mem_entries() {
+                info!("      slots: {entry:?}");
             }
         });
     }
