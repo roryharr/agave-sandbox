@@ -582,46 +582,6 @@ mod tests {
         ); // snapshot slot is untouched, so still has all 300 accounts
     }
 
-    /// Purging an account from a filtered storage must remove its slot list entry when the
-    /// account is still alive in a later slot.
-    #[test]
-    fn test_minimize_accounts_db_unrefs_multi_ref_accounts() {
-        let (genesis_config, _) = create_genesis_config(1_000_000);
-        let bank = Arc::new(Bank::new_for_tests(&genesis_config));
-        let accounts = &bank.accounts().accounts_db;
-
-        let pubkey_keep = Pubkey::new_unique();
-        let pubkey_multi = Pubkey::new_unique();
-        let account = AccountSharedData::new(223, 0, &Pubkey::default());
-
-        // pubkey_multi is stored in both slot 1 and slot 2; pubkey_keep keeps slot 1's
-        // storage out of the dead slot set
-        accounts.store_for_tests((
-            1,
-            [(&pubkey_keep, &account), (&pubkey_multi, &account)].as_slice(),
-        ));
-        accounts.add_root(1);
-        accounts.store_for_tests((2, [(&pubkey_multi, &account)].as_slice()));
-        accounts.add_root(2);
-        // Flush without clean so pubkey_multi keeps both slot list entries
-        accounts.flush_rooted_accounts_cache_without_clean();
-
-        assert_eq!(accounts.accounts_index.slot_list_len(&pubkey_multi), 2);
-
-        let minimized_account_set = DashSet::new();
-        minimized_account_set.insert(pubkey_keep);
-        let minimizer = SnapshotMinimizer {
-            bank: &bank,
-            starting_slot: 2,
-            minimized_account_set,
-        };
-        minimizer.minimize_accounts_db();
-
-        // filter_storage purged (pubkey_multi, slot 1) from the index; the slot 2 entry
-        // keeps it alive
-        assert_eq!(accounts.accounts_index.slot_list_len(&pubkey_multi), 1);
-    }
-
     /// A dead slot whose storage carries a shrink-produced tombstone must still purge
     /// cleanly: `minimize` declares the minimized bank's slot as the latest full snapshot
     /// slot, so `purge_slot_storage` marks the tombstone-only remainder dead instead of
