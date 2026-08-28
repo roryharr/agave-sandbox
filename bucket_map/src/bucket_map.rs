@@ -151,9 +151,9 @@ impl<T: Clone + Copy + Debug + PartialEq> BucketMap<T> {
         self.buckets.len()
     }
 
-    /// Get the values for Pubkey `key`
-    pub fn read_value<C: for<'a> From<&'a [T]>>(&self, key: &Pubkey) -> Option<C> {
-        self.get_bucket(key).read_value(key)
+    /// Get the values for Pubkey `key`, passing them to `callback`
+    pub fn read_value<R>(&self, key: &Pubkey, callback: impl FnOnce(&[T]) -> R) -> Option<R> {
+        self.get_bucket(key).read_value(key, callback)
     }
 
     /// Delete the Pubkey `key`
@@ -212,13 +212,21 @@ mod tests {
         std::{collections::HashMap, sync::RwLock},
     };
 
+    /// Get the values for Pubkey `key` as a `Vec`
+    fn read_value<T: Clone + Copy + Debug + PartialEq>(
+        index: &BucketMap<T>,
+        key: &Pubkey,
+    ) -> Option<Vec<T>> {
+        index.read_value(key, |value| value.to_vec())
+    }
+
     #[test]
     fn bucket_map_test_insert() {
         let key = Pubkey::new_unique();
         let config = BucketMapConfig::new(1 << 1);
         let index = BucketMap::new(config);
         index.update(&key, |_| Some(vec![0]));
-        assert_eq!(index.read_value(&key), Some(vec![0]));
+        assert_eq!(read_value(&index, &key), Some(vec![0]));
     }
 
     #[test]
@@ -234,18 +242,18 @@ mod tests {
             } else {
                 let result = index.try_insert(&key, &[0, 1]);
                 assert!(result.is_err());
-                assert_eq!(index.read_value::<Vec<_>>(&key), None);
+                assert_eq!(read_value(&index, &key), None);
                 if pass == 2 {
                     // another call to try insert again - should still return an error
                     let result = index.try_insert(&key, &[0, 1]);
                     assert!(result.is_err());
-                    assert_eq!(index.read_value::<Vec<_>>(&key), None);
+                    assert_eq!(read_value(&index, &key), None);
                 }
                 bucket.grow(result.unwrap_err());
                 let result = index.try_insert(&key, &[0, 1]);
                 assert!(result.is_ok());
             }
-            assert_eq!(index.read_value(&key), Some(vec![0, 1]));
+            assert_eq!(read_value(&index, &key), Some(vec![0, 1]));
         }
     }
 
@@ -255,9 +263,9 @@ mod tests {
         let config = BucketMapConfig::new(1 << 1);
         let index = BucketMap::new(config);
         index.insert(&key, &[0]);
-        assert_eq!(index.read_value(&key), Some(vec![0]));
+        assert_eq!(read_value(&index, &key), Some(vec![0]));
         index.insert(&key, &[1]);
-        assert_eq!(index.read_value(&key), Some(vec![1]));
+        assert_eq!(read_value(&index, &key), Some(vec![1]));
     }
 
     #[test]
@@ -266,9 +274,9 @@ mod tests {
         let config = BucketMapConfig::new(1 << 1);
         let index = BucketMap::new(config);
         index.update(&key, |_| Some(vec![0]));
-        assert_eq!(index.read_value(&key), Some(vec![0]));
+        assert_eq!(read_value(&index, &key), Some(vec![0]));
         index.update(&key, |_| Some(vec![1]));
-        assert_eq!(index.read_value(&key), Some(vec![1]));
+        assert_eq!(read_value(&index, &key), Some(vec![1]));
     }
 
     #[test]
@@ -277,16 +285,16 @@ mod tests {
         let config = BucketMapConfig::new(1 << 1);
         let index = BucketMap::new(config);
         index.update(&key, |_| Some(vec![0]));
-        assert_eq!(index.read_value(&key), Some(vec![0]));
+        assert_eq!(read_value(&index, &key), Some(vec![0]));
         // sets len to 0, updates in place
         index.update(&key, |_| Some(vec![]));
-        assert_eq!(index.read_value(&key), Some(vec![]));
+        assert_eq!(read_value(&index, &key), Some(vec![]));
         // sets len to 0, doesn't update in place - finds a new place, which causes us to no longer have an allocation in data
         index.update(&key, |_| Some(vec![]));
-        assert_eq!(index.read_value(&key), Some(vec![]));
+        assert_eq!(read_value(&index, &key), Some(vec![]));
         // sets len to 1, doesn't update in place - finds a new place
         index.update(&key, |_| Some(vec![1]));
-        assert_eq!(index.read_value(&key), Some(vec![1]));
+        assert_eq!(read_value(&index, &key), Some(vec![1]));
     }
 
     #[test]
@@ -295,16 +303,16 @@ mod tests {
         let index = BucketMap::new(config);
         for i in 0..10 {
             let key = Pubkey::new_unique();
-            assert_eq!(index.read_value::<Vec<_>>(&key), None);
+            assert_eq!(read_value(&index, &key), None);
 
             index.update(&key, |_| Some(vec![i]));
-            assert_eq!(index.read_value(&key), Some(vec![i]));
+            assert_eq!(read_value(&index, &key), Some(vec![i]));
 
             index.delete_key(&key);
-            assert_eq!(index.read_value::<Vec<_>>(&key), None);
+            assert_eq!(read_value(&index, &key), None);
 
             index.update(&key, |_| Some(vec![i]));
-            assert_eq!(index.read_value(&key), Some(vec![i]));
+            assert_eq!(read_value(&index, &key), Some(vec![i]));
             index.delete_key(&key);
         }
     }
@@ -315,16 +323,16 @@ mod tests {
         let index = BucketMap::new(config);
         for i in 0..100 {
             let key = Pubkey::new_unique();
-            assert_eq!(index.read_value::<Vec<_>>(&key), None);
+            assert_eq!(read_value(&index, &key), None);
 
             index.update(&key, |_| Some(vec![i]));
-            assert_eq!(index.read_value(&key), Some(vec![i]));
+            assert_eq!(read_value(&index, &key), Some(vec![i]));
 
             index.delete_key(&key);
-            assert_eq!(index.read_value::<Vec<_>>(&key), None);
+            assert_eq!(read_value(&index, &key), None);
 
             index.update(&key, |_| Some(vec![i]));
-            assert_eq!(index.read_value(&key), Some(vec![i]));
+            assert_eq!(read_value(&index, &key), Some(vec![i]));
             index.delete_key(&key);
         }
     }
@@ -336,7 +344,7 @@ mod tests {
         for i in 0..100 {
             let key = Pubkey::new_unique();
             index.update(&key, |_| Some(vec![i]));
-            assert_eq!(index.read_value(&key), Some(vec![i]));
+            assert_eq!(read_value(&index, &key), Some(vec![i]));
         }
     }
     #[test]
@@ -348,12 +356,12 @@ mod tests {
             let key = &keys[k];
             let i = read_be_u64(key.as_ref());
             index.update(key, |_| Some(vec![i]));
-            assert_eq!(index.read_value(key), Some(vec![i]));
+            assert_eq!(read_value(&index, key), Some(vec![i]));
             for (ix, key) in keys.iter().enumerate() {
                 let i = read_be_u64(key.as_ref());
                 //debug!("READ: {:?} {}", key, i);
                 let expected = if ix <= k { Some(vec![i]) } else { None };
-                assert_eq!(index.read_value(key), expected);
+                assert_eq!(read_value(&index, key), expected);
             }
         }
     }
@@ -366,20 +374,20 @@ mod tests {
         for key in keys.iter() {
             let i = read_be_u64(key.as_ref());
             index.update(key, |_| Some(vec![i]));
-            assert_eq!(index.read_value(key), Some(vec![i]));
+            assert_eq!(read_value(&index, key), Some(vec![i]));
         }
         for key in keys.iter() {
             let i = read_be_u64(key.as_ref());
             //debug!("READ: {:?} {}", key, i);
-            assert_eq!(index.read_value(key), Some(vec![i]));
+            assert_eq!(read_value(&index, key), Some(vec![i]));
         }
         for k in 0..keys.len() {
             let key = &keys[k];
             index.delete_key(key);
-            assert_eq!(index.read_value::<Vec<_>>(key), None);
+            assert_eq!(read_value(&index, key), None);
             for key in keys.iter().skip(k + 1) {
                 let i = read_be_u64(key.as_ref());
-                assert_eq!(index.read_value(key), Some(vec![i]));
+                assert_eq!(read_value(&index, key), Some(vec![i]));
             }
         }
     }
