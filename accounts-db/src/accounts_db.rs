@@ -1825,13 +1825,6 @@ impl AccountsDb {
                 i64
             ),
             (
-                "purge_older_root_entries_one_slot_list",
-                self.accounts_index
-                    .purge_older_root_entries_one_slot_list
-                    .swap(0, Ordering::Relaxed),
-                i64
-            ),
-            (
                 "active_scans",
                 self.scan_tracker.active_scans.load(Ordering::Relaxed),
                 i64
@@ -5365,8 +5358,8 @@ impl AccountsDb {
         let total_num_unique_duplicate_keys = AtomicU64::default();
 
         // outer vec is accounts index bin (determined by pubkey value)
-        // inner vec is the pubkeys within that bin that are present in > 1 slot
-        let unique_pubkeys_by_bin = Mutex::new(Vec::<Vec<Pubkey>>::default());
+        // inner vec is the older versions of the pubkeys within that bin that are present in > 1 slot
+        let duplicates_by_bin = Mutex::new(Vec::<Vec<(Slot, Pubkey, AccountInfo)>>::default());
         // tell accounts index we are done adding the initial accounts at startup
         let mut m = Measure::start("accounts_index_idle_us");
         self.accounts_index.set_startup(Startup::Normal);
@@ -5376,23 +5369,18 @@ impl AccountsDb {
         let populate_duplicate_keys_us = measure_us!({
             // this has to happen before visit_duplicate_pubkeys_during_startup below
             // get duplicate keys from acct idx. We have to wait until we've finished flushing.
-            self.accounts_index
-                .populate_and_retrieve_duplicate_keys_from_startup(|slot_keys| {
-                    total_duplicate_slot_keys.fetch_add(slot_keys.len() as u64, Ordering::Relaxed);
-                    let unique_keys =
-                        ahash::HashSet::<Pubkey>::from_iter(slot_keys.iter().map(|(_, key)| *key));
-                    let unique_pubkeys_by_bin_inner = unique_keys.into_iter().collect::<Vec<_>>();
-                    total_num_unique_duplicate_keys
-                        .fetch_add(unique_pubkeys_by_bin_inner.len() as u64, Ordering::Relaxed);
-                    // does not matter that this is not ordered by slot
-                    unique_pubkeys_by_bin
-                        .lock()
-                        .unwrap()
-                        .push(unique_pubkeys_by_bin_inner);
-                });
+            self.accounts_index.take_startup_duplicates(|duplicates| {
+                total_duplicate_slot_keys.fetch_add(duplicates.len() as u64, Ordering::Relaxed);
+                let unique_keys =
+                    ahash::HashSet::<Pubkey>::from_iter(duplicates.iter().map(|(_, key, _)| *key));
+                total_num_unique_duplicate_keys
+                    .fetch_add(unique_keys.len() as u64, Ordering::Relaxed);
+                // does not matter that this is not ordered by slot
+                duplicates_by_bin.lock().unwrap().push(duplicates);
+            });
         })
         .1;
-        let unique_pubkeys_by_bin = unique_pubkeys_by_bin.into_inner().unwrap();
+        let duplicates_by_bin = duplicates_by_bin.into_inner().unwrap();
 
         let mut timings = GenerateIndexTimings {
             index_flush_us,
@@ -5437,20 +5425,20 @@ impl AccountsDb {
             num_duplicate_accounts,
             duplicates_lt_hash,
             capitalization_from_duplicates,
-        } = unique_pubkeys_by_bin
+        } = duplicates_by_bin
             .par_iter()
             .fold(
                 DuplicatePubkeysVisitedInfo::default,
-                |accum, pubkeys_by_bin| {
-                    let intermediate = pubkeys_by_bin
+                |accum, duplicates_by_bin| {
+                    let intermediate = duplicates_by_bin
                         .par_chunks(4096)
-                        .fold(DuplicatePubkeysVisitedInfo::default, |accum, pubkeys| {
+                        .fold(DuplicatePubkeysVisitedInfo::default, |accum, duplicates| {
                             let (
                                 accounts_data_len_from_duplicates,
                                 accounts_duplicates_num,
                                 duplicates_lt_hash,
                                 capitalization_from_duplicates,
-                            ) = self.visit_duplicate_pubkeys_during_startup(pubkeys);
+                            ) = self.visit_duplicate_pubkeys_during_startup(duplicates);
                             let intermediate = DuplicatePubkeysVisitedInfo {
                                 accounts_data_len_from_duplicates,
                                 num_duplicate_accounts: accounts_duplicates_num,
@@ -5500,7 +5488,7 @@ impl AccountsDb {
         // be performed on a slot greater than the current slot
         let slot_marked_obsolete = storages.last().unwrap().slot();
         let obsolete_account_stats =
-            self.mark_obsolete_accounts_at_startup(slot_marked_obsolete, unique_pubkeys_by_bin);
+            self.mark_obsolete_accounts_at_startup(slot_marked_obsolete, duplicates_by_bin);
 
         mark_obsolete_accounts_time.stop();
         timings.mark_obsolete_accounts_us = mark_obsolete_accounts_time.as_us();
@@ -5552,19 +5540,20 @@ impl AccountsDb {
         }
     }
 
-    /// Use the duplicated pubkeys to mark all older version of the pubkeys as obsolete
-    /// This will remove the older entries from the slot lists and then reclaim the accounts
+    /// Mark all the older versions of duplicate pubkeys as obsolete.
+    /// These are never in the index, so only the accounts need to be reclaimed.
     fn mark_obsolete_accounts_at_startup(
         &self,
         slot_marked_obsolete: Slot,
-        pubkeys_with_duplicates_by_bin: Vec<Vec<Pubkey>>,
+        duplicates_by_bin: Vec<Vec<(Slot, Pubkey, AccountInfo)>>,
     ) -> ObsoleteAccountsStats {
-        let stats: ObsoleteAccountsStats = pubkeys_with_duplicates_by_bin
+        let stats: ObsoleteAccountsStats = duplicates_by_bin
             .par_iter()
-            .map(|pubkeys_by_bin| {
-                let reclaims = self
-                    .accounts_index
-                    .clean_rooted_entries_by_bin(pubkeys_by_bin);
+            .map(|duplicates| {
+                let reclaims = duplicates
+                    .iter()
+                    .map(|(slot, _pubkey, account_info)| (*slot, *account_info))
+                    .collect::<ReclaimsSlotList<_>>();
                 let stats = PurgeStats::default();
 
                 // Mark all the entries as obsolete, and remove any empty storages
@@ -5598,53 +5587,34 @@ impl AccountsDb {
     /// - capitalization of duplicates
     fn visit_duplicate_pubkeys_during_startup(
         &self,
-        pubkeys: &[Pubkey],
+        duplicates: &[(Slot, Pubkey, AccountInfo)],
     ) -> (u64, u64, Box<DuplicatesLtHash>, u128) {
         let mut accounts_data_len_from_duplicates = 0;
         let mut num_duplicate_accounts = 0_u64;
         let mut duplicates_lt_hash = Box::new(DuplicatesLtHash::default());
         let mut capitalization_from_duplicates = 0_u128;
-        self.accounts_index.scan(
-            pubkeys.iter(),
-            |pubkey, slot_list| {
-                if let Some(slot_list) = slot_list
-                    && slot_list.len() > 1
-                {
-                    // Only the account data len in the highest slot should be used, and the rest are
-                    // duplicates.  So find the max slot to keep.
-                    // Then sum up the remaining data len, which are the duplicates.
-                    // All of the slots need to go in the 'uncleaned_slots' list. For clean to work properly,
-                    // the slot where duplicate accounts are found in the index need to be in 'uncleaned_slots' list, too.
-                    let max = slot_list.iter().map(|(slot, _)| slot).max().unwrap();
-                    slot_list.iter().for_each(|(slot, account_info)| {
-                        if slot == max {
-                            // the info in 'max' is the most recent, current info for this pubkey
-                            return;
-                        }
-                        let maybe_storage_entry = self
-                            .storage
-                            .get_account_storage_entry(*slot, account_info.store_id());
-                        let mut accessor = LoadedAccountAccessor::Stored(
-                            maybe_storage_entry.map(|entry| (entry, account_info.offset())),
-                        );
-                        accessor.check_and_get_loaded_account(|loaded_account| {
-                            let data_len = loaded_account.data_len();
-                            let lamports = loaded_account.lamports();
-                            if lamports > 0 {
-                                accounts_data_len_from_duplicates += data_len;
-                            }
-                            num_duplicate_accounts += 1;
-                            let account_lt_hash = Self::lt_hash_account(&loaded_account, pubkey);
-                            duplicates_lt_hash.0.mix_in(&account_lt_hash.0);
-                            capitalization_from_duplicates = capitalization_from_duplicates
-                                .checked_add(u128::from(lamports))
-                                .expect("capitalization cannot overflow");
-                        });
-                    });
+        // the index holds the version from the newest slot, so every entry here is a duplicate
+        for (slot, pubkey, account_info) in duplicates {
+            let maybe_storage_entry = self
+                .storage
+                .get_account_storage_entry(*slot, account_info.store_id());
+            let mut accessor = LoadedAccountAccessor::Stored(
+                maybe_storage_entry.map(|entry| (entry, account_info.offset())),
+            );
+            accessor.check_and_get_loaded_account(|loaded_account| {
+                let data_len = loaded_account.data_len();
+                let lamports = loaded_account.lamports();
+                if lamports > 0 {
+                    accounts_data_len_from_duplicates += data_len;
                 }
-            },
-            ScanFilter::All,
-        );
+                num_duplicate_accounts += 1;
+                let account_lt_hash = Self::lt_hash_account(&loaded_account, pubkey);
+                duplicates_lt_hash.0.mix_in(&account_lt_hash.0);
+                capitalization_from_duplicates = capitalization_from_duplicates
+                    .checked_add(u128::from(lamports))
+                    .expect("capitalization cannot overflow");
+            });
+        }
         (
             accounts_data_len_from_duplicates as u64,
             num_duplicate_accounts,

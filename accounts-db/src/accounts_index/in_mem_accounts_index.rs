@@ -70,10 +70,11 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> Debug for InMemAccoun
 
 /// An entry was inserted into the index; did it already exist in the index?
 #[derive(Debug)]
-pub enum InsertNewEntryResults {
+pub enum InsertNewEntryResults<T> {
     DidNotExist,
     Existed {
-        other_slot: Option<Slot>,
+        /// the version that lost, ie. the one from the older slot
+        older_version: (Slot, T),
         location: ExistedLocation,
     },
 }
@@ -87,16 +88,9 @@ pub enum ExistedLocation {
 
 #[derive(Default, Debug)]
 struct StartupInfoDuplicates<T: IndexValue> {
-    /// entries that were found to have duplicate index entries.
-    /// When all entries have been inserted, these can be resolved and held in memory.
+    /// older versions of pubkeys that were found in more than one slot.
+    /// The index holds the version from the newest slot; every other version is here.
     duplicates: Vec<(Slot, Pubkey, T)>,
-    /// pubkeys that were already added to disk and later found to be duplicates,
-    duplicates_put_on_disk: HashSet<(Slot, Pubkey)>,
-
-    /// (slot, pubkey) pairs that are found to be duplicates when we are
-    /// starting from in-memory only index. This field is used only when disk
-    /// index is disabled.
-    duplicates_from_in_memory_only: Vec<(Slot, Pubkey)>,
 }
 
 #[derive(Default, Debug)]
@@ -194,7 +188,10 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
     fn load_from_disk(&self, pubkey: &Pubkey) -> Option<SlotList<U>> {
         self.bucket.as_ref().and_then(|disk| {
             let m = Measure::start("load_disk_found_count");
-            let entry_disk = disk.read_value(pubkey);
+            let entry_disk = disk.read_value(pubkey, |slot_list| {
+                assert_eq!(slot_list.len(), 1);
+                [slot_list[0]]
+            });
             match &entry_disk {
                 Some(_) => {
                     Self::update_time_stat(&self.stats().load_disk_found_us, m);
@@ -374,13 +371,10 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
         let mut map = self.map_internal.write().unwrap();
         match map.entry(*pubkey) {
             Entry::Occupied(occupied) => {
-                let mut slot_list = occupied.get().slot_list_write_lock();
-                reclaims.extend(slot_list.iter().copied());
-                slot_list.clear();
-                drop(slot_list);
-                // The slot list is now empty, so this always removes the entry
-                // (and the disk key) via the shared removal path.
-                self.remove_if_slot_list_empty_entry(Entry::Occupied(occupied));
+                reclaims.extend(occupied.get().slot_list_read_lock().iter().copied());
+                self.delete_disk_key(occupied.key());
+                self.stats().dec_mem_count();
+                occupied.remove();
             }
             Entry::Vacant(vacant) => {
                 // Disk-only entry: load the entry from disk and drain slot list into reclaims
@@ -516,36 +510,32 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
         }
     }
 
-    /// Clean the slot list by removing all slot_list items older than the max_slot.
-    /// Note: This must only be called on startup, and reclaims must be reclaimed.
-    pub(crate) fn clean_slot_list_on_startup(
+    /// Remove `pubkey`'s entry from the index, and from the disk index, if `should_remove`
+    /// returns true for its entry.
+    ///
+    /// Returns `None` if `pubkey` is not in the index, otherwise whether it was removed.
+    pub(crate) fn remove_entry_if(
         &self,
         pubkey: &Pubkey,
-        reclaims: &mut ReclaimsSlotList<T>,
-    ) {
-        self.slot_list_mut(pubkey, |slot_list| {
-            let max_slot = slot_list
-                .iter()
-                .map(|(slot, _account)| *slot)
-                .max()
-                .expect("Slot list has entries");
+        should_remove: impl FnOnce(&SlotListItem<T>) -> bool,
+    ) -> Option<bool> {
+        // faults the entry in from disk, if necessary, so that its entry can be inspected
+        let should_remove = self.get_internal_inner(pubkey, |entry| {
+            (
+                true,
+                entry.map(|entry| should_remove(&entry.slot_list_read_lock()[0])),
+            )
+        })?;
 
-            let count = slot_list.retain_and_count(|(slot, value)| {
-                // keep the newest entry, and reclaim all others
-                if *slot < max_slot {
-                    reclaims.push((*slot, *value));
-                    false
-                } else {
-                    true
-                }
-            });
-
-            assert_eq!(
-                count, 1,
-                "Slot list should have exactly one entry after cleaning"
-            );
-        })
-        .expect("Expected entry to exist in accounts index");
+        if should_remove {
+            let mut map = self.map_internal.write().unwrap();
+            if let Entry::Occupied(occupied) = map.entry(*pubkey) {
+                self.delete_disk_key(occupied.key());
+                self.stats().dec_mem_count();
+                occupied.remove();
+            }
+        }
+        Some(should_remove)
     }
 
     pub fn upsert(
@@ -558,15 +548,16 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
     ) {
         let (slot, account_info) = new_value.into();
 
-        self.get_or_create_index_entry_for_pubkey(pubkey, |entry| {
-            let slot_list_length = Self::lock_and_update_slot_list(
+        self.get_or_create_index_entry_for_pubkey(pubkey, (slot, account_info), |entry| {
+            Self::lock_and_update_slot_list(
                 entry,
                 (slot, account_info),
                 other_slot,
                 reclaims,
                 reclaim,
             );
-            self.set_age_to_future(entry, slot_list_length > 1);
+            // the index holds a single entry per pubkey, so it is never in more than one slot
+            self.set_age_to_future(entry, false);
         });
     }
 
@@ -575,42 +566,29 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
     /// Panics if `old_slot` is not present in the slot list, or if more than one entry at
     /// `old_slot` is found (which would indicate prior corruption).
     pub fn replace(&self, pubkey: &Pubkey, new_item: SlotListItem<T>, old_slot: Slot) {
-        let mut should_write_through = false;
-
-        self.get_or_create_index_entry_for_pubkey(pubkey, |entry| {
-            let mut slot_list = entry.slot_list_write_lock();
-            let mut found_slot = false;
-            let slot_list_length = slot_list.retain_and_count(|cur_item| {
-                if cur_item.0 == old_slot {
-                    assert!(
-                        !found_slot,
-                        "duplicate entry at slot {old_slot} in slot_list"
-                    );
-                    found_slot = true;
-                    *cur_item = new_item;
-                }
-                true
-            });
-            assert!(
-                found_slot,
-                "Expected to find a slot to replace in the slot list"
-            );
-            entry.mark_dirty();
-
-            should_write_through = self.should_write_through && slot_list_length == 1;
-        });
-        if should_write_through {
-            let (slot, account_info) = new_item;
-            self.write_through(pubkey, slot, account_info);
-        }
+        self.slot_list_mut(pubkey, |slot_list| {
+            let (current_slot, _current_account_info) = slot_list[0];
+            // The entry may have moved on to a newer slot since the caller read the account it
+            // is relocating, which makes the account it holds dead. Leave the newer entry.
+            if current_slot == old_slot {
+                slot_list.replace(new_item);
+            } else {
+                assert!(
+                    current_slot > old_slot,
+                    "index holds an entry from an older slot: {current_slot} vs {old_slot}"
+                );
+            }
+        })
+        .expect("Expected entry to exist in accounts index");
     }
 
-    /// Gets an entry for `pubkey` and calls `callback` with it.
-    /// If the entry is not in the index, an empty entry will be created and passed to `callback`.
-    /// If the entry is in the index, it will be passed to `callback` as is.
+    /// Gets the entry for `pubkey` and calls `callback` with it.
+    /// If `pubkey` is not in the index, a new entry holding `new_item` is created and `callback`
+    /// is not called, since there is no prior entry to update.
     pub fn get_or_create_index_entry_for_pubkey(
         &self,
         pubkey: &Pubkey,
+        new_item: SlotListItem<T>,
         callback: impl FnOnce(&AccountMapEntry<T>),
     ) {
         let mut updated_in_mem = true;
@@ -660,24 +638,18 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
                         // go to in-mem cache first
                         let disk_entry = self.load_account_entry_from_disk(vacant.key());
                         let new_value = if let Some(disk_entry) = disk_entry {
-                            // on disk, so merge new_value with what was on disk
+                            // on disk, so update what was on disk
+                            callback(&disk_entry);
                             disk_entry
                         } else {
-                            // not on disk, so insert new thing
+                            // not on disk, so insert new thing. There is no prior entry to
+                            // update, so `callback` is not called
                             self.stats().inc_insert();
                             AccountMapEntry::new(
-                                SlotList::new(),
+                                [new_item],
                                 AccountMapEntryMeta::new_dirty(&self.storage, true),
                             )
                         };
-                        callback(&new_value);
-
-                        // Ensure that after callback there is an item in the slot list
-                        assert_ne!(
-                            new_value.slot_list_lock_read_len(),
-                            0,
-                            "Callback must insert item into slot list"
-                        );
                         assert!(new_value.dirty());
                         vacant.insert(Box::new(new_value));
                         stats.inc_mem_count();
@@ -718,10 +690,10 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
         other_slot: Option<Slot>,
         reclaims: &mut ReclaimsSlotList<T>,
         reclaim: UpsertReclaim,
-    ) -> usize {
+    ) {
         let mut slot_list = current.slot_list_write_lock();
         let (slot, new_entry) = new_value;
-        let slot_list_len = Self::update_slot_list(
+        Self::update_slot_list(
             &mut slot_list,
             slot,
             new_entry,
@@ -731,17 +703,13 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
         );
 
         current.mark_dirty();
-        slot_list_len
     }
 
-    /// Modifies the slot_list by replacing or appending entries.
+    /// Replaces the entry with `account_info` at `slot`.
     ///
-    /// - Replaces any entry at `slot` or `other_slot` with `account_info`.
-    /// - Appends `account_info` to the slot list if `slot` did not exist previously.
-    /// - If UpsertReclaim is ReclaimOldSlots, remove all uncached entries older than `slot`
-    ///   and add them to reclaims
-    ///
-    /// Returns the final length of the slot list.
+    /// The index holds a single entry per pubkey, which is always the one from the newest slot,
+    /// so the entry being replaced is either at `slot`, at `other_slot`, or from an older slot.
+    /// If UpsertReclaim is ReclaimOldSlots, the replaced entry is added to reclaims.
     fn update_slot_list(
         slot_list: &mut SlotListWriteGuard<T>,
         slot: Slot,
@@ -749,61 +717,32 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
         other_slot: Option<Slot>,
         reclaims: &mut ReclaimsSlotList<T>,
         reclaim: UpsertReclaim,
-    ) -> usize {
+    ) {
         let old_slot = other_slot.unwrap_or(slot);
+        let (current_slot, _current_account_info) = slot_list[0];
 
-        // If we find an existing account at old_slot, replace it rather than adding a new entry to the list
-        let mut found_slot = false;
-        let mut final_len = slot_list.retain_and_count(|cur_item| {
-            let (cur_slot, _) = cur_item;
-            if *cur_slot == old_slot {
-                // Ensure we only find one!
-                assert!(!found_slot);
+        // The index holds the version from the newest slot. Slots are not always presented in
+        // order, since roots are flushed concurrently, so the incoming version is the older
+        // duplicate whenever the index already holds a newer one. `other_slot` names the entry
+        // to replace, so it replaces regardless of ordering.
+        let older_version = if current_slot > slot && current_slot != old_slot {
+            (slot, account_info)
+        } else {
+            slot_list.replace((slot, account_info))
+        };
 
-                // Replace the item
-                let reclaim_item = mem::replace(cur_item, (slot, account_info));
-                match reclaim {
-                    UpsertReclaim::ReclaimOldSlots => {
-                        reclaims.push(reclaim_item);
-                    }
-                    UpsertReclaim::IgnoreReclaims => {
-                        // do nothing. nothing to assert. nothing to return in reclaims
-                    }
-                }
-
-                found_slot = true;
-            } else if reclaim == UpsertReclaim::ReclaimOldSlots {
-                if *cur_slot < slot {
-                    reclaims.push(*cur_item);
-                    return false;
-                }
-            } else {
-                // Slot is new item that is being added to the slot list
-                // If slot is already in the slot list, it must be replaced otherwise it will
-                // lead to the same slot being duplicated in the list
-                assert_ne!(
-                    *cur_slot, slot,
-                    "slot_list has slot in slot_list but is not replacing it"
-                );
-            }
-            true
-        });
-
-        if !found_slot {
-            // if we make it here, we did not find the slot in the list
-            slot_list.push((slot, account_info));
-            final_len += 1;
-        }
-        final_len
+        // The index holds one entry per pubkey, so it cannot carry the older version for a
+        // later clean to reclaim. Reclaim it here, whatever the caller asked for, otherwise
+        // its record is never marked obsolete and its storage never dies.
+        let _ = reclaim;
+        reclaims.push(older_version);
     }
 
     // convert from raw data on disk to AccountMapEntry, set to age in future
     fn disk_to_cache_entry(&self, slot_list: SlotList<U>) -> AccountMapEntry<T> {
+        let (slot, account_info) = slot_list[0];
         AccountMapEntry::new(
-            slot_list
-                .into_iter()
-                .map(|(slot, info)| (slot, info.into()))
-                .collect(),
+            [(slot, account_info.into())],
             AccountMapEntryMeta::new_clean(&self.storage),
         )
     }
@@ -826,12 +765,11 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
             .fetch_add(m.end_as_us(), Ordering::Relaxed);
     }
 
-    pub fn startup_update_duplicates_from_in_memory_only(&self, items: Vec<(Slot, Pubkey)>) {
+    pub fn startup_update_duplicates(&self, items: Vec<(Slot, Pubkey, T)>) {
         assert!(self.storage.get_startup());
-        assert!(self.bucket.is_none());
 
         let mut duplicates = self.startup_info.duplicates.lock().unwrap();
-        duplicates.duplicates_from_in_memory_only.extend(items);
+        duplicates.duplicates.extend(items);
     }
 
     /// Upsert `new_entry` for `pubkey` into the primary index
@@ -844,46 +782,30 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
         &self,
         pubkey: Pubkey,
         new_entry: PreAllocatedAccountMapEntry<T>,
-    ) -> InsertNewEntryResults {
+    ) -> InsertNewEntryResults<T> {
         let mut map = self.map_internal.write().unwrap();
         let entry = map.entry(pubkey);
-        let mut other_slot = None;
+        let mut older_version = None;
         let (found_in_mem, already_existed) = match entry {
             Entry::Occupied(occupied) => {
-                // in cache, so merge into cache
+                // in cache, so keep whichever version is from the newer slot
                 let (slot, account_info) = new_entry.into();
 
-                let slot_list = occupied.get().slot_list_read_lock();
-
-                // If there is only one entry in the slot list, it means that
-                // the previous entry inserted was a duplicate, which should be
-                // added to the duplicates list too. Note that we only need to do
-                // this for slot_list.len() == 1. For slot_list.len() > 1, the
-                // items, previously inserted into the slot_list, have already
-                // been added. We don't need to add them again.
-                if slot_list.len() == 1 {
-                    other_slot = Some(slot_list[0].0);
-                }
-                drop(slot_list);
-
-                let updated_slot_list_len = Self::lock_and_update_slot_list(
-                    occupied.get(),
-                    (slot, account_info),
-                    None, // should be None because we don't expect a different slot # during index generation
-                    &mut ReclaimsSlotList::new(),
-                    UpsertReclaim::IgnoreReclaims,
+                let mut slot_list = occupied.get().slot_list_write_lock();
+                assert_eq!(slot_list.len(), 1);
+                let (resident_slot, resident_account_info) = slot_list[0];
+                assert_ne!(
+                    resident_slot, slot,
+                    "Accounts may only be stored once per slot: {slot}"
                 );
-
-                // In case of a race condition, multiple threads try to insert
-                // to the same pubkey with different slots. We only need to
-                // record `other_slot` once. If the slot list length after
-                // update is not 2, it means that someone else has already
-                // recorded `other_slot` before us. Therefore, We don't need to
-                // record it again.
-                if updated_slot_list_len != 2 {
-                    // clear `other_slot` if we don't win the race.
-                    other_slot = None;
-                }
+                older_version = Some(if slot > resident_slot {
+                    slot_list[0] = (slot, account_info);
+                    (resident_slot, resident_account_info)
+                } else {
+                    (slot, account_info)
+                });
+                drop(slot_list);
+                occupied.get().mark_dirty();
 
                 (
                     true, /* found in mem */
@@ -895,15 +817,21 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
                 let disk_entry = self.load_account_entry_from_disk(vacant.key());
                 if let Some(disk_entry) = disk_entry {
                     let (slot, account_info) = new_entry.into();
-                    InMemAccountsIndex::<T, U>::lock_and_update_slot_list(
-                        &disk_entry,
-                        (slot, account_info),
-                        // None because we are inserting the first element in the slot list for this pubkey.
-                        // There can be no 'other' slot in the list.
-                        None,
-                        &mut ReclaimsSlotList::new(),
-                        UpsertReclaim::IgnoreReclaims,
+                    let mut slot_list = disk_entry.slot_list_write_lock();
+                    assert_eq!(slot_list.len(), 1);
+                    let (resident_slot, resident_account_info) = slot_list[0];
+                    assert_ne!(
+                        resident_slot, slot,
+                        "Accounts may only be stored once per slot: {slot}"
                     );
+                    older_version = Some(if slot > resident_slot {
+                        slot_list[0] = (slot, account_info);
+                        (resident_slot, resident_account_info)
+                    } else {
+                        (slot, account_info)
+                    });
+                    drop(slot_list);
+                    disk_entry.mark_dirty();
                     vacant.insert(Box::new(disk_entry));
                     (
                         false, /* found in mem */
@@ -930,7 +858,7 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
                 ExistedLocation::OnDisk
             };
             InsertNewEntryResults::Existed {
-                other_slot,
+                older_version: older_version.expect("an existing entry has an older version"),
                 location,
             }
         } else {
@@ -1035,15 +963,23 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
             .map(|(index, _entry)| &insert[*index].0)
             .collect();
         let mut count = insert.len() as u64;
-        for (i, duplicate_entry) in duplicate_entries_and_indices {
-            let (k, entry) = &insert[i];
-            duplicates.duplicates.push((entry.0, *k, entry.1.into()));
-            // accurately account for there being a duplicate for the first entry that was previously added to the disk index.
-            // That entry could not have known yet that it was a duplicate.
-            // It is important to capture each slot with a duplicate because of slot limits applied to clean.
+        for (i, (resident_slot, resident_value)) in duplicate_entries_and_indices {
+            let (pubkey, (slot, value)) = &insert[i];
+            assert_ne!(
+                resident_slot, *slot,
+                "Accounts may only be stored once per slot: {slot}"
+            );
+            // only the version from the newest slot belongs in the index. The disk index holds
+            // whichever version was inserted first, so replace it when this one is newer.
+            let older_version = if *slot > resident_slot {
+                disk.update(pubkey, |_current| Some(vec![(*slot, *value)]));
+                (resident_slot, resident_value.into())
+            } else {
+                (*slot, (*value).into())
+            };
             duplicates
-                .duplicates_put_on_disk
-                .insert((duplicate_entry.0, *k));
+                .duplicates
+                .push((older_version.0, *pubkey, older_version.1));
             count -= 1;
         }
 
@@ -1108,78 +1044,24 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
         self.stats().inc_insert_count(count);
     }
 
-    /// pull out all duplicate pubkeys from 'startup_info'
-    /// duplicate pubkeys have a slot list with len > 1
-    /// These were collected for this bin when we did batch inserts in the bg flush threads.
-    /// Insert these into the in-mem index, then return the duplicate (Slot, Pubkey)
-    pub fn populate_and_retrieve_duplicate_keys_from_startup(&self) -> Vec<(Slot, Pubkey)> {
+    /// pull out all the older versions of duplicate pubkeys found for this bin during startup.
+    /// The index holds the version from the newest slot; these are all the rest.
+    pub fn take_startup_duplicates(&self) -> Vec<(Slot, Pubkey, T)> {
         // in order to return accurate and complete duplicates, we must have nothing left remaining to insert
         assert!(self.startup_info.insert.lock().unwrap().is_empty());
 
+        // index generation keeps only the version from the newest slot for each pubkey
+        debug_assert!(
+            self.map_internal
+                .read()
+                .unwrap()
+                .values()
+                .all(|entry| entry.slot_list_lock_read_len() == 1),
+            "index generation must leave a single entry per pubkey"
+        );
+
         let mut duplicate_items = self.startup_info.duplicates.lock().unwrap();
-        let duplicates = std::mem::take(&mut duplicate_items.duplicates);
-        let duplicates_put_on_disk = std::mem::take(&mut duplicate_items.duplicates_put_on_disk);
-        drop(duplicate_items);
-
-        // accumulated stats after inserting pubkeys into the index
-        let mut num_did_not_exist = 0;
-        let mut num_existed_in_mem = 0;
-        let mut num_existed_on_disk = 0;
-
-        let storage = self.storage.as_ref();
-        let duplicates = duplicates_put_on_disk
-            .into_iter()
-            .chain(duplicates.into_iter().map(|(slot, key, info)| {
-                let entry = PreAllocatedAccountMapEntry::new(slot, info, storage, true);
-                match self.insert_new_entry_if_missing_with_lock(key, entry) {
-                    InsertNewEntryResults::DidNotExist => {
-                        num_did_not_exist += 1;
-                    }
-                    InsertNewEntryResults::Existed {
-                        other_slot: _,
-                        location,
-                    } => match location {
-                        ExistedLocation::InMem => {
-                            num_existed_in_mem += 1;
-                        }
-                        ExistedLocation::OnDisk => {
-                            num_existed_on_disk += 1;
-                        }
-                    },
-                };
-                (slot, key)
-            }))
-            .collect();
-
-        let stats = self.stats();
-
-        // stats for inserted entries that previously did *not* exist
-        stats.inc_insert_count(num_did_not_exist);
-        stats.add_mem_count(num_did_not_exist as usize);
-
-        // stats for inserted entries that previous did exist *in-mem*
-        stats
-            .entries_from_mem
-            .fetch_add(num_existed_in_mem, Ordering::Relaxed);
-        stats
-            .updates_in_mem
-            .fetch_add(num_existed_in_mem, Ordering::Relaxed);
-
-        // stats for inserted entries that previously did exist *on-disk*
-        stats.add_mem_count(num_existed_on_disk as usize);
-        stats
-            .entries_missing
-            .fetch_add(num_existed_on_disk, Ordering::Relaxed);
-        stats
-            .updates_in_mem
-            .fetch_add(num_existed_on_disk, Ordering::Relaxed);
-
-        duplicates
-    }
-
-    pub fn startup_take_duplicates_from_in_memory_only(&self) -> Vec<(Slot, Pubkey)> {
-        let mut duplicates = self.startup_info.duplicates.lock().unwrap();
-        std::mem::take(&mut duplicates.duplicates_from_in_memory_only)
+        std::mem::take(&mut duplicate_items.duplicates)
     }
 
     /// Returns true when the bin's occupancy has crossed its configured thresholds and
@@ -1484,7 +1366,6 @@ mod tests {
             bucket_map_holder::ThresholdEntriesPerBin,
         },
         assert_matches::assert_matches,
-        itertools::Itertools,
         std::iter,
         test_case::test_case,
     };
@@ -1548,20 +1429,17 @@ mod tests {
         let slot = 0;
 
         let mut callback_called = false;
-        accounts_index.get_or_create_index_entry_for_pubkey(&pubkey, |entry| {
-            assert_eq!(entry.slot_list_lock_read_len(), 0);
-            assert!(entry.dirty());
-            InMemAccountsIndex::<u64, u64>::lock_and_update_slot_list(
-                entry,
-                (slot, 0),
-                None,
-                &mut ReclaimsSlotList::new(),
-                UpsertReclaim::IgnoreReclaims,
-            );
+        accounts_index.get_or_create_index_entry_for_pubkey(&pubkey, (slot, 0), |_entry| {
             callback_called = true;
         });
 
-        assert!(callback_called);
+        // there was no prior entry to update, so the new entry is created holding the new item
+        assert!(!callback_called);
+        accounts_index.get_only_in_mem(&pubkey, false, |entry| {
+            let entry = entry.expect("entry should be in memory");
+            assert_eq!(*entry.slot_list_read_lock(), [(slot, 0)]);
+            assert!(entry.dirty());
+        });
 
         // Ensure the entry is now in memory
         let mut found = false;
@@ -1588,8 +1466,8 @@ mod tests {
             .insert(pubkey, entry);
 
         let mut callback_called = false;
-        accounts_index.get_or_create_index_entry_for_pubkey(&pubkey, |entry| {
-            assert_eq!(entry.slot_list_lock_read_len(), 1);
+        accounts_index.get_or_create_index_entry_for_pubkey(&pubkey, (1, 43), |entry| {
+            assert_eq!(*entry.slot_list_read_lock(), [(0, 42)]);
             assert!(entry.dirty());
             callback_called = true;
         });
@@ -1620,7 +1498,7 @@ mod tests {
         assert!(!found);
 
         let mut callback_called = false;
-        accounts_index.get_or_create_index_entry_for_pubkey(&pubkey, |entry| {
+        accounts_index.get_or_create_index_entry_for_pubkey(&pubkey, (slot, 0), |entry| {
             assert_eq!(entry.slot_list_lock_read_len(), 1);
             assert!(!entry.dirty()); // Entry loaded from disk should not be dirty
             InMemAccountsIndex::<u64, u64>::lock_and_update_slot_list(
@@ -1768,55 +1646,6 @@ mod tests {
     /// `evict_from_cache` pins multi-slot entries in-mem. `ScanFilter::OnlyAbnormal` relies on
     /// this to find every multi-slot entry without reading the disk index.
     #[test]
-    fn test_evict_from_cache_skips_multi_slot_entry() {
-        let index = new_should_write_through_for_test(None);
-        let pubkey = solana_pubkey::new_rand();
-        let info = 10;
-
-        // Upsert the same pubkey at two different (uncached) slots so its slot list has two entries
-        for slot in [1, 2] {
-            let new_value = PreAllocatedAccountMapEntry::new(slot, info, &index.storage, true);
-            index.upsert(
-                &pubkey,
-                new_value,
-                None,
-                &mut ReclaimsSlotList::new(),
-                UpsertReclaim::IgnoreReclaims,
-            );
-        }
-
-        // make the entry age-eligible for eviction; only the dirty check keeps it in-mem
-        let current_age = index.storage.current_age();
-        index.get_only_in_mem(&pubkey, false, |entry| {
-            let entry = entry.expect("entry should be in memory");
-            assert_eq!(entry.slot_list_lock_read_len(), 2);
-            assert!(entry.dirty(), "multi-slot entries are always dirty");
-            entry.set_age(current_age);
-        });
-
-        index.evict_from_cache(&[pubkey], current_age, 0);
-
-        index.get_only_in_mem(&pubkey, false, |entry| {
-            let entry = entry.expect("multi-slot entry must stay in memory");
-            assert!(entry.dirty());
-        });
-        assert!(index.load_from_disk(&pubkey).is_none());
-    }
-
-    #[test]
-    #[should_panic(
-        expected = "assertion `left != right` failed: Callback must insert item into slot list"
-    )]
-    fn test_get_or_create_index_entry_for_pubkey_empty_slot_list_assertion() {
-        let accounts_index = new_for_test::<u64>();
-        let pubkey = solana_pubkey::new_rand();
-
-        accounts_index.get_or_create_index_entry_for_pubkey(&pubkey, |_entry| {
-            // Do not modify the slot list, which should trigger the assertion
-        });
-    }
-
-    #[test]
     fn test_gather_possible_evict_candidates_with_max_evictions() {
         let current_age = 100;
         let ages_to_scan = 0;
@@ -1922,204 +1751,26 @@ mod tests {
         assert_eq!(test.storage.count_buckets_flushed(), 0);
     }
 
-    #[test]
-    fn test_update_slot_list_other_reclaim_old_slots() {
-        let reclaim = UpsertReclaim::ReclaimOldSlots;
-        let new_slot = 5;
-        let info = 1;
-        let other_value = info + 1;
-        let at_new_slot = (new_slot, info);
-        let unique_other_slot = new_slot + 1;
-        for other_slot in [Some(new_slot), Some(unique_other_slot), None] {
-            let mut reclaims = ReclaimsSlotList::new();
-            let entry = AccountMapEntry::empty_for_tests();
-            let mut slot_list = entry.slot_list_write_lock();
-            // upserting into empty slot_list, so the new entry is always appended
-            assert_eq!(
-                InMemAccountsIndex::<u64, u64>::update_slot_list(
-                    &mut slot_list,
-                    new_slot,
-                    info,
-                    other_slot,
-                    &mut reclaims,
-                    reclaim
-                ),
-                1,
-                "other_slot: {other_slot:?}"
-            );
-            assert_eq!(slot_list.clone_list(), SlotList::from([at_new_slot]));
-            assert!(reclaims.is_empty());
-        }
-
-        // replace other
-        let entry = AccountMapEntry::new(
-            SlotList::from([(unique_other_slot, other_value)]),
-            AccountMapEntryMeta::default(),
-        );
-        let mut slot_list = entry.slot_list_write_lock();
-        let expected_reclaims = ReclaimsSlotList::from(slot_list.as_ref());
-        let other_slot = Some(unique_other_slot);
-        let mut reclaims = ReclaimsSlotList::new();
-        assert_eq!(
-            // upserting into slot_list that does NOT contain an entry at 'new_slot'
-            // but, it DOES contain an entry at other_slot, so we do NOT add-ref. The assumption is that 'other_slot' is going away
-            // and that the previously held add-ref is now used by 'new_slot'
-            InMemAccountsIndex::<u64, u64>::update_slot_list(
-                &mut slot_list,
-                new_slot,
-                info,
-                other_slot,
-                &mut reclaims,
-                reclaim
-            ),
-            1,
-            "other_slot: {other_slot:?}"
-        );
-        assert_eq!(slot_list.clone_list(), SlotList::from([at_new_slot]));
-        assert_eq!(reclaims, expected_reclaims);
-
-        // nothing will exist at this slot
-        let missing_other_slot = unique_other_slot + 1;
-        let ignored_slot = 10; // bigger than is used elsewhere in the test
-        let ignored_value = info + 10;
-        let reclaimed_slot = 1; // less than is used elsewhere in the test
-        let reclaimed_value = info + 10;
-
-        // build a list of possible contents in the slot_list prior to calling 'update_slot_list'
-        let possible_initial_slot_list_contents = {
-            let mut possible_initial_slot_list_contents = Vec::new();
-
-            // Add ignored slot account_info entries (slots with larger slot #s than 'new_slot' or 'other_slot')
-            possible_initial_slot_list_contents
-                .extend((0..3).map(|i| (ignored_slot + i, ignored_value + i)));
-
-            // Add reclaimed slot account_info entries (slots with smaller slot #s than 'new_slot' or 'other_slot')
-            possible_initial_slot_list_contents
-                .extend((0..3).map(|i| (reclaimed_slot + i, reclaimed_value + i)));
-
-            // Add account_info for 'new_slot'
-            possible_initial_slot_list_contents.push(at_new_slot);
-            // Add account_info for 'other_slot'
-            possible_initial_slot_list_contents.push((unique_other_slot, other_value));
-            possible_initial_slot_list_contents
-        };
-
-        /*
-         * loop over all possible permutations of 'possible_initial_slot_list_contents'
-         * some examples:
-         * []
-         * [other]
-         * [other, new_slot]
-         * [new_slot, other]
-         * [dummy0, new_slot, dummy1, other] (and all permutation of this order)
-         * [other, dummy1, new_slot] (and all permutation of this order)
-         * ...
-         * [dummy0, new_slot, dummy1, other_slot, dummy2] (and all permutation of this order)
-         */
-        let mut attempts = 0;
-        // loop over each initial size of 'slot_list'
-        for initial_slot_list_len in 0..=possible_initial_slot_list_contents.len() {
-            // loop over every permutation of possible_initial_slot_list_contents within a list of len 'initial_slot_list_len'
-            for content_source_indexes in
-                (0..possible_initial_slot_list_contents.len()).permutations(initial_slot_list_len)
-            {
-                // loop over each possible parameter for 'other_slot'
-                for other_slot in [
-                    Some(new_slot),
-                    Some(unique_other_slot),
-                    Some(missing_other_slot),
-                    None,
-                ] {
-                    if other_slot.is_some()
-                        && new_slot != other_slot.unwrap()
-                        && slot_list.contains(&(new_slot, info))
-                    {
-                        // skip this permutation if 'new_slot' is already in the slot_list, but we are trying to reclaim other slot
-                        // This is an assert case as only one of new_slot and other_slot should be in the slot list
-                        continue;
-                    }
-
-                    attempts += 1;
-                    // initialize slot_list prior to call to 'InMemAccountsIndex::update_slot_list'
-                    // by inserting each possible entry at each possible position
-                    let entry = AccountMapEntry::new(
-                        content_source_indexes
-                            .iter()
-                            .map(|i| possible_initial_slot_list_contents[*i])
-                            .collect(),
-                        AccountMapEntryMeta::default(),
-                    );
-                    let mut slot_list = entry.slot_list_write_lock();
-                    let mut expected = slot_list.clone_list();
-                    let original = slot_list.clone_list();
-                    let mut reclaims = ReclaimsSlotList::new();
-
-                    InMemAccountsIndex::<u64, u64>::update_slot_list(
-                        &mut slot_list,
-                        new_slot,
-                        info,
-                        other_slot,
-                        &mut reclaims,
-                        reclaim,
-                    );
-                    let mut slot_list = slot_list.clone_list();
-
-                    // calculate expected reclaims
-                    let mut expected_reclaims = ReclaimsSlotList::new();
-                    expected.retain(|(slot, info)| {
-                        let retain = *slot > new_slot;
-                        if !retain {
-                            expected_reclaims.push((*slot, *info));
-                        }
-                        retain
-                    });
-                    expected.push((new_slot, info));
-
-                    // sort for easy comparison
-                    expected_reclaims.sort_unstable();
-                    reclaims.sort_unstable();
-                    assert_eq!(
-                        expected_reclaims, reclaims,
-                        "reclaims different. other: {other_slot:?}, {expected:?}, {slot_list:?}, \
-                         original: {original:?}"
-                    );
-                    // sort for easy comparison
-                    slot_list.sort_unstable();
-                    expected.sort_unstable();
-                    assert_eq!(
-                        slot_list, expected,
-                        "slot_list different. other: {other_slot:?}, {expected:?}, {slot_list:?}, \
-                         original: {original:?}"
-                    );
-                }
-            }
-        }
-        assert_eq!(attempts, 219202); // complicated permutations, so make sure we ran the right #
-    }
-
-    #[should_panic(expected = "slot_list has slot in slot_list but is not replacing it")]
-    #[test_case(2; "Slot to replace is in the slot list")]
-    #[test_case(3; "Slot to replace is not in the slot list")]
-    fn test_update_slot_list_new_slot_duplicate_panic(slot_to_replace: u64) {
-        let new_slot = 1; // This slot already exists in the list
-        let old_slot = 2; // This slot already exists in the list
-        let entry = AccountMapEntry::new(
-            SlotList::from_iter([(new_slot, 0u64), (old_slot, 0)]),
-            AccountMapEntryMeta::default(),
-        );
+    /// The index holds the entry from the newest slot, so an update at an older slot keeps the
+    /// entry it has and reclaims the older version instead
+    #[test_case(None; "no other slot")]
+    #[test_case(Some(3); "other slot is not the one in the index")]
+    fn test_update_slot_list_older_slot(other_slot: Option<Slot>) {
+        let entry = AccountMapEntry::new([(2, 20u64)], AccountMapEntryMeta::default());
         let mut slot_list = entry.slot_list_write_lock();
         let mut reclaims = ReclaimsSlotList::new();
-        let new_info = 1;
 
-        // Attempt to update the slot list with a duplicate slot, which should trigger the panic
         InMemAccountsIndex::<u64, u64>::update_slot_list(
             &mut slot_list,
-            new_slot,
-            new_info,
-            Some(slot_to_replace),
+            1,
+            10,
+            other_slot,
             &mut reclaims,
-            UpsertReclaim::IgnoreReclaims,
+            UpsertReclaim::ReclaimOldSlots,
         );
+
+        assert_eq!(*slot_list, [(2, 20)]);
+        assert_eq!(reclaims, ReclaimsSlotList::from([(1, 10)]));
     }
 
     #[test]
@@ -2168,25 +1819,12 @@ mod tests {
         }
 
         {
-            // add an entry with an empty slot list
-            let val = Box::new(AccountMapEntry::<u64>::empty_for_tests());
+            // an indexed pubkey always has an entry, so it is never removed here
+            let val = Box::new(AccountMapEntry::<u64>::new(
+                [(1, 1)],
+                AccountMapEntryMeta::default(),
+            ));
             map.insert(key, val);
-            let entry = map.entry(key);
-            assert_matches!(entry, Entry::Occupied(_));
-            // should have removed it since it had an empty slot list
-            assert!(test.remove_if_slot_list_empty_entry(entry));
-            let entry = map.entry(key);
-            assert_matches!(entry, Entry::Vacant(_));
-            // return true - item is not in index at all now
-            assert!(test.remove_if_slot_list_empty_entry(entry));
-        }
-
-        {
-            // add an entry with a NON empty slot list - it will NOT get removed
-            let val = Box::new(AccountMapEntry::<u64>::empty_for_tests());
-            val.slot_list_write_lock().push((1, 1));
-            map.insert(key, val);
-            // does NOT remove it since it has a non-empty slot list
             let entry = map.entry(key);
             assert!(!test.remove_if_slot_list_empty_entry(entry));
             let entry = map.entry(key);
@@ -2202,20 +1840,18 @@ mod tests {
         let pubkey = Pubkey::new_unique();
         let mut reclaims = ReclaimsSlotList::new();
 
-        for (slot, info) in [(1, 10), (2, 20)] {
-            let new_value = PreAllocatedAccountMapEntry::new(slot, info, &index.storage, true);
-            index.upsert(
-                &pubkey,
-                new_value,
-                None,
-                &mut ReclaimsSlotList::new(),
-                UpsertReclaim::IgnoreReclaims,
-            );
-        }
+        let new_value = PreAllocatedAccountMapEntry::new(2, 20, &index.storage, true);
+        index.upsert(
+            &pubkey,
+            new_value,
+            None,
+            &mut ReclaimsSlotList::new(),
+            UpsertReclaim::IgnoreReclaims,
+        );
 
         index.delete(&pubkey, &mut reclaims);
 
-        assert_eq!(reclaims, vec![(1, 10), (2, 20)]);
+        assert_eq!(reclaims, vec![(2, 20)]);
         assert!(!index.map_internal.read().unwrap().contains_key(&pubkey));
     }
 
@@ -2267,39 +1903,32 @@ mod tests {
 
     #[test]
     fn test_lock_and_update_slot_list() {
-        let test = AccountMapEntry::<u64>::empty_for_tests();
-        let info = 65;
+        let test = AccountMapEntry::<u64>::new([(1, 65)], AccountMapEntryMeta::default());
+        let info = 66;
         let mut reclaims = ReclaimsSlotList::new();
-        // first upsert, should increase
-        let len = InMemAccountsIndex::<u64, u64>::lock_and_update_slot_list(
+
+        // update at the same slot replaces the entry
+        InMemAccountsIndex::<u64, u64>::lock_and_update_slot_list(
             &test,
             (1, info),
             None,
             &mut reclaims,
-            UpsertReclaim::IgnoreReclaims,
+            UpsertReclaim::ReclaimOldSlots,
         );
-        assert_eq!(test.slot_list_lock_read_len(), len);
-        assert_eq!(len, 1);
-        // update to different slot, should increase
-        let len = InMemAccountsIndex::<u64, u64>::lock_and_update_slot_list(
+        assert_eq!(*test.slot_list_read_lock(), [(1, info)]);
+        assert_eq!(reclaims, ReclaimsSlotList::from([(1, 65)]));
+
+        // update at a newer slot replaces the entry, reclaiming the older one
+        reclaims.clear();
+        InMemAccountsIndex::<u64, u64>::lock_and_update_slot_list(
             &test,
             (2, info),
             None,
             &mut reclaims,
-            UpsertReclaim::IgnoreReclaims,
+            UpsertReclaim::ReclaimOldSlots,
         );
-        assert_eq!(test.slot_list_lock_read_len(), len);
-        assert_eq!(len, 2);
-        // update to same slot, should not increase
-        let len = InMemAccountsIndex::<u64, u64>::lock_and_update_slot_list(
-            &test,
-            (2, info),
-            None,
-            &mut reclaims,
-            UpsertReclaim::IgnoreReclaims,
-        );
-        assert_eq!(test.slot_list_lock_read_len(), len);
-        assert_eq!(len, 2);
+        assert_eq!(*test.slot_list_read_lock(), [(2, info)]);
+        assert_eq!(reclaims, ReclaimsSlotList::from([(1, info)]));
     }
 
     #[test_case(Some(10000);  "with pre-allocation 10000")]
@@ -2436,9 +2065,8 @@ mod tests {
         );
     }
 
-    /// `slot_list_mut` write-through fires only for `slot_list.len() == 1` entries.
-    #[test_case(SlotList::from([(1, 0)]), true ; "writes_through")]
-    #[test_case(SlotList::from(vec![(1, 10), (2, 20)]), false ; "multi_slot")]
+    /// `slot_list_mut` writes the entry through to disk
+    #[test_case([(1, 0)], true ; "writes_through")]
     fn test_slot_list_mut_write_through(slot_list: SlotList<u64>, expect_write_through: bool) {
         let index = new_should_write_through_for_test(None);
         let pubkey = solana_pubkey::new_rand();
@@ -2498,60 +2126,6 @@ mod tests {
     /// than one slot-list entry, persisting just one of them to disk would let a later eviction
     /// drop the fresher in-mem entry in favor of an incomplete disk entry. The entry must stay
     /// dirty and nothing must be written to disk.
-    #[test]
-    fn test_try_write_through_skips_multi_slot_entry() {
-        let index = new_should_write_through_for_test(None);
-        let pubkey = solana_pubkey::new_rand();
-        let info = 10;
-
-        assert!(index.load_from_disk(&pubkey).is_none(), "not on disk yet");
-
-        // Upsert the same pubkey at two different (uncached) slots so its slot list has two entries
-        for slot in [1, 2] {
-            let new_value = PreAllocatedAccountMapEntry::new(slot, info, &index.storage, true);
-            index.upsert(
-                &pubkey,
-                new_value,
-                None,
-                &mut ReclaimsSlotList::new(),
-                UpsertReclaim::IgnoreReclaims,
-            );
-        }
-        index.get_only_in_mem(&pubkey, false, |entry| {
-            let entry = entry.expect("entry should be in memory");
-            assert_eq!(
-                entry.slot_list_read_lock().len(),
-                2,
-                "two-version slot list"
-            );
-            assert!(entry.dirty(), "dirty before write-through attempt");
-        });
-
-        let immediate_writes_before = index
-            .stats()
-            .flush_entries_updated_on_disk_immediate
-            .load(Ordering::Relaxed);
-
-        index.try_write_through(&pubkey);
-
-        index.get_only_in_mem(&pubkey, false, |entry| {
-            let entry = entry.expect("entry should still be in memory");
-            assert!(entry.dirty(), "multi-version entry must stay dirty");
-        });
-        assert!(
-            index.load_from_disk(&pubkey).is_none(),
-            "multi-version entry must not be written through to disk"
-        );
-        assert_eq!(
-            index
-                .stats()
-                .flush_entries_updated_on_disk_immediate
-                .load(Ordering::Relaxed),
-            immediate_writes_before,
-            "no immediate disk write should have fired"
-        );
-    }
-
     /// When the bin exceeds the threshold and a new pubkey is inserted in `should_write_through`
     /// mode, one clean entry should be evicted inline to make room.
     #[test]
