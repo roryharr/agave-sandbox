@@ -246,7 +246,6 @@ pub struct FlushStats {
     pub num_obsolete_slots_removed: Saturating<u64>,
     pub num_obsolete_bytes_removed: Saturating<u64>,
     pub select_pubkeys_us: Saturating<u64>,
-    pub disk_index_write_through_us: Saturating<u64>,
 }
 
 impl FlushStats {
@@ -281,7 +280,6 @@ impl FlushStats {
         self.num_obsolete_slots_removed += other.num_obsolete_slots_removed;
         self.num_obsolete_bytes_removed += other.num_obsolete_bytes_removed;
         self.select_pubkeys_us += other.select_pubkeys_us;
-        self.disk_index_write_through_us += other.disk_index_write_through_us;
     }
 }
 
