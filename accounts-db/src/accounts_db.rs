@@ -3388,7 +3388,13 @@ impl AccountsDb {
 
         let mut purge_accounts_index_elapsed = Measure::start("purge_accounts_index_elapsed");
         // Purge this slot from the accounts index
-        let reclaims = self.purge_keys_exact(stored_keys);
+        let reclaims =
+            self.purge_keys_exact(stored_keys.iter().map(|(pubkey, slot)| (*pubkey, *slot)));
+        // The read cache is probed before the index, so the purged keys must also leave the
+        // read cache or loads keep returning the purged version.
+        for (pubkey, _slot) in &stored_keys {
+            self.read_only_accounts_cache.remove(pubkey);
+        }
         purge_accounts_index_elapsed.stop();
         purge_stats
             .purge_accounts_index_elapsed
