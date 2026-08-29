@@ -4,8 +4,7 @@
 //! Note that AccountInfo is saved to disk buckets during runtime, but disk buckets are recreated at startup.
 use {
     crate::{
-        accounts_file::ALIGN_BOUNDARY_OFFSET,
-        accounts_index::{DiskIndexValue, IndexValue},
+        accounts_file::ALIGN_BOUNDARY_OFFSET, accounts_index::IndexValue,
         is_zero_lamport::IsZeroLamport,
     },
     modular_bitfield::prelude::*,
@@ -90,8 +89,6 @@ impl IndexValue for AccountInfo {
         }
     }
 }
-
-impl DiskIndexValue for AccountInfo {}
 
 impl AccountInfo {
     pub fn new(storage_location: StorageLocation, is_zero_lamport: bool) -> Self {
