@@ -5,39 +5,39 @@
 //! slot the pubkey may be stored at in the write cache and the number of slot caches holding
 //! it, alongside the optional read-cached account. A load probes this one map to learn about
 //! both caches.
-//!
-//! The map is lock free for readers: a probe writes no shared line, where a sharded-lock map
-//! pays an atomic read-lock round trip per probe. Structural updates replace the entry via
-//! compare-and-swap; only the eviction stamp is written in place.
-//!
-//! There is no eviction in this proof of concept — the configured size limit was never
-//! reached in practice, so the cache simply grows with the set of accounts loaded from
-//! storage. `data_size` still reports what it holds.
 #[cfg(feature = "dev-context-only-utils")]
 use qualifier_attr::{field_qualifiers, qualifiers};
 use {
     crate::accounts_cache::CachedAccount,
     ahash::random_state::RandomState as AHashRandomState,
-    papaya::{Compute, HashMap, Operation},
+    dashmap::{DashMap, mapref::entry::Entry},
+    log::*,
+    rand::{
+        Rng, SeedableRng,
+        rngs::SmallRng,
+        seq::{IndexedRandom as _, IteratorRandom},
+    },
     solana_account::{AccountSharedData, ReadableAccount},
     solana_clock::Slot,
     solana_measure::{measure::Measure, measure_us},
     solana_pubkey::Pubkey,
     std::{
+        mem::ManuallyDrop,
         sync::{
-            Arc,
+            Arc, Condvar, Mutex,
             atomic::{AtomicU64, AtomicUsize, Ordering},
         },
-        time::Instant,
+        thread,
+        time::{Duration, Instant},
     },
 };
 
 #[cfg_attr(feature = "dev-context-only-utils", qualifiers(pub))]
 const CACHE_ENTRY_SIZE: usize = size_of::<CacheEntry>() + size_of::<ReadOnlyCacheKey>();
 
-/// A hit only refreshes an entry's stamp once this interval has passed. Re-stamping on every
-/// hit would dirty the entry's cacheline, costing every other reader of a hot account a
-/// coherence miss on their next probe.
+/// Sampled LRU eviction only needs coarse recency, so a hit only refreshes an entry's stamp
+/// once this interval has passed. Re-stamping on every hit would dirty the entry's cacheline,
+/// costing every other reader of a hot account a coherence miss on their next probe.
 const LRU_STAMP_INTERVAL_NS: u64 = 10_000_000;
 
 type ReadOnlyCacheKey = Pubkey;
@@ -58,23 +58,6 @@ struct CacheEntry {
     /// the number of slot caches currently holding the pubkey. Zero means the pubkey is not
     /// in the write cache.
     ref_count: u32,
-}
-
-impl CacheEntry {
-    /// A copy of this entry for a compare-and-swap replacement. Written by hand because the
-    /// eviction stamp is an atomic; its value is carried over.
-    fn duplicate(&self) -> Self {
-        Self {
-            read: self.read.as_ref().map(|read| ReadOnlyAccountCacheEntry {
-                account: read.account.clone(),
-                slot: read.slot,
-                last_update_time: AtomicU64::new(read.last_update_time.load(Ordering::Relaxed)),
-            }),
-            latest_write: self.latest_write.clone(),
-            max_slot: self.max_slot,
-            ref_count: self.ref_count,
-        }
-    }
 }
 
 #[derive(Debug)]
@@ -103,7 +86,7 @@ pub(crate) enum Probe {
     Read(AccountSharedData, Slot),
     /// in the write cache: `latest_write` is the version at the highest cached slot, and
     /// answers the load directly when that slot is an ancestor; otherwise search the slot
-    /// caches, bounded by `max_slot`. The account is cloned here, under the map guard,
+    /// caches, bounded by `max_slot`. The account is cloned here, under the entry guard,
     /// rather than handing out the `Arc<CachedAccount>`: reaching through that Arc and
     /// dropping it costs a second contended refcount round trip on the hot account's line.
     Write {
@@ -116,8 +99,11 @@ pub(crate) enum Probe {
 pub struct ReadOnlyCacheStats {
     pub hits: u64,
     pub misses: u64,
+    pub evicts: u64,
     pub load_us: u64,
     pub store_us: u64,
+    pub evict_us: u64,
+    pub evict_run_count: u64,
 }
 
 /// A counter striped across cachelines, so bumps from many threads do not all contend on one
@@ -164,49 +150,99 @@ fn stripe_index() -> usize {
 struct AtomicReadOnlyCacheStats {
     hits: StripedCounter,
     misses: StripedCounter,
+    evicts: AtomicU64,
     load_us: AtomicU64,
     store_us: AtomicU64,
+    evict_us: AtomicU64,
+    evict_run_count: AtomicU64,
+}
+
+/// Shared state between the cache and its evictor thread, used to signal
+/// the evictor to wake up early (e.g. on drop) instead of waiting for
+/// the full polling interval to elapse.
+#[derive(Debug)]
+struct EvictorControl {
+    exit: Mutex<bool>,
+    wake: Condvar,
 }
 
 #[cfg_attr(feature = "dev-context-only-utils", qualifiers(pub))]
 #[derive(Debug)]
 pub(crate) struct ReadOnlyAccountsCache {
-    cache: HashMap<ReadOnlyCacheKey, CacheEntry, AHashRandomState>,
-    data_size: AtomicUsize,
-    cache_len: AtomicUsize,
+    cache: Arc<DashMap<ReadOnlyCacheKey, CacheEntry, AHashRandomState>>,
+    _max_data_size_lo: usize,
+    _max_data_size_hi: usize,
+    data_size: Arc<AtomicUsize>,
+    cache_len: Arc<AtomicUsize>,
     /// The number of pubkeys currently in the write cache, for reporting purposes. This is to
     /// avoid having to lock each shard of the map to count them on demand
     num_write_pubkeys: AtomicU64,
 
     // Performance statistics
-    stats: AtomicReadOnlyCacheStats,
+    stats: Arc<AtomicReadOnlyCacheStats>,
     highest_slot_stored: AtomicU64,
 
     /// Timer for generating timestamps for entries.
     timer: Instant,
+
+    /// To the evictor goes the spoiled [sic]
+    ///
+    /// Evict from the cache in the background.
+    evictor_thread_handle: ManuallyDrop<thread::JoinHandle<()>>,
+    /// Condvar-based control to stop the evictor without waiting for
+    /// the full sleep interval to elapse.
+    evictor_control: Arc<EvictorControl>,
 }
 
 impl ReadOnlyAccountsCache {
-    /// The size limit and eviction parameters are accepted and ignored: this proof of concept
-    /// does not evict.
     #[cfg_attr(feature = "dev-context-only-utils", qualifiers(pub))]
     pub(crate) fn new(
-        _max_data_size_lo: usize,
-        _max_data_size_hi: usize,
-        _evict_sample_size: usize,
-        _num_shards: usize,
+        max_data_size_lo: usize,
+        max_data_size_hi: usize,
+        evict_sample_size: usize,
+        num_shards: usize,
     ) -> Self {
-        let cache = HashMap::builder()
-            .hasher(AHashRandomState::default())
-            .build();
+        assert!(max_data_size_lo <= max_data_size_hi);
+        assert!(evict_sample_size > 0);
+        assert!(
+            num_shards.is_power_of_two(),
+            "num_shards must be a power of two, got {num_shards}"
+        );
+        let cache = Arc::new(DashMap::with_hasher_and_shard_amount(
+            AHashRandomState::default(),
+            num_shards,
+        ));
+        let data_size = Arc::new(AtomicUsize::default());
+        let cache_len = Arc::new(AtomicUsize::default());
+        let stats = Arc::new(AtomicReadOnlyCacheStats::default());
+        let timer = Instant::now();
+        let evictor_control = Arc::new(EvictorControl {
+            exit: Mutex::new(false),
+            wake: Condvar::new(),
+        });
+        let evictor_thread_handle = Self::spawn_evictor(
+            evictor_control.clone(),
+            max_data_size_lo,
+            max_data_size_hi,
+            data_size.clone(),
+            cache_len.clone(),
+            evict_sample_size,
+            cache.clone(),
+            stats.clone(),
+        );
+
         Self {
             highest_slot_stored: AtomicU64::default(),
+            _max_data_size_lo: max_data_size_lo,
+            _max_data_size_hi: max_data_size_hi,
             cache,
-            data_size: AtomicUsize::default(),
-            cache_len: AtomicUsize::default(),
+            data_size,
+            cache_len,
             num_write_pubkeys: AtomicU64::default(),
-            stats: AtomicReadOnlyCacheStats::default(),
-            timer: Instant::now(),
+            stats,
+            timer,
+            evictor_thread_handle: ManuallyDrop::new(evictor_thread_handle),
+            evictor_control,
         }
     }
 
@@ -228,19 +264,18 @@ impl ReadOnlyAccountsCache {
     ) -> Option<(AccountSharedData, Slot)> {
         let (found, load_us) = measure_us!({
             let mut found = None;
-            let guard = self.cache.pin();
-            if let Some(entry) = guard.get(pubkey)
+            if let Some(entry) = self.cache.get(pubkey)
                 && let Some(read) = entry.read.as_ref()
                 && is_visible(read.slot)
             {
                 read.refresh_last_update_time(self.timestamp());
-                found = Some((read.account.clone(), read.slot));
-            }
-            drop(guard);
-
-            if found.is_some() {
+                let account_and_slot = (read.account.clone(), read.slot);
+                drop(entry);
                 self.stats.hits.add_one();
-            } else {
+                found = Some(account_and_slot);
+            }
+
+            if found.is_none() {
                 self.stats.misses.add_one();
             }
             found
@@ -260,9 +295,7 @@ impl ReadOnlyAccountsCache {
         pubkey: &Pubkey,
         is_read_visible: impl FnOnce(Slot) -> bool,
     ) -> Probe {
-        let guard = self.cache.pin();
-        let Some(entry) = guard.get(pubkey) else {
-            drop(guard);
+        let Some(entry) = self.cache.get(pubkey) else {
             self.stats.misses.add_one();
             return Probe::Absent;
         };
@@ -281,11 +314,11 @@ impl ReadOnlyAccountsCache {
         {
             read.refresh_last_update_time(self.timestamp());
             let account_and_slot = (read.account.clone(), read.slot);
-            drop(guard);
+            drop(entry);
             self.stats.hits.add_one();
             return Probe::Read(account_and_slot.0, account_and_slot.1);
         }
-        drop(guard);
+        drop(entry);
         self.stats.misses.add_one();
         Probe::Absent
     }
@@ -310,37 +343,22 @@ impl ReadOnlyAccountsCache {
         let measure_store = Measure::start("");
         self.highest_slot_stored.fetch_max(slot, Ordering::Release);
         let new_account_size = Self::account_size(&account);
-        let guard = self.cache.pin();
-        let compute = guard.compute(pubkey, |current| {
-            let mut new_entry = match current {
-                Some((_pubkey, entry)) => entry.duplicate(),
-                None => CacheEntry::default(),
-            };
-            new_entry.read = Some(ReadOnlyAccountCacheEntry::new(
-                account.clone(),
-                slot,
-                timestamp,
-            ));
-            Operation::Insert::<_, ()>(new_entry)
-        });
-        let old_account_size = match compute {
-            Compute::Inserted(_pubkey, _entry) => {
+        let old_account_size;
+        let mut entry = self.cache.entry(pubkey).or_default();
+        match entry.read.as_mut() {
+            None => {
+                old_account_size = 0;
+                entry.read = Some(ReadOnlyAccountCacheEntry::new(account, slot, timestamp));
                 self.cache_len.fetch_add(1, Ordering::Relaxed);
-                0
             }
-            Compute::Updated {
-                old: (_pubkey, old_entry),
-                ..
-            } => match old_entry.read.as_ref() {
-                Some(old_read) => Self::account_size(&old_read.account),
-                None => {
-                    self.cache_len.fetch_add(1, Ordering::Relaxed);
-                    0
-                }
-            },
-            Compute::Removed(..) | Compute::Aborted(..) => unreachable!("store always inserts"),
+            Some(read) => {
+                old_account_size = Self::account_size(&read.account);
+                read.account = account;
+                read.slot = slot;
+                read.last_update_time.store(timestamp, Ordering::Relaxed);
+            }
         };
-        drop(guard);
+        drop(entry);
         update_stat(&self.data_size, old_account_size, new_account_size);
         let store_us = measure_store.end_as_us();
         self.stats.store_us.fetch_add(store_us, Ordering::Relaxed);
@@ -354,51 +372,39 @@ impl ReadOnlyAccountsCache {
     /// remove entry if it exists.
     /// Assume the entry does not exist for performance.
     pub(crate) fn remove_assume_not_present(&self, pubkey: &Pubkey) -> Option<AccountSharedData> {
-        // read first to see if a read-cached account exists
+        // get read lock first to see if a read-cached account exists
         self.cache
-            .pin()
             .get(pubkey)
             .is_some_and(|entry| entry.read.is_some())
             .then(|| self.remove(pubkey))
             .flatten()
     }
 
-    /// Removes `pubkey`'s read-cached account, if present, and returns it. The entry itself is
-    /// removed once neither cache holds the pubkey.
     #[cfg_attr(feature = "dev-context-only-utils", qualifiers(pub))]
     pub(crate) fn remove(&self, pubkey: &Pubkey) -> Option<AccountSharedData> {
-        let guard = self.cache.pin();
-        let compute = guard.compute(*pubkey, |current| {
-            let Some((_pubkey, entry)) = current else {
-                return Operation::Abort(());
-            };
-            if entry.read.is_none() {
-                Operation::Abort(())
-            } else if entry.ref_count == 0 {
-                Operation::Remove
-            } else {
-                let mut new_entry = entry.duplicate();
-                new_entry.read = None;
-                Operation::Insert(new_entry)
-            }
-        });
-        let removed_read = match compute {
-            Compute::Removed(_pubkey, entry) => entry.read.as_ref().map(|read| &read.account),
-            Compute::Updated {
-                old: (_pubkey, old_entry),
-                ..
-            } => old_entry.read.as_ref().map(|read| &read.account),
-            Compute::Aborted(()) => None,
-            Compute::Inserted(..) => unreachable!("remove never creates an entry"),
+        Self::remove_read(pubkey, &self.cache, &self.data_size, &self.cache_len)
+            .map(|read| read.account)
+    }
+
+    /// Removes `key`'s read-cached account, if present, and returns it. The entry itself is
+    /// removed once neither cache holds the pubkey.
+    fn remove_read(
+        key: &ReadOnlyCacheKey,
+        cache: &DashMap<ReadOnlyCacheKey, CacheEntry, AHashRandomState>,
+        data_size: &AtomicUsize,
+        cache_len: &AtomicUsize,
+    ) -> Option<ReadOnlyAccountCacheEntry> {
+        let Entry::Occupied(mut occupied) = cache.entry(*key) else {
+            return None;
         };
-        let removed_read = removed_read.cloned();
-        drop(guard);
-        if let Some(account) = removed_read.as_ref() {
-            self.data_size
-                .fetch_sub(Self::account_size(account), Ordering::Relaxed);
-            self.cache_len.fetch_sub(1, Ordering::Relaxed);
+        let read = occupied.get_mut().read.take()?;
+        if occupied.get().ref_count == 0 {
+            occupied.remove();
         }
-        removed_read
+        let account_size = Self::account_size(&read.account);
+        data_size.fetch_sub(account_size, Ordering::Relaxed);
+        cache_len.fetch_sub(1, Ordering::Relaxed);
+        Some(read)
     }
 
     /// Record that `pubkey` was written into the write cache at `slot`. `is_new_key` is
@@ -412,34 +418,16 @@ impl ReadOnlyAccountsCache {
         cached_account: &Arc<CachedAccount>,
         is_new_key: bool,
     ) {
-        let guard = self.cache.pin();
-        let compute = guard.compute(*pubkey, |current| {
-            let mut entry = match current {
-                Some((_pubkey, entry)) => entry.duplicate(),
-                None => CacheEntry::default(),
-            };
-            if is_new_key {
-                entry.ref_count += 1;
+        let mut entry = self.cache.entry(*pubkey).or_default();
+        if is_new_key {
+            if entry.ref_count == 0 {
+                self.num_write_pubkeys.fetch_add(1, Ordering::Relaxed);
             }
-            if slot >= entry.max_slot {
-                entry.max_slot = slot;
-                entry.latest_write = Some((slot, Arc::clone(cached_account)));
-            }
-            Operation::Insert::<_, ()>(entry)
-        });
-        let entered_write_cache = match compute {
-            Compute::Inserted(..) => is_new_key,
-            Compute::Updated {
-                old: (_pubkey, old_entry),
-                ..
-            } => is_new_key && old_entry.ref_count == 0,
-            Compute::Removed(..) | Compute::Aborted(..) => {
-                unreachable!("insert_write always inserts")
-            }
-        };
-        drop(guard);
-        if entered_write_cache {
-            self.num_write_pubkeys.fetch_add(1, Ordering::Relaxed);
+            entry.ref_count += 1;
+        }
+        if slot >= entry.max_slot {
+            entry.max_slot = slot;
+            entry.latest_write = Some((slot, Arc::clone(cached_account)));
         }
     }
 
@@ -452,44 +440,26 @@ impl ReadOnlyAccountsCache {
         pubkeys: impl IntoIterator<Item = Pubkey>,
     ) -> Vec<Pubkey> {
         let mut removed_pubkeys = Vec::new();
-        let guard = self.cache.pin();
         for pubkey in pubkeys {
-            let compute = guard.compute(pubkey, |current| {
-                let Some((_pubkey, entry)) = current else {
-                    // If this has happened the write cache's index is corrupted
-                    panic!("pubkey {pubkey} not found in cache index during remove");
-                };
-                let new_ref_count = entry
-                    .ref_count
-                    .checked_sub(1)
-                    .expect("pubkey is in the write cache");
-                if new_ref_count == 0 && entry.read.is_none() {
-                    return Operation::<_, ()>::Remove;
-                }
-                let mut new_entry = entry.duplicate();
-                new_entry.ref_count = new_ref_count;
-                if new_ref_count == 0
-                    || new_entry
-                        .latest_write
-                        .as_ref()
-                        .is_some_and(|(latest_slot, _)| *latest_slot == slot)
-                {
-                    new_entry.latest_write = None;
-                }
-                Operation::Insert(new_entry)
-            });
-            let left_write_cache = match compute {
-                Compute::Removed(..) => true,
-                Compute::Updated {
-                    new: (_pubkey, new_entry),
-                    ..
-                } => new_entry.ref_count == 0,
-                Compute::Inserted(..) | Compute::Aborted(..) => {
-                    unreachable!("remove_write never creates an entry")
-                }
+            let Entry::Occupied(mut occupied) = self.cache.entry(pubkey) else {
+                // If this has happened the write cache's index is corrupted
+                panic!("pubkey {pubkey} not found in cache index during remove");
             };
-            if left_write_cache {
+            let entry = occupied.get_mut();
+            entry.ref_count -= 1;
+            if entry
+                .latest_write
+                .as_ref()
+                .is_some_and(|(latest_slot, _)| *latest_slot == slot)
+                || entry.ref_count == 0
+            {
+                entry.latest_write = None;
+            }
+            if entry.ref_count == 0 {
                 self.num_write_pubkeys.fetch_sub(1, Ordering::Relaxed);
+                if entry.read.is_none() {
+                    occupied.remove();
+                }
                 removed_pubkeys.push(pubkey);
             }
         }
@@ -501,7 +471,6 @@ impl ReadOnlyAccountsCache {
     /// flush. This is just the maximum slot that it could be found in during search
     pub(crate) fn write_max_slot(&self, pubkey: &Pubkey) -> Option<Slot> {
         self.cache
-            .pin()
             .get(pubkey)
             .and_then(|entry| (entry.ref_count > 0).then_some(entry.max_slot))
     }
@@ -509,18 +478,18 @@ impl ReadOnlyAccountsCache {
     /// Is `pubkey` in the write cache?
     pub(crate) fn contains_write(&self, pubkey: &Pubkey) -> bool {
         self.cache
-            .pin()
             .get(pubkey)
             .is_some_and(|entry| entry.ref_count > 0)
     }
 
     /// Returns a vector of all pubkeys currently in the write cache.
+    /// An iterator is not returned as the dashmap shards would be readlocked for the duration
+    /// of the iterator
     pub(crate) fn write_pubkeys(&self) -> Vec<Pubkey> {
         self.cache
-            .pin()
             .iter()
-            .filter(|(_pubkey, entry)| entry.ref_count > 0)
-            .map(|(pubkey, _entry)| *pubkey)
+            .filter(|entry| entry.ref_count > 0)
+            .map(|entry| *entry.key())
             .collect()
     }
 
@@ -538,17 +507,204 @@ impl ReadOnlyAccountsCache {
     }
 
     pub(crate) fn get_and_reset_stats(&self) -> ReadOnlyCacheStats {
+        let hits = self.stats.hits.swap_total();
+        let misses = self.stats.misses.swap_total();
+        let evicts = self.stats.evicts.swap(0, Ordering::Relaxed);
+        let load_us = self.stats.load_us.swap(0, Ordering::Relaxed);
+        let store_us = self.stats.store_us.swap(0, Ordering::Relaxed);
+        let evict_us = self.stats.evict_us.swap(0, Ordering::Relaxed);
+        let evict_run_count = self.stats.evict_run_count.swap(0, Ordering::Relaxed);
+
         ReadOnlyCacheStats {
-            hits: self.stats.hits.swap_total(),
-            misses: self.stats.misses.swap_total(),
-            load_us: self.stats.load_us.swap(0, Ordering::Relaxed),
-            store_us: self.stats.store_us.swap(0, Ordering::Relaxed),
+            hits,
+            misses,
+            evicts,
+            load_us,
+            store_us,
+            evict_us,
+            evict_run_count,
         }
+    }
+
+    /// Spawns the background thread to handle evictions
+    fn spawn_evictor(
+        control: Arc<EvictorControl>,
+        max_data_size_lo: usize,
+        max_data_size_hi: usize,
+        data_size: Arc<AtomicUsize>,
+        cache_len: Arc<AtomicUsize>,
+        evict_sample_size: usize,
+        cache: Arc<DashMap<ReadOnlyCacheKey, CacheEntry, AHashRandomState>>,
+        stats: Arc<AtomicReadOnlyCacheStats>,
+    ) -> thread::JoinHandle<()> {
+        thread::Builder::new()
+            .name("solAcctReadCache".to_string())
+            .spawn(move || {
+                info!("AccountsReadCacheEvictor has started");
+                let mut rng = SmallRng::from_os_rng();
+                loop {
+                    // Wait up to 10 ms, or until the exit flag is set.
+                    // Ensure this timeout stays many times smaller than the slot time.
+                    let exit_flag = control.exit.lock().unwrap();
+                    let (exit_flag, _) = control
+                        .wake
+                        .wait_timeout_while(exit_flag, Duration::from_millis(10), |exit| !*exit)
+                        .unwrap();
+                    if *exit_flag {
+                        break;
+                    }
+                    drop(exit_flag);
+
+                    if data_size.load(Ordering::Relaxed) <= max_data_size_hi {
+                        continue;
+                    }
+                    stats.evict_run_count.fetch_add(1, Ordering::Relaxed);
+
+                    #[cfg(not(feature = "dev-context-only-utils"))]
+                    let (num_evicts, evict_us) = measure_us!(Self::evict(
+                        max_data_size_lo,
+                        &data_size,
+                        &cache_len,
+                        evict_sample_size,
+                        &cache,
+                        &mut rng,
+                    ));
+                    #[cfg(feature = "dev-context-only-utils")]
+                    let (num_evicts, evict_us) = measure_us!(Self::evict(
+                        max_data_size_lo,
+                        &data_size,
+                        &cache_len,
+                        evict_sample_size,
+                        &cache,
+                        &mut rng,
+                        |_, _| {}
+                    ));
+                    stats.evicts.fetch_add(num_evicts, Ordering::Relaxed);
+                    stats.evict_us.fetch_add(evict_us, Ordering::Relaxed);
+                }
+                info!("AccountsReadCacheEvictor has stopped");
+            })
+            .expect("spawn accounts read cache evictor thread")
+    }
+
+    /// Evicts read-cached accounts until the cache's size is <= `target_data_size`,
+    /// following the sampled LRU eviction method, where a sample of size
+    /// `evict_sample_size` is randomly selected from the cache, using the
+    /// provided `rng`. Entries whose pubkey is in the write cache only lose their read half.
+    ///
+    /// Returns the number of entries evicted.
+    fn evict<R>(
+        target_data_size: usize,
+        data_size: &AtomicUsize,
+        cache_len: &AtomicUsize,
+        evict_sample_size: usize,
+        cache: &DashMap<ReadOnlyCacheKey, CacheEntry, AHashRandomState>,
+        rng: &mut R,
+        #[cfg(feature = "dev-context-only-utils")] mut callback: impl FnMut(
+            &Pubkey,
+            Option<ReadOnlyAccountCacheEntry>,
+        ),
+    ) -> u64
+    where
+        R: Rng,
+    {
+        let mut num_evicts: u64 = 0;
+        while data_size.load(Ordering::Relaxed) > target_data_size {
+            let mut key_to_evict = None;
+            let mut min_update_time = u64::MAX;
+            let mut remaining_samples = evict_sample_size;
+            // NOTE: This can loop indefinitely if the cache is misconfigured
+            // and when we get here there aren't at least `evict_sample_size`
+            // elements. We could break the loop on `cache.is_empty()` but
+            // calling `is_empty()` and `len()` on a dashmap is very expensive
+            // as it requires iterating and locking all the shards. So, avoid
+            // paying that cost and assume that when eviction triggers the
+            // cache contains enough items.
+            while remaining_samples > 0 {
+                let shard = cache
+                    .shards()
+                    .choose(rng)
+                    .expect("number of shards should be greater than zero");
+                let shard = shard.read();
+                for (key, entry) in shard
+                    .iter()
+                    // only entries holding a read-cached account are eviction candidates
+                    .filter(|(_key, entry)| entry.get().read.is_some())
+                    .choose_multiple(rng, remaining_samples)
+                {
+                    let last_update_time = entry
+                        .get()
+                        .read
+                        .as_ref()
+                        .map(|read| read.last_update_time.load(Ordering::Relaxed))
+                        .unwrap_or(u64::MAX);
+                    if last_update_time < min_update_time {
+                        min_update_time = last_update_time;
+                        key_to_evict = Some(key.to_owned());
+                    }
+
+                    remaining_samples = remaining_samples.saturating_sub(1);
+                }
+            }
+
+            let key = key_to_evict.expect("eviction sample should not be empty");
+            let _entry = Self::remove_read(&key, cache, data_size, cache_len);
+            #[cfg(feature = "dev-context-only-utils")]
+            {
+                #[allow(clippy::used_underscore_binding)]
+                callback(&key, _entry);
+            }
+            num_evicts = num_evicts.saturating_add(1);
+        }
+        num_evicts
     }
 
     /// Return the elapsed time of the cache.
     fn timestamp(&self) -> u64 {
         self.timer.elapsed().as_nanos() as u64
+    }
+
+    // Evict entries, but in the foreground
+    //
+    // Evicting in the background is non-deterministic w.r.t. when the evictor runs,
+    // which can make asserting invariants difficult in tests.
+    #[cfg(feature = "dev-context-only-utils")]
+    pub fn evict_in_foreground<R, C>(
+        &self,
+        evict_sample_size: usize,
+        rng: &mut R,
+        callback: C,
+    ) -> u64
+    where
+        R: Rng,
+        C: FnMut(&Pubkey, Option<ReadOnlyAccountCacheEntry>),
+    {
+        #[allow(clippy::used_underscore_binding)]
+        let target_data_size = self._max_data_size_lo;
+        Self::evict(
+            target_data_size,
+            &self.data_size,
+            &self.cache_len,
+            evict_sample_size,
+            &self.cache,
+            rng,
+            callback,
+        )
+    }
+}
+
+impl Drop for ReadOnlyAccountsCache {
+    fn drop(&mut self) {
+        {
+            let mut exit_flag = self.evictor_control.exit.lock().unwrap();
+            *exit_flag = true;
+        }
+        self.evictor_control.wake.notify_one();
+        // SAFETY: We are dropping, so we will never use `evictor_thread_handle` again.
+        let evictor_thread_handle = unsafe { ManuallyDrop::take(&mut self.evictor_thread_handle) };
+        evictor_thread_handle
+            .join()
+            .expect("join accounts read cache evictor thread");
     }
 }
 
@@ -582,11 +738,16 @@ fn update_stat(stat: &AtomicUsize, old: usize, new: usize) {
 mod tests {
     use {
         super::*,
-        rand::{Rng, SeedableRng, seq::IndexedRandom as _},
+        rand::{Rng, SeedableRng},
         rand_chacha::ChaChaRng,
         solana_account::Account,
-        std::{collections::HashMap, iter::repeat_with},
-        test_case::test_case,
+        std::{
+            collections::HashMap,
+            iter::repeat_with,
+            sync::Arc,
+            time::{Duration, Instant},
+        },
+        test_case::{test_case, test_matrix},
     };
 
     impl ReadOnlyAccountsCache {
@@ -596,22 +757,10 @@ mod tests {
         /// stays intact.
         #[cfg(feature = "dev-context-only-utils")]
         pub fn reset_for_tests(&self) {
-            let guard = self.cache.pin();
-            let pubkeys: Vec<_> = guard.iter().map(|(pubkey, _entry)| *pubkey).collect();
-            for pubkey in pubkeys {
-                guard.compute(pubkey, |current| {
-                    let Some((_pubkey, entry)) = current else {
-                        return Operation::Abort(());
-                    };
-                    if entry.ref_count == 0 {
-                        Operation::Remove
-                    } else {
-                        let mut new_entry = entry.duplicate();
-                        new_entry.read = None;
-                        Operation::Insert(new_entry)
-                    }
-                });
-            }
+            self.cache.retain(|_pubkey, entry| {
+                entry.read = None;
+                entry.ref_count > 0
+            });
             self.data_size.store(0, Ordering::Relaxed);
             self.cache_len.store(0, Ordering::Relaxed);
         }
@@ -624,13 +773,20 @@ mod tests {
         assert!(std::mem::size_of::<Arc<u64>>() == std::mem::size_of::<Arc<[u8; 32]>>());
     }
 
-    /// Checks the integrity of data stored in the cache after a sequence of loads and stores.
-    #[test]
-    fn test_read_only_accounts_cache_random() {
+    /// Checks the integrity of data stored in the cache after sequence of
+    /// loads and stores.
+    #[test_matrix([10, 16])]
+    fn test_read_only_accounts_cache_random(evict_sample_size: usize) {
         const SEED: [u8; 32] = [0xdb; 32];
         const DATA_SIZE: usize = 19;
+        const MAX_CACHE_SIZE: usize = 17 * (CACHE_ENTRY_SIZE + DATA_SIZE);
         let mut rng = ChaChaRng::from_seed(SEED);
-        let cache = ReadOnlyAccountsCache::new(usize::MAX, usize::MAX, 8, 8);
+        let cache = ReadOnlyAccountsCache::new(
+            MAX_CACHE_SIZE,
+            usize::MAX, // <-- do not evict in the background
+            evict_sample_size,
+            8,
+        );
         let slots: Vec<Slot> = repeat_with(|| rng.random_range(0..1000)).take(5).collect();
         let pubkeys: Vec<Pubkey> = repeat_with(|| {
             let mut arr = [0u8; 32];
@@ -641,12 +797,12 @@ mod tests {
         .collect();
         let mut hash_map = HashMap::<ReadOnlyCacheKey, (AccountSharedData, Slot, usize)>::new();
         for ix in 0..1000 {
-            if rng.random_bool(0.1) && !hash_map.is_empty() {
-                let (pubkey, (_account, slot, _)) = {
-                    let keys: Vec<_> = hash_map.keys().copied().collect();
-                    let pubkey = *keys.choose(&mut rng).unwrap();
-                    (pubkey, hash_map.get(&pubkey).unwrap().clone())
-                };
+            if rng.random_bool(0.1) {
+                let element = cache.cache.iter().choose(&mut rng).unwrap();
+                let (pubkey, entry) = element.pair();
+                let slot = entry.read.as_ref().unwrap().slot;
+                let pubkey = *pubkey;
+                drop(element);
                 let account = cache.load(pubkey, slot).unwrap();
                 let (other, other_slot, index) = hash_map.get_mut(&pubkey).unwrap();
                 assert_eq!(account, *other);
@@ -666,13 +822,20 @@ mod tests {
                 let pubkey = *pubkeys.choose(&mut rng).unwrap();
                 hash_map.insert(pubkey, (account.clone(), slot, ix));
                 cache.store(pubkey, slot, account);
+                cache.evict_in_foreground(evict_sample_size, &mut rng, |_, _| {});
             }
         }
-        assert_eq!(cache.cache_len(), hash_map.len());
-        // Every cache entry must hold what the local hash map last stored for it.
-        let guard = cache.cache.pin();
-        for (pubkey, entry) in guard.iter() {
-            let read = entry.read.as_ref().unwrap();
+        assert_eq!(cache.cache_len(), 17);
+        assert_eq!(hash_map.len(), 35);
+        // Ensure that all the cache entries hold information consistent with
+        // what we accumulated in the local hash map.
+        // Note that the opposite assertion (checking that all entries from the
+        // local hash map exist in the cache) wouldn't work, because of sampled
+        // LRU eviction.
+        for entry in cache.cache.iter() {
+            let pubkey = entry.key();
+            let read = entry.value().read.as_ref().unwrap();
+
             let (local_account, local_slot, _) = hash_map
                 .get(pubkey)
                 .expect("account to be present in the map");
@@ -681,11 +844,55 @@ mod tests {
         }
     }
 
+    #[test_matrix([8, 10, 16])]
+    fn test_evict_in_background(evict_sample_size: usize) {
+        const ACCOUNT_DATA_SIZE: usize = 200;
+        const MAX_ENTRIES: usize = 7;
+        const MAX_CACHE_SIZE: usize = MAX_ENTRIES * (CACHE_ENTRY_SIZE + ACCOUNT_DATA_SIZE);
+        let cache =
+            ReadOnlyAccountsCache::new(MAX_CACHE_SIZE, MAX_CACHE_SIZE, evict_sample_size, 8);
+
+        for i in 0..MAX_ENTRIES {
+            let pubkey = Pubkey::new_unique();
+            let account = AccountSharedData::new(i as u64, ACCOUNT_DATA_SIZE, &Pubkey::default());
+            cache.store(pubkey, i as Slot, account);
+        }
+        // we haven't exceeded the max cache size yet, so no evictions should've happened
+        assert_eq!(cache.cache_len(), MAX_ENTRIES);
+        assert_eq!(cache.data_size(), MAX_CACHE_SIZE);
+        assert_eq!(cache.stats.evicts.load(Ordering::Relaxed), 0);
+
+        // store another account to trigger evictions
+        let slot = MAX_ENTRIES as Slot;
+        let pubkey = Pubkey::new_unique();
+        let account = AccountSharedData::new(42, ACCOUNT_DATA_SIZE, &Pubkey::default());
+        cache.store(pubkey, slot, account);
+
+        // wait for the evictor to run...
+        let timer = Instant::now();
+        while cache.stats.evicts.load(Ordering::Relaxed) == 0 {
+            assert!(
+                timer.elapsed() < Duration::from_secs(5),
+                "timed out waiting for the evictor to run",
+            );
+            thread::sleep(Duration::from_millis(1));
+        }
+
+        // ...now ensure the cache size is right
+        assert_eq!(cache.cache_len(), MAX_ENTRIES);
+        assert_eq!(cache.data_size(), MAX_CACHE_SIZE);
+    }
+
     #[test]
     fn test_cache_len_sequential_add_remove() {
         const ACCOUNT_DATA_SIZE: usize = 16;
         const NUM_ACCOUNTS: usize = 1_000;
-        let cache = ReadOnlyAccountsCache::new(usize::MAX, usize::MAX, 1, 8);
+        let cache = ReadOnlyAccountsCache::new(
+            usize::MAX,
+            usize::MAX,
+            1, /* evictions never trigger */
+            8,
+        );
 
         let pubkeys: Vec<_> = (0..NUM_ACCOUNTS).map(|_| Pubkey::new_unique()).collect();
 
@@ -719,8 +926,8 @@ mod tests {
         assert!(cache.remove(&Pubkey::new_unique()).is_none());
     }
 
-    /// An entry holding both halves loses only its read half to removal, and the entry itself
-    /// stays for the write cache's index.
+    /// An entry holding both halves loses only its read half to removal and eviction, and the
+    /// entry itself stays for the write cache's index.
     #[test]
     fn test_write_half_pins_entry() {
         let cache = ReadOnlyAccountsCache::new(usize::MAX, usize::MAX, 1, 8);
@@ -747,7 +954,7 @@ mod tests {
         assert_eq!(cache.cache_len(), 1);
         assert!(cache.load(pubkey, 5).is_some());
         cache.remove(&pubkey);
-        assert!(!cache.cache.pin().contains_key(&pubkey));
+        assert!(!cache.cache.contains_key(&pubkey));
     }
 
     #[test_case(11, 11; "equal")]
