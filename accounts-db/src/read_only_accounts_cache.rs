@@ -106,10 +106,50 @@ pub struct ReadOnlyCacheStats {
     pub evict_run_count: u64,
 }
 
+/// A counter striped across cachelines, so bumps from many threads do not all contend on one
+/// line. Totals are summed at report time.
+#[derive(Debug)]
+struct StripedCounter([PaddedAtomicU64; STRIPES]);
+
+const STRIPES: usize = 64;
+
+#[derive(Debug, Default)]
+#[repr(align(128))]
+struct PaddedAtomicU64(AtomicU64);
+
+impl Default for StripedCounter {
+    fn default() -> Self {
+        Self(std::array::from_fn(|_index| PaddedAtomicU64::default()))
+    }
+}
+
+impl StripedCounter {
+    fn add_one(&self) {
+        self.0[stripe_index()].0.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn swap_total(&self) -> u64 {
+        self.0
+            .iter()
+            .map(|stripe| stripe.0.swap(0, Ordering::Relaxed))
+            .sum()
+    }
+}
+
+/// this thread's stripe, assigned round-robin the first time the thread bumps a counter
+fn stripe_index() -> usize {
+    static NEXT_STRIPE_INDEX: AtomicUsize = AtomicUsize::new(0);
+    thread_local! {
+        static STRIPE_INDEX: usize =
+            NEXT_STRIPE_INDEX.fetch_add(1, Ordering::Relaxed) % STRIPES;
+    }
+    STRIPE_INDEX.with(|stripe_index| *stripe_index)
+}
+
 #[derive(Default, Debug)]
 struct AtomicReadOnlyCacheStats {
-    hits: AtomicU64,
-    misses: AtomicU64,
+    hits: StripedCounter,
+    misses: StripedCounter,
     evicts: AtomicU64,
     load_us: AtomicU64,
     store_us: AtomicU64,
@@ -231,12 +271,12 @@ impl ReadOnlyAccountsCache {
                 read.refresh_last_update_time(self.timestamp());
                 let account_and_slot = (read.account.clone(), read.slot);
                 drop(entry);
-                self.stats.hits.fetch_add(1, Ordering::Relaxed);
+                self.stats.hits.add_one();
                 found = Some(account_and_slot);
             }
 
             if found.is_none() {
-                self.stats.misses.fetch_add(1, Ordering::Relaxed);
+                self.stats.misses.add_one();
             }
             found
         });
@@ -256,7 +296,7 @@ impl ReadOnlyAccountsCache {
         is_read_visible: impl FnOnce(Slot) -> bool,
     ) -> Probe {
         let Some(entry) = self.cache.get(pubkey) else {
-            self.stats.misses.fetch_add(1, Ordering::Relaxed);
+            self.stats.misses.add_one();
             return Probe::Absent;
         };
         if entry.ref_count > 0 {
@@ -275,11 +315,11 @@ impl ReadOnlyAccountsCache {
             read.refresh_last_update_time(self.timestamp());
             let account_and_slot = (read.account.clone(), read.slot);
             drop(entry);
-            self.stats.hits.fetch_add(1, Ordering::Relaxed);
+            self.stats.hits.add_one();
             return Probe::Read(account_and_slot.0, account_and_slot.1);
         }
         drop(entry);
-        self.stats.misses.fetch_add(1, Ordering::Relaxed);
+        self.stats.misses.add_one();
         Probe::Absent
     }
 
@@ -467,8 +507,8 @@ impl ReadOnlyAccountsCache {
     }
 
     pub(crate) fn get_and_reset_stats(&self) -> ReadOnlyCacheStats {
-        let hits = self.stats.hits.swap(0, Ordering::Relaxed);
-        let misses = self.stats.misses.swap(0, Ordering::Relaxed);
+        let hits = self.stats.hits.swap_total();
+        let misses = self.stats.misses.swap_total();
         let evicts = self.stats.evicts.swap(0, Ordering::Relaxed);
         let load_us = self.stats.load_us.swap(0, Ordering::Relaxed);
         let store_us = self.stats.store_us.swap(0, Ordering::Relaxed);
