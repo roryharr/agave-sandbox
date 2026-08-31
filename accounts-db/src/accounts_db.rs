@@ -48,7 +48,6 @@ use {
         accounts_index::{
             AccountSecondaryIndexes, AccountsIndex, IndexKey, ReclaimsSlotList,
             ReclaimsWithNewestSlot, ScanFilter, Startup, UpsertReclaim,
-            in_mem_accounts_index::InMemAccountsIndex,
         },
         accounts_scan::{ScanConfig, ScanError, ScanGuard, ScanResult, ScanTracker},
         accounts_update_notifier_interface::{AccountForGeyser, AccountsUpdateNotifier},
@@ -2563,9 +2562,9 @@ impl AccountsDb {
             }
         }
 
-        // Step 2: Scan the accounts_index. For each entry, load the account it points at — the
-        // index is keyed by tag, so the pubkey comes from the account record itself. Return the
-        // newest version found in either the storage or the cache.
+        // Step 2: Scan the accounts_index. For each pubkey, return the newest version found in
+        // either the storage or the cache. If both versions are the same, use the cached version
+        // to avoid a redundant load from storage.
         // Bound max_root by ancestors.min_slot() so that roots from slots
         // beyond the querying bank's ancestor chain are not visible.
         let mut max_root = scan_guard.max_root();
@@ -2575,28 +2574,21 @@ impl AccountsDb {
         self.accounts_index.scan_accounts(
             ancestors,
             max_root,
-            |(slot, account_info)| {
+            |pubkey, (slot, account_info)| {
+                if let Some((cached_account, cache_slot)) = cached_versions.remove(pubkey)
+                    && cache_slot >= slot
+                {
+                    scan_func(Some((pubkey, cached_account.account.clone(), cache_slot)));
+                    return;
+                }
+
                 let mut account_accessor =
                     self.get_account_accessor(slot, &account_info.storage_location());
 
                 let account_slot = account_accessor.get_loaded_account(|loaded_account| {
-                    (
-                        *loaded_account.pubkey(),
-                        loaded_account.take_account(),
-                        slot,
-                    )
+                    (pubkey, loaded_account.take_account(), slot)
                 });
-                let Some((pubkey, account, slot)) = account_slot else {
-                    scan_func(None);
-                    return;
-                };
-                if let Some((cached_account, cache_slot)) = cached_versions.remove(&pubkey)
-                    && cache_slot >= slot
-                {
-                    scan_func(Some((&pubkey, cached_account.account.clone(), cache_slot)));
-                    return;
-                }
-                scan_func(Some((&pubkey, account, slot)))
+                scan_func(account_slot)
             },
             || config.is_aborted(),
         );
@@ -3942,28 +3934,6 @@ impl AccountsDb {
         );
     }
 
-    /// Returns the entry of every pubkey in one index bin that is visible from `ancestors`.
-    ///
-    /// The in-mem index is keyed by a tag rather than by the pubkey, so the pubkey of an entry
-    /// is not recoverable from the index. Callers that need it read it from the account record
-    /// the entry points at.
-    fn index_entries_in_bin(
-        &self,
-        bin: &InMemAccountsIndex<AccountInfo>,
-        ancestors: &Ancestors,
-    ) -> Vec<(Slot, AccountInfo)> {
-        // keep only the entries visible from `ancestors`, the check `get_with_and_then` applies
-        let max_root = ancestors.min_slot();
-        bin.entries()
-            .into_iter()
-            .filter(|entry| {
-                self.accounts_index
-                    .latest_slot(Some(ancestors), std::slice::from_ref(entry), max_root)
-                    .is_some()
-            })
-            .collect()
-    }
-
     /// Calculates the accounts lt hash
     ///
     /// Only intended to be called at startup (or by tests).
@@ -3973,39 +3943,46 @@ impl AccountsDb {
         &self,
         ancestors: &Ancestors,
     ) -> AccountsLtHash {
-        // This impl iterates over all the index bins in parallel, and computes the lt hash
-        // sequentially per bin.  Then afterwards reduces to a single lt hash.
-        // This implementation is quite fast.  Runtime is about 150 seconds on mnb as of 10/2/2024.
-        // The sequential implementation took about 6,275 seconds!
-        // A different parallel implementation that iterated over the bins *sequentially* and then
-        // hashed the accounts *within* a bin in parallel took about 600 seconds.  That impl uses
-        // less memory, as only a single index bin is loaded into mem at a time.
+        // This impl iterates over the index map's shards in parallel, and computes the lt hash
+        // sequentially per shard.  Then afterwards reduces to a single lt hash.
+        // keep only the entries visible from `ancestors`, the check `get_with_and_then` applies
+        let max_root = ancestors.min_slot();
         let mut lt_hash = self
             .accounts_index
-            .account_maps
+            .map
+            .shards()
             .par_iter()
-            .fold(
-                LtHash::identity,
-                |mut accumulator_lt_hash, accounts_index_bin| {
-                    for (slot, account_info) in
-                        self.index_entries_in_bin(accounts_index_bin, ancestors)
+            .fold(LtHash::identity, |mut accumulator_lt_hash, shard| {
+                // snapshot the shard so accounts load without the shard lock held
+                let entries: Vec<_> = shard
+                    .read()
+                    .iter()
+                    .map(|(_pubkey, value)| value.get().entry())
+                    .collect();
+                for entry in entries {
+                    let (slot, account_info) = entry;
+                    if self
+                        .accounts_index
+                        .latest_slot(Some(ancestors), std::slice::from_ref(&entry), max_root)
+                        .is_none()
                     {
-                        if account_info.is_zero_lamport() {
-                            continue;
-                        }
-                        let account_lt_hash = self
-                            .get_account_accessor(slot, &account_info.storage_location())
-                            .get_loaded_account(|loaded_account| {
-                                Self::lt_hash_account(&loaded_account, loaded_account.pubkey())
-                            })
-                            // SAFETY: The index said this account exists, so
-                            // there must be an account to load.
-                            .unwrap();
-                        accumulator_lt_hash.mix_in(&account_lt_hash.0);
+                        continue;
                     }
-                    accumulator_lt_hash
-                },
-            )
+                    if account_info.is_zero_lamport() {
+                        continue;
+                    }
+                    let account_lt_hash = self
+                        .get_account_accessor(slot, &account_info.storage_location())
+                        .get_loaded_account(|loaded_account| {
+                            Self::lt_hash_account(&loaded_account, loaded_account.pubkey())
+                        })
+                        // SAFETY: The index said this account exists, so
+                        // there must be an account to load.
+                        .unwrap();
+                    accumulator_lt_hash.mix_in(&account_lt_hash.0);
+                }
+                accumulator_lt_hash
+            })
             .reduce(LtHash::identity, |mut accum, elem| {
                 accum.mix_in(&elem);
                 accum
@@ -4066,13 +4043,27 @@ impl AccountsDb {
                 .unwrap_or(0)
         };
 
+        // keep only the entries visible from `ancestors`, the check `get_with_and_then` applies
+        let max_root = ancestors.min_slot();
         let storage_capitialization = self
             .accounts_index
-            .account_maps
+            .map
+            .shards()
             .par_iter()
-            .map(|accounts_index_bin| {
-                self.index_entries_in_bin(accounts_index_bin, ancestors)
+            .map(|shard| {
+                // snapshot the shard so accounts load without the shard lock held
+                let entries: Vec<_> = shard
+                    .read()
+                    .iter()
+                    .map(|(_pubkey, value)| value.get().entry())
+                    .collect();
+                entries
                     .into_iter()
+                    .filter(|entry| {
+                        self.accounts_index
+                            .latest_slot(Some(ancestors), std::slice::from_ref(entry), max_root)
+                            .is_some()
+                    })
                     .map(stored_lamports_of_entry)
                     .try_fold(0, u64::checked_add)
             })
@@ -5245,7 +5236,6 @@ impl AccountsDb {
 
             // stats for inserted entries that previously did *not* exist
             index_stats.inc_insert_count(total_accum.num_did_not_exist);
-            index_stats.add_mem_count(total_accum.num_did_not_exist as usize);
 
             // stats for inserted entries that previously did exist
             index_stats
@@ -5441,29 +5431,6 @@ impl AccountsDb {
 
         self.accounts_index.log_secondary_indexes();
 
-        // Now that the index is generated, get the total length and capacity of the in-mem maps
-        // across all the bins and set the initial value for the stat.
-        // We do this all at once, at the end, since getting the capacity requires iterating all
-        // the bins and grabbing a read lock, which we try to avoid whenever possible.
-        let (index_len, index_capacity) = self
-            .accounts_index
-            .account_maps
-            .iter()
-            .map(|bin| bin.len_and_cap_for_startup())
-            .fold((0, 0), |mut accum, (len, cap)| {
-                accum.0 += len;
-                accum.1 += cap;
-                accum
-            });
-        self.accounts_index
-            .stats()
-            .count_in_mem
-            .store(index_len, Ordering::Relaxed);
-        self.accounts_index
-            .stats()
-            .capacity_in_mem
-            .store(index_capacity, Ordering::Relaxed);
-
         // The bank capitalization field is a u64, so a valid capitalization must fit into a u64.
         // The lamports from duplicate accounts have now been removed, so try casting.
         let Ok(calculated_capitalization) = u64::try_from(total_accum.capitalization) else {
@@ -5606,10 +5573,12 @@ impl AccountsDb {
     }
 
     fn print_index(&self) {
-        self.accounts_index.account_maps.iter().for_each(|map| {
-            for entry in map.entries() {
-                info!("      slots: {entry:?}");
-            }
+        self.accounts_index.map.iter().for_each(|entry_ref| {
+            info!(
+                " key: {} slots: {:?}",
+                entry_ref.key(),
+                entry_ref.value().slot_list()
+            );
         });
     }
 

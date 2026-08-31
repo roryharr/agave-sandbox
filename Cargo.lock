@@ -6943,7 +6943,6 @@ dependencies = [
  "solana-account 4.6.0",
  "solana-accounts-db",
  "solana-address-lookup-table-interface",
- "solana-bucket-map",
  "solana-clock",
  "solana-epoch-schedule",
  "solana-fee-calculator",
