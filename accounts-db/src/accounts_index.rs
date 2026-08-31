@@ -630,12 +630,15 @@ impl<T: IndexValue> AccountsIndex<T> {
         for (pubkey, account_info) in items.drain(..) {
             match self.map.entry(pubkey) {
                 Entry::Occupied(occupied) => {
-                    // keep whichever version is from the newer slot
-                    let older_version = occupied.get().replace_if_newer((slot, account_info), None);
+                    // only this thread inserts entries for `slot`, so an existing entry at
+                    // `slot` is the same pubkey stored twice in one storage
+                    let (existing_slot, _existing_account_info) = occupied.get().entry();
                     assert_ne!(
-                        older_version.0, slot,
+                        existing_slot, slot,
                         "Accounts may only be stored once per slot: {slot}"
                     );
+                    // keep whichever version is from the newer slot
+                    let older_version = occupied.get().replace_if_newer((slot, account_info), None);
                     duplicates.push((older_version.0, pubkey, older_version.1));
                     num_existed += 1;
                 }
@@ -1083,6 +1086,34 @@ mod tests {
         let mut items = vec![(*pubkey, account_info), (*pubkey, account_info2)];
         index.set_startup(Startup::Startup);
         index.insert_new_if_missing_into_primary_index(slot, &mut items);
+    }
+
+    /// Startup storages are visited in random order, so a duplicate's older version can
+    /// arrive after the newer one; it is recorded as a duplicate, not a same-slot store.
+    #[test]
+    fn test_insert_older_version_after_newer() {
+        let key = solana_pubkey::new_rand();
+        let newer_slot = 5;
+        let older_slot = 3;
+
+        let index = AccountsIndex::<bool>::default_for_tests();
+        index.set_startup(Startup::Startup);
+
+        let mut items = vec![(key, true)];
+        index.insert_new_if_missing_into_primary_index(newer_slot, &mut items);
+
+        let mut items = vec![(key, false)];
+        let result = index.insert_new_if_missing_into_primary_index(older_slot, &mut items);
+        assert_eq!(result.num_existed, 1);
+
+        // the index keeps the newer version and the older version is a duplicate
+        index.get_and_then(&key, |entry| {
+            assert_eq!(entry.unwrap().slot_list(), [(newer_slot, true)]);
+        });
+        index.take_startup_duplicates(|duplicates| {
+            assert_eq!(duplicates, vec![(older_slot, key, false)]);
+        });
+        index.set_startup(Startup::Normal);
     }
 
     #[test]
