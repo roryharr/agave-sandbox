@@ -4877,11 +4877,6 @@ impl AccountsDb {
                     i64
                 ),
                 (
-                    "read_only_accounts_cache_evicts",
-                    read_cache_stats.evicts,
-                    i64
-                ),
-                (
                     "read_only_accounts_cache_load_us",
                     read_cache_stats.load_us,
                     i64
@@ -4889,16 +4884,6 @@ impl AccountsDb {
                 (
                     "read_only_accounts_cache_store_us",
                     read_cache_stats.store_us,
-                    i64
-                ),
-                (
-                    "read_only_accounts_cache_evict_us",
-                    read_cache_stats.evict_us,
-                    i64
-                ),
-                (
-                    "read_only_accounts_cache_evict_run_count",
-                    read_cache_stats.evict_run_count,
                     i64
                 ),
                 (
