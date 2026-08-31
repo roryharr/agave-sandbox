@@ -35,6 +35,11 @@ use {
 #[cfg_attr(feature = "dev-context-only-utils", qualifiers(pub))]
 const CACHE_ENTRY_SIZE: usize = size_of::<CacheEntry>() + size_of::<ReadOnlyCacheKey>();
 
+/// Sampled LRU eviction only needs coarse recency, so a hit only refreshes an entry's stamp
+/// once this interval has passed. Re-stamping on every hit would dirty the entry's cacheline,
+/// costing every other reader of a hot account a coherence miss on their next probe.
+const LRU_STAMP_INTERVAL_NS: u64 = 10_000_000;
+
 type ReadOnlyCacheKey = Pubkey;
 
 /// One entry per pubkey present in either cache.
@@ -223,8 +228,7 @@ impl ReadOnlyAccountsCache {
                 && let Some(read) = entry.read.as_ref()
                 && is_visible(read.slot)
             {
-                read.last_update_time
-                    .store(self.timestamp(), Ordering::Relaxed);
+                read.refresh_last_update_time(self.timestamp());
                 let account_and_slot = (read.account.clone(), read.slot);
                 drop(entry);
                 self.stats.hits.fetch_add(1, Ordering::Relaxed);
@@ -268,8 +272,7 @@ impl ReadOnlyAccountsCache {
         if let Some(read) = entry.read.as_ref()
             && is_read_visible(read.slot)
         {
-            read.last_update_time
-                .store(self.timestamp(), Ordering::Relaxed);
+            read.refresh_last_update_time(self.timestamp());
             let account_and_slot = (read.account.clone(), read.slot);
             drop(entry);
             self.stats.hits.fetch_add(1, Ordering::Relaxed);
@@ -671,6 +674,14 @@ impl ReadOnlyAccountCacheEntry {
             account,
             slot,
             last_update_time: AtomicU64::new(timestamp),
+        }
+    }
+
+    /// Refresh the eviction stamp, only writing it once per `LRU_STAMP_INTERVAL_NS`
+    fn refresh_last_update_time(&self, now: u64) {
+        let last_update_time = self.last_update_time.load(Ordering::Relaxed);
+        if now.wrapping_sub(last_update_time) > LRU_STAMP_INTERVAL_NS {
+            self.last_update_time.store(now, Ordering::Relaxed);
         }
     }
 }
