@@ -1,6 +1,7 @@
 mod account_map_entry;
 mod secondary;
 mod stats;
+pub(crate) mod tag;
 pub use secondary::{
     AccountIndex, AccountSecondaryIndexes, AccountSecondaryIndexesIncludeExclude, IndexKey,
 };
@@ -18,7 +19,7 @@ use {
     solana_account::ReadableAccount,
     solana_clock::Slot,
     solana_measure::measure::Measure,
-    solana_pubkey::{Pubkey, PubkeyHasherBuilder},
+    solana_pubkey::Pubkey,
     stats::Stats,
     std::{
         fmt::Debug,
@@ -29,6 +30,7 @@ use {
             atomic::{AtomicBool, AtomicU64, Ordering},
         },
     },
+    tag::{Tag, TagCalculator, TagHasherBuilder},
 };
 
 /// Partition count for clean's candidate sets. The index map itself shards internally.
@@ -185,9 +187,12 @@ pub fn default_num_flush_threads() -> NonZeroUsize {
 #[derive(Debug)]
 /// T: account info type to interact in in-memory items
 pub struct AccountsIndex<T: IndexValue> {
-    /// Every index entry, keyed by pubkey. Entry updates are a compare-and-exchange on the
-    /// entry itself; the map's shard locks are only held for lookup, insert, and remove.
-    pub(crate) map: DashMap<Pubkey, AccountMapEntry<T>, PubkeyHasherBuilder>,
+    /// Every index entry, keyed by `Tag` (see `tag.rs` for the collision posture). Entry
+    /// updates are a compare-and-exchange on the entry itself; the map's shard locks are only
+    /// held for lookup, insert, and remove.
+    pub(crate) map: DashMap<Tag, AccountMapEntry<T>, TagHasherBuilder>,
+    /// computes the `Tag` the map is keyed by
+    tag_calculator: TagCalculator,
     /// Partitions clean's candidate sets. The index map itself shards internally.
     pub bin_calculator: PubkeyBinCalculator,
     /// Partition count for `bin_calculator`
@@ -219,11 +224,12 @@ impl<T: IndexValue> AccountsIndex<T> {
 
         let map = DashMap::with_capacity_and_hasher(
             config.num_initial_accounts.unwrap_or(0),
-            PubkeyHasherBuilder::default(),
+            TagHasherBuilder,
         );
 
         Self {
             map,
+            tag_calculator: TagCalculator::default(),
             bin_calculator,
             bins,
             program_id_index: SecondaryIndex::<RwLockSecondaryIndexEntry>::new(
@@ -241,6 +247,12 @@ impl<T: IndexValue> AccountsIndex<T> {
         }
     }
 
+    /// the `Tag` the map is keyed by
+    #[inline]
+    fn tag(&self, pubkey: &Pubkey) -> Tag {
+        self.tag_calculator.tag_from_pubkey(pubkey)
+    }
+
     /// Gets the index's entry for `pubkey` and applies `callback` to it
     pub fn get_and_then<R>(
         &self,
@@ -248,7 +260,7 @@ impl<T: IndexValue> AccountsIndex<T> {
         callback: impl FnOnce(Option<&AccountMapEntry<T>>) -> R,
     ) -> R {
         let mut m = Measure::start("get");
-        let entry = self.map.get(pubkey);
+        let entry = self.map.get(&self.tag(pubkey));
         m.stop();
         let found = entry.is_some();
         let result = callback(entry.as_deref());
@@ -320,7 +332,7 @@ impl<T: IndexValue> AccountsIndex<T> {
         let mut pubkeys_removed_from_accounts_index = Vec::default();
         if !dead_keys.is_empty() {
             for key in dead_keys.iter() {
-                if !self.map.contains_key(key) {
+                if !self.map.contains_key(&self.tag(key)) {
                     pubkeys_removed_from_accounts_index.push(*key);
                 }
             }
@@ -328,7 +340,10 @@ impl<T: IndexValue> AccountsIndex<T> {
         pubkeys_removed_from_accounts_index
     }
 
-    /// call func with every pubkey and entry visible from a given set of ancestors.
+    /// call func with every entry visible from a given set of ancestors.
+    ///
+    /// The index is keyed by tag, so the pubkey of an entry is not recoverable from the index;
+    /// callers read it from the account record the entry points at.
     /// `should_abort` is checked after each entry; the scan stops once it returns true.
     pub(crate) fn scan_accounts<F>(
         &self,
@@ -337,21 +352,21 @@ impl<T: IndexValue> AccountsIndex<T> {
         mut func: F,
         should_abort: impl Fn() -> bool,
     ) where
-        F: FnMut(&Pubkey, SlotListItem<T>),
+        F: FnMut(SlotListItem<T>),
     {
         for shard in self.map.shards() {
             // snapshot the shard so `func` runs without the shard lock held
             let entries: Vec<_> = shard
                 .read()
-                .iter()
-                .map(|(pubkey, value)| (*pubkey, value.get().entry()))
+                .values()
+                .map(|value| value.get().entry())
                 .collect();
-            for (pubkey, item) in entries {
+            for item in entries {
                 if self
                     .latest_slot(Some(ancestors), std::slice::from_ref(&item), Some(max_root))
                     .is_some()
                 {
-                    func(&pubkey, item);
+                    func(item);
                 }
                 if should_abort() {
                     return;
@@ -459,7 +474,7 @@ impl<T: IndexValue> AccountsIndex<T> {
         let (count, capacity) = self.len_and_capacity();
         // map memory is based on capacity and the footprint of a KV-pair
         // (we ignore other map details, such as load factor)
-        let estimate_mem_bytes = capacity * (size_of::<Pubkey>() + size_of::<AccountMapEntry<T>>());
+        let estimate_mem_bytes = capacity * (size_of::<Tag>() + size_of::<AccountMapEntry<T>>());
         self.stats.report_stats(
             self.startup.load(Ordering::Relaxed),
             count,
@@ -628,7 +643,7 @@ impl<T: IndexValue> AccountsIndex<T> {
         let mut duplicates = Vec::new();
 
         for (pubkey, account_info) in items.drain(..) {
-            match self.map.entry(pubkey) {
+            match self.map.entry(self.tag(&pubkey)) {
                 Entry::Occupied(occupied) => {
                     // only this thread inserts entries for `slot`, so an existing entry at
                     // `slot` is the same pubkey stored twice in one storage
@@ -707,7 +722,7 @@ impl<T: IndexValue> AccountsIndex<T> {
     ) {
         // try to get it with the shard read lock first
         {
-            let entry = self.map.get(pubkey);
+            let entry = self.map.get(&self.tag(pubkey));
             if let Some(entry) = entry {
                 callback(&entry);
                 drop(entry);
@@ -717,7 +732,7 @@ impl<T: IndexValue> AccountsIndex<T> {
         }
 
         let mut m = Measure::start("entry");
-        let entry = self.map.entry(*pubkey);
+        let entry = self.map.entry(self.tag(pubkey));
         m.stop();
         let found = matches!(entry, Entry::Occupied(_));
         match entry {
@@ -805,7 +820,7 @@ impl<T: IndexValue> AccountsIndex<T> {
     /// Removes the pubkey from the index
     /// Populate reclaims with any entries previously in the slot list
     pub fn delete(&self, pubkey: &Pubkey, reclaims: &mut ReclaimsSlotList<T>) {
-        if let Some((_pubkey, entry)) = self.map.remove(pubkey) {
+        if let Some((_tag, entry)) = self.map.remove(&self.tag(pubkey)) {
             reclaims.extend(entry.slot_list().iter().copied());
             self.stats.inc_delete();
         }
@@ -819,7 +834,7 @@ impl<T: IndexValue> AccountsIndex<T> {
         pubkey: &Pubkey,
         should_remove: impl FnOnce(&SlotListItem<T>) -> bool,
     ) -> Option<bool> {
-        match self.map.entry(*pubkey) {
+        match self.map.entry(self.tag(pubkey)) {
             Entry::Occupied(occupied) => {
                 let remove = should_remove(&occupied.get().entry());
                 if remove {
@@ -1242,9 +1257,10 @@ mod tests {
         let pubkey = solana_pubkey::new_rand();
 
         // Insert an entry manually
-        index
-            .map
-            .insert(pubkey, AccountMapEntry::new(SlotList::from([(0, 42)])));
+        index.map.insert(
+            index.tag(&pubkey),
+            AccountMapEntry::new(SlotList::from([(0, 42)])),
+        );
 
         let mut callback_called = false;
         index.get_or_create_index_entry_for_pubkey(&pubkey, (1, 43), |entry| {

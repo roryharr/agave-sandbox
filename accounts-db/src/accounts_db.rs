@@ -2562,9 +2562,9 @@ impl AccountsDb {
             }
         }
 
-        // Step 2: Scan the accounts_index. For each pubkey, return the newest version found in
-        // either the storage or the cache. If both versions are the same, use the cached version
-        // to avoid a redundant load from storage.
+        // Step 2: Scan the accounts_index. For each entry, load the account it points at — the
+        // index is keyed by tag, so the pubkey comes from the account record itself. Return the
+        // newest version found in either the storage or the cache.
         // Bound max_root by ancestors.min_slot() so that roots from slots
         // beyond the querying bank's ancestor chain are not visible.
         let mut max_root = scan_guard.max_root();
@@ -2574,21 +2574,28 @@ impl AccountsDb {
         self.accounts_index.scan_accounts(
             ancestors,
             max_root,
-            |pubkey, (slot, account_info)| {
-                if let Some((cached_account, cache_slot)) = cached_versions.remove(pubkey)
-                    && cache_slot >= slot
-                {
-                    scan_func(Some((pubkey, cached_account.account.clone(), cache_slot)));
-                    return;
-                }
-
+            |(slot, account_info)| {
                 let mut account_accessor =
                     self.get_account_accessor(slot, &account_info.storage_location());
 
                 let account_slot = account_accessor.get_loaded_account(|loaded_account| {
-                    (pubkey, loaded_account.take_account(), slot)
+                    (
+                        *loaded_account.pubkey(),
+                        loaded_account.take_account(),
+                        slot,
+                    )
                 });
-                scan_func(account_slot)
+                let Some((pubkey, account, slot)) = account_slot else {
+                    scan_func(None);
+                    return;
+                };
+                if let Some((cached_account, cache_slot)) = cached_versions.remove(&pubkey)
+                    && cache_slot >= slot
+                {
+                    scan_func(Some((&pubkey, cached_account.account.clone(), cache_slot)));
+                    return;
+                }
+                scan_func(Some((&pubkey, account, slot)))
             },
             || config.is_aborted(),
         );
@@ -3956,8 +3963,8 @@ impl AccountsDb {
                 // snapshot the shard so accounts load without the shard lock held
                 let entries: Vec<_> = shard
                     .read()
-                    .iter()
-                    .map(|(_pubkey, value)| value.get().entry())
+                    .values()
+                    .map(|value| value.get().entry())
                     .collect();
                 for entry in entries {
                     let (slot, account_info) = entry;
@@ -4054,8 +4061,8 @@ impl AccountsDb {
                 // snapshot the shard so accounts load without the shard lock held
                 let entries: Vec<_> = shard
                     .read()
-                    .iter()
-                    .map(|(_pubkey, value)| value.get().entry())
+                    .values()
+                    .map(|value| value.get().entry())
                     .collect();
                 entries
                     .into_iter()
@@ -5575,7 +5582,7 @@ impl AccountsDb {
     fn print_index(&self) {
         self.accounts_index.map.iter().for_each(|entry_ref| {
             info!(
-                " key: {} slots: {:?}",
+                " tag: {:x} slots: {:?}",
                 entry_ref.key(),
                 entry_ref.value().slot_list()
             );
