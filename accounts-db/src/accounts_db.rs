@@ -3077,11 +3077,11 @@ impl AccountsDb {
             self.accounts_index.is_slot_visible(slot, ancestors)
         }) {
             let (account, slot) = match cached_load {
-                CachedLoad::WriteCache(cached_account, slot) => {
+                CachedLoad::WriteCache(account, slot) => {
                     self.load_account_stats
                         .num_loaded_from_write_cache
                         .fetch_add(1, Ordering::Relaxed);
-                    (cached_account.account.clone(), slot)
+                    (account, slot)
                 }
                 CachedLoad::ReadCache(account, slot) => {
                     self.load_account_stats
