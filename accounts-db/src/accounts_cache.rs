@@ -103,10 +103,7 @@ impl SlotCache {
     /// Returns the cached account and whether this was a new unique key for this slot
     fn insert(&self, pubkey: &Pubkey, account: AccountSharedData) -> (Arc<CachedAccount>, bool) {
         let data_len = account.data().len() as u64;
-        let item = Arc::new(CachedAccount {
-            account,
-            pubkey: *pubkey,
-        });
+        let item = Arc::new(CachedAccount::new(account, *pubkey));
         let is_new_key = if let Some(old) = self.cache.insert(*pubkey, item.clone()) {
             self.same_account_writes.fetch_add(1, Ordering::Relaxed);
             self.same_account_writes_size
@@ -174,6 +171,10 @@ pub struct CachedAccount {
 }
 
 impl CachedAccount {
+    pub(crate) fn new(account: AccountSharedData, pubkey: Pubkey) -> Self {
+        Self { account, pubkey }
+    }
+
     pub fn pubkey(&self) -> &Pubkey {
         &self.pubkey
     }
@@ -278,12 +279,10 @@ impl AccountsCache {
                 .clone());
 
         let (item, is_new_key) = slot_cache.insert(pubkey, account);
-        if is_new_key {
-            // Only update the index when the pubkey is new to this slot. Overwrites within the
-            // same slot (is_new_key = false) cannot update the index because the ref count was
-            // already incremented when the pubkey was first stored in this slot
-            self.index.insert_write(pubkey, slot);
-        }
+        // Overwrites within the same slot (is_new_key = false) leave the ref count alone,
+        // since it was already incremented when the pubkey was first stored in this slot,
+        // but still refresh the entry's latest write-cache version
+        self.index.insert_write(pubkey, slot, &item, is_new_key);
         item
     }
 
@@ -301,7 +300,7 @@ impl AccountsCache {
 
         result.as_ref().map(|slot_cache| {
             self.index
-                .remove_write(slot_cache.iter().map(|item| *item.key()))
+                .remove_write(slot, slot_cache.iter().map(|item| *item.key()))
         })
     }
 
@@ -317,7 +316,17 @@ impl AccountsCache {
         match self.index.probe(pubkey, &read_visible) {
             Probe::Absent => None,
             Probe::Read(account, slot) => Some(CachedLoad::ReadCache(account, slot)),
-            Probe::Write { max_slot } => {
+            Probe::Write {
+                max_slot,
+                latest_write,
+            } => {
+                // The version at the highest cached slot answers directly when its slot is an
+                // ancestor: ancestors win over roots, and no cached version is newer.
+                if let Some((slot, cached_account)) = latest_write
+                    && ancestors.contains_key(&slot)
+                {
+                    return Some(CachedLoad::WriteCache(cached_account, slot));
+                }
                 if let Some((cached_account, slot)) =
                     self.load_latest_bounded(pubkey, ancestors, max_slot)
                 {
@@ -583,16 +592,21 @@ mod tests {
         // Initially empty
         assert!(cache.index.write_max_slot(&pubkey).is_none());
 
+        let cached_account = Arc::new(CachedAccount::new(
+            AccountSharedData::new(1, 0, &Pubkey::default()),
+            pubkey,
+        ));
+
         // Insert at slot 5
-        cache.index.insert_write(&pubkey, 5);
+        cache.index.insert_write(&pubkey, 5, &cached_account, true);
         assert_eq!(cache.index.write_max_slot(&pubkey), Some(5));
 
         // Insert same pubkey at a higher slot updates max_slot
-        cache.index.insert_write(&pubkey, 10);
+        cache.index.insert_write(&pubkey, 10, &cached_account, true);
         assert_eq!(cache.index.write_max_slot(&pubkey), Some(10));
 
         // Insert same pubkey at a lower slot does not decrease max_slot
-        cache.index.insert_write(&pubkey, 3);
+        cache.index.insert_write(&pubkey, 3, &cached_account, true);
         assert_eq!(cache.index.write_max_slot(&pubkey), Some(10));
     }
 
@@ -769,6 +783,50 @@ mod tests {
                 assert_eq!(slot, 5);
             }
             other => panic!("expected a read cache hit, got {other:?}"),
+        }
+    }
+
+    /// The entry-cached latest write version answers ancestor-visible loads and stays fresh
+    /// across same-slot overwrites; flushing its slot falls back to searching the slot caches.
+    #[test]
+    fn test_load_cached_latest_write_version() {
+        let cache = AccountsCache::default();
+        let pk = Pubkey::new_unique();
+
+        let v1 = AccountSharedData::new(1, 0, &Pubkey::default());
+        let v2 = AccountSharedData::new(2, 0, &Pubkey::default());
+        let v3 = AccountSharedData::new(3, 0, &Pubkey::default());
+
+        // same-slot overwrite refreshes the cached version
+        cache.store(5, &pk, v1);
+        cache.store(5, &pk, v2.clone());
+        match cache.load_cached(&pk, &Ancestors::from(vec![5]), |_slot| true) {
+            Some(CachedLoad::WriteCache(cached_account, slot)) => {
+                assert_eq!(cached_account.account, v2);
+                assert_eq!(slot, 5);
+            }
+            other => panic!("expected a write cache hit, got {other:?}"),
+        }
+
+        // a store at a higher slot takes over as the latest version
+        cache.store(8, &pk, v3.clone());
+        match cache.load_cached(&pk, &Ancestors::from(vec![5, 8]), |_slot| true) {
+            Some(CachedLoad::WriteCache(cached_account, slot)) => {
+                assert_eq!(cached_account.account, v3);
+                assert_eq!(slot, 8);
+            }
+            other => panic!("expected a write cache hit, got {other:?}"),
+        }
+
+        // flushing slot 8 clears the cached version; the load falls back to searching the
+        // slot caches and finds the version at slot 5
+        let _ = cache.remove_slot(8);
+        match cache.load_cached(&pk, &Ancestors::from(vec![5, 8]), |_slot| true) {
+            Some(CachedLoad::WriteCache(cached_account, slot)) => {
+                assert_eq!(cached_account.account, v2);
+                assert_eq!(slot, 5);
+            }
+            other => panic!("expected a write cache hit, got {other:?}"),
         }
     }
 

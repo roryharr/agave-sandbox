@@ -8,6 +8,7 @@
 #[cfg(feature = "dev-context-only-utils")]
 use qualifier_attr::{field_qualifiers, qualifiers};
 use {
+    crate::accounts_cache::CachedAccount,
     ahash::random_state::RandomState as AHashRandomState,
     dashmap::{DashMap, mapref::entry::Entry},
     log::*,
@@ -41,6 +42,10 @@ type ReadOnlyCacheKey = Pubkey;
 struct CacheEntry {
     /// the newest rooted version, flushed to storage (the read cache)
     read: Option<ReadOnlyAccountCacheEntry>,
+    /// the write-cache version at `max_slot`, when that slot cache still holds it. A load
+    /// whose ancestors contain this slot is answered from here without searching the slot
+    /// caches. `None` after the version's slot is flushed while others still hold the pubkey.
+    latest_write: Option<(Slot, Arc<CachedAccount>)>,
     /// the highest slot at which the pubkey has been written into the write cache. May be
     /// stale after a removal; `load_latest` handles a miss at this slot by scanning all
     /// slots in the write cache.
@@ -74,8 +79,13 @@ pub(crate) enum Probe {
     Absent,
     /// not in the write cache; the read cache holds this visible version
     Read(AccountSharedData, Slot),
-    /// in the write cache: search the slot caches, bounded by `max_slot`
-    Write { max_slot: Slot },
+    /// in the write cache: `latest_write` is the version at the highest cached slot, and
+    /// answers the load directly when that slot is an ancestor; otherwise search the slot
+    /// caches, bounded by `max_slot`
+    Write {
+        max_slot: Slot,
+        latest_write: Option<(Slot, Arc<CachedAccount>)>,
+    },
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -246,6 +256,7 @@ impl ReadOnlyAccountsCache {
         if entry.ref_count > 0 {
             return Probe::Write {
                 max_slot: entry.max_slot,
+                latest_write: entry.latest_write.clone(),
             };
         }
         // not in the write cache: an entry only exists for its read half
@@ -348,20 +359,38 @@ impl ReadOnlyAccountsCache {
         Some(read)
     }
 
-    /// Record that `pubkey` was written into the write cache at `slot`.
-    pub(crate) fn insert_write(&self, pubkey: &Pubkey, slot: Slot) {
+    /// Record that `pubkey` was written into the write cache at `slot`. `is_new_key` is
+    /// whether this was the pubkey's first store into that slot's cache; overwrites within a
+    /// slot only refresh `latest_write`. Stores for one (pubkey, slot) are serialized by the
+    /// account locks upstream, so `cached_account` cannot be stale for its slot.
+    pub(crate) fn insert_write(
+        &self,
+        pubkey: &Pubkey,
+        slot: Slot,
+        cached_account: &Arc<CachedAccount>,
+        is_new_key: bool,
+    ) {
         let mut entry = self.cache.entry(*pubkey).or_default();
-        if entry.ref_count == 0 {
-            self.num_write_pubkeys.fetch_add(1, Ordering::Relaxed);
+        if is_new_key {
+            if entry.ref_count == 0 {
+                self.num_write_pubkeys.fetch_add(1, Ordering::Relaxed);
+            }
+            entry.ref_count += 1;
         }
-        entry.max_slot = slot.max(entry.max_slot);
-        entry.ref_count += 1;
+        if slot >= entry.max_slot {
+            entry.max_slot = slot;
+            entry.latest_write = Some((slot, Arc::clone(cached_account)));
+        }
     }
 
-    /// Record that each pubkey in `pubkeys` left one slot cache. Returns the pubkeys that are no
-    /// longer in the write cache at all. `max_slot` is not updated; it will become stale if the
-    /// removed slot is the highest slot.
-    pub(crate) fn remove_write(&self, pubkeys: impl IntoIterator<Item = Pubkey>) -> Vec<Pubkey> {
+    /// Record that each pubkey in `pubkeys` left `slot`'s slot cache. Returns the pubkeys that
+    /// are no longer in the write cache at all. `max_slot` is not updated; it will become stale
+    /// if the removed slot is the highest slot.
+    pub(crate) fn remove_write(
+        &self,
+        slot: Slot,
+        pubkeys: impl IntoIterator<Item = Pubkey>,
+    ) -> Vec<Pubkey> {
         let mut removed_pubkeys = Vec::new();
         for pubkey in pubkeys {
             let Entry::Occupied(mut occupied) = self.cache.entry(pubkey) else {
@@ -370,6 +399,14 @@ impl ReadOnlyAccountsCache {
             };
             let entry = occupied.get_mut();
             entry.ref_count -= 1;
+            if entry
+                .latest_write
+                .as_ref()
+                .is_some_and(|(latest_slot, _)| *latest_slot == slot)
+                || entry.ref_count == 0
+            {
+                entry.latest_write = None;
+            }
             if entry.ref_count == 0 {
                 self.num_write_pubkeys.fetch_sub(1, Ordering::Relaxed);
                 if entry.read.is_none() {
@@ -841,7 +878,8 @@ mod tests {
         let pubkey = Pubkey::new_unique();
         let account = AccountSharedData::new(1, 16, &Pubkey::default());
 
-        cache.insert_write(&pubkey, 7);
+        let cached_account = Arc::new(CachedAccount::new(account.clone(), pubkey));
+        cache.insert_write(&pubkey, 7, &cached_account, true);
         cache.store(pubkey, 5, account.clone());
         assert_eq!(cache.cache_len(), 1);
         assert_eq!(cache.write_max_slot(&pubkey), Some(7));
@@ -854,7 +892,7 @@ mod tests {
 
         // and the write half leaving removes the entry entirely
         cache.store(pubkey, 5, account);
-        assert_eq!(cache.remove_write([pubkey]), vec![pubkey]);
+        assert_eq!(cache.remove_write(7, [pubkey]), vec![pubkey]);
         assert!(!cache.contains_write(&pubkey));
         // the read half is still there
         assert_eq!(cache.cache_len(), 1);
