@@ -180,11 +180,13 @@ impl CachedAccount {
     }
 }
 
-/// A hit from `AccountsCache::load_cached`
+/// A hit from `AccountsCache::load_cached`. Both variants carry the account itself, cloned
+/// under the map guard: handing out an `Arc<CachedAccount>` costs a second contended refcount
+/// round trip on the hot account's line when the caller reaches through it and drops it.
 #[derive(Debug)]
 pub enum CachedLoad {
     /// from the write cache: the freshest version visible on this fork
-    WriteCache(Arc<CachedAccount>, Slot),
+    WriteCache(AccountSharedData, Slot),
     /// from the read cache: the newest version in storage
     ReadCache(AccountSharedData, Slot),
 }
@@ -322,15 +324,15 @@ impl AccountsCache {
             } => {
                 // The version at the highest cached slot answers directly when its slot is an
                 // ancestor: ancestors win over roots, and no cached version is newer.
-                if let Some((slot, cached_account)) = latest_write
+                if let Some((slot, account)) = latest_write
                     && ancestors.contains_key(&slot)
                 {
-                    return Some(CachedLoad::WriteCache(cached_account, slot));
+                    return Some(CachedLoad::WriteCache(account, slot));
                 }
                 if let Some((cached_account, slot)) =
                     self.load_latest_bounded(pubkey, ancestors, max_slot)
                 {
-                    return Some(CachedLoad::WriteCache(cached_account, slot));
+                    return Some(CachedLoad::WriteCache(cached_account.account.clone(), slot));
                 }
                 // The write-cache version is not visible on this fork (or was flushed during
                 // the search); fall back to the read half.
@@ -769,8 +771,8 @@ mod tests {
         let unrooted_account = AccountSharedData::new(2, 0, &Pubkey::default());
         cache.store(10, &pk, unrooted_account.clone());
         match cache.load_cached(&pk, &Ancestors::from(vec![10]), |_slot| true) {
-            Some(CachedLoad::WriteCache(cached_account, slot)) => {
-                assert_eq!(cached_account.account, unrooted_account);
+            Some(CachedLoad::WriteCache(account, slot)) => {
+                assert_eq!(account, unrooted_account);
                 assert_eq!(slot, 10);
             }
             other => panic!("expected a write cache hit, got {other:?}"),
@@ -801,8 +803,8 @@ mod tests {
         cache.store(5, &pk, v1);
         cache.store(5, &pk, v2.clone());
         match cache.load_cached(&pk, &Ancestors::from(vec![5]), |_slot| true) {
-            Some(CachedLoad::WriteCache(cached_account, slot)) => {
-                assert_eq!(cached_account.account, v2);
+            Some(CachedLoad::WriteCache(account, slot)) => {
+                assert_eq!(account, v2);
                 assert_eq!(slot, 5);
             }
             other => panic!("expected a write cache hit, got {other:?}"),
@@ -811,8 +813,8 @@ mod tests {
         // a store at a higher slot takes over as the latest version
         cache.store(8, &pk, v3.clone());
         match cache.load_cached(&pk, &Ancestors::from(vec![5, 8]), |_slot| true) {
-            Some(CachedLoad::WriteCache(cached_account, slot)) => {
-                assert_eq!(cached_account.account, v3);
+            Some(CachedLoad::WriteCache(account, slot)) => {
+                assert_eq!(account, v3);
                 assert_eq!(slot, 8);
             }
             other => panic!("expected a write cache hit, got {other:?}"),
@@ -822,8 +824,8 @@ mod tests {
         // slot caches and finds the version at slot 5
         let _ = cache.remove_slot(8);
         match cache.load_cached(&pk, &Ancestors::from(vec![5, 8]), |_slot| true) {
-            Some(CachedLoad::WriteCache(cached_account, slot)) => {
-                assert_eq!(cached_account.account, v2);
+            Some(CachedLoad::WriteCache(account, slot)) => {
+                assert_eq!(account, v2);
                 assert_eq!(slot, 5);
             }
             other => panic!("expected a write cache hit, got {other:?}"),

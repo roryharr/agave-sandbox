@@ -81,10 +81,12 @@ pub(crate) enum Probe {
     Read(AccountSharedData, Slot),
     /// in the write cache: `latest_write` is the version at the highest cached slot, and
     /// answers the load directly when that slot is an ancestor; otherwise search the slot
-    /// caches, bounded by `max_slot`
+    /// caches, bounded by `max_slot`. The account is cloned here, under the entry guard,
+    /// rather than handing out the `Arc<CachedAccount>`: reaching through that Arc and
+    /// dropping it costs a second contended refcount round trip on the hot account's line.
     Write {
         max_slot: Slot,
-        latest_write: Option<(Slot, Arc<CachedAccount>)>,
+        latest_write: Option<(Slot, AccountSharedData)>,
     },
 }
 
@@ -256,7 +258,10 @@ impl ReadOnlyAccountsCache {
         if entry.ref_count > 0 {
             return Probe::Write {
                 max_slot: entry.max_slot,
-                latest_write: entry.latest_write.clone(),
+                latest_write: entry
+                    .latest_write
+                    .as_ref()
+                    .map(|(slot, cached_account)| (*slot, cached_account.account.clone())),
             };
         }
         // not in the write cache: an entry only exists for its read half
