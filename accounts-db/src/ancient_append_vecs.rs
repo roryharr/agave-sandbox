@@ -689,25 +689,18 @@ impl AccountsDb {
         metrics.accumulate(&write_ancient_accounts.metrics);
     }
 
-    /// given all accounts per ancient slot, in slots that we want to combine together:
-    /// 1. Look up each pubkey in the index
-    /// 2. separate, by slot, into:
-    ///    2a. pubkeys with refcount = 1. This means this pubkey exists NOWHERE else in accounts db.
-    ///    2b. pubkeys with refcount > 1
-    ///
-    /// Note that the return value can contain fewer items than 'accounts_per_storage' if we find storages which won't be affected.
-    /// 'accounts_per_storage' should be sorted by slot
+    /// given all accounts per ancient slot, in slots that we want to combine together: get a list
+    /// of all the accounts that should be combined into new storages and the slots that should be
+    /// used for the new storages.
     fn calc_accounts_to_combine<'a>(
         &self,
         accounts_per_storage: &'a mut [(&'a SlotInfo, GetUniqueAccountsResult)],
     ) -> AccountsToCombine<'a> {
         // reverse sort by slot #
         accounts_per_storage.sort_unstable_by_key(|b| cmp::Reverse(b.0.slot));
-        let len = accounts_per_storage.len();
-        let mut target_slots_sorted = Vec::with_capacity(len);
 
         // `shrink_collect` all accounts in the storages we want to combine.
-        let mut accounts_to_combine = accounts_per_storage
+        let accounts_to_combine = accounts_per_storage
             .iter_mut()
             .map(|(info, unique_accounts)| {
                 self.shrink_collect::<AliveAccounts<'_>>(
@@ -718,15 +711,10 @@ impl AccountsDb {
             })
             .collect::<Vec<_>>();
 
-        let mut last_slot = None;
-        for (_, shrink_collect) in accounts_to_combine.iter_mut().enumerate() {
-            // assert that iteration is in descending slot order since the code below relies on this.
-            if let Some(last_slot) = last_slot {
-                assert!(last_slot > shrink_collect.slot);
-            }
-            last_slot = Some(shrink_collect.slot);
-            target_slots_sorted.push(shrink_collect.slot);
-        }
+        let mut target_slots_sorted = accounts_to_combine
+            .iter()
+            .map(|shrink_collect| shrink_collect.slot)
+            .collect::<Vec<_>>();
 
         target_slots_sorted.sort_unstable();
         AccountsToCombine {
@@ -763,15 +751,10 @@ impl AccountsDb {
 /// hold all alive accounts to be shrunk and/or combined
 #[derive(Debug, Default)]
 struct AccountsToCombine<'a> {
-    /// all the rest of alive accounts that can move slots and should be combined
-    /// This includes all accounts with ref_count = 1 from the slots in 'accounts_keep_slots'.
-    /// There is one entry here for each storage we are processing. Even if all accounts are in 'accounts_keep_slots'.
+    /// All alive accounts to be combined into new storages, along with the slot the accounts are currently stored in
     accounts_to_combine: Vec<ShrinkCollect<AliveAccounts<'a>>>,
-    /// slots that contain alive accounts that can move into ANY other ancient slot
-    /// these slots will NOT be in 'accounts_keep_slots'
-    /// Some of these slots will have ancient append vecs created at them to contain everything in 'accounts_to_combine'
-    /// The rest will become dead slots with no accounts in them.
-    /// Sort order is lowest to highest.
+    /// slots that contain alive accounts that can be reused for the new storages
+    /// sort order is lowest to highest
     target_slots_sorted: Vec<Slot>,
 }
 
