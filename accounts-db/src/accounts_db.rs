@@ -2672,17 +2672,16 @@ impl AccountsDb {
     pub(crate) fn scan_account_storage<R, B>(
         &self,
         slot: Slot,
-        cache_map_func: impl Fn(&LoadedAccount) -> Option<R> + Sync,
+        cache_map_func: impl Fn(&LoadedAccount) -> Option<R>,
         storage_scan_func: impl for<'a, 'b, 'storage> Fn(
             &'b mut B,
             &'a StoredAccountInfoWithoutData<'storage>,
             Option<&'storage [u8]>, // account data
-        ) + Sync,
+        ),
         scan_account_storage_data: ScanAccountStorageData,
     ) -> ScanStorageResult<R, B>
     where
-        R: Send,
-        B: Send + Default + Sync,
+        B: Default,
     {
         self.scan_cache_storage_fallback(slot, cache_map_func, |retval, storage| {
             match scan_account_storage_data {
@@ -2707,12 +2706,11 @@ impl AccountsDb {
     pub fn scan_cache_storage_fallback<R, B>(
         &self,
         slot: Slot,
-        cache_map_func: impl Fn(&LoadedAccount) -> Option<R> + Sync,
-        storage_fallback_func: impl Fn(&mut B, &AccountStorageEntry) + Sync,
+        cache_map_func: impl Fn(&LoadedAccount) -> Option<R>,
+        storage_fallback_func: impl Fn(&mut B, &AccountStorageEntry),
     ) -> ScanStorageResult<R, B>
     where
-        R: Send,
-        B: Send + Default + Sync,
+        B: Default,
     {
         if let Some(slot_cache) = self.accounts_cache.slot_cache(slot) {
             // If we see the slot in the cache, then all the account information
