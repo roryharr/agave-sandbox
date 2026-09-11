@@ -103,6 +103,9 @@ use {
 // when the accounts write cache exceeds this many bytes, we will flush it
 // this can be specified on the command line, too (--accounts-db-write-cache-limit)
 const WRITE_CACHE_LIMIT_BYTES_DEFAULT: u64 = 15_000_000_000;
+// TEMPORARY INSTRUMENTATION: unused while `scan_cache_storage_fallback` picks its scan path at
+// random. Restore the threshold check there before landing anything.
+#[allow(dead_code)]
 const SCAN_SLOT_PAR_ITER_THRESHOLD: usize = 4000;
 
 const DEFAULT_NUM_DIRS: u32 = 4;
@@ -2741,8 +2744,13 @@ impl AccountsDb {
         if let Some(slot_cache) = self.accounts_cache.slot_cache(slot) {
             // If we see the slot in the cache, then all the account information
             // is in this cached slot
-            if slot_cache.len() > SCAN_SLOT_PAR_ITER_THRESHOLD {
-                ScanStorageResult::Cached(self.thread_pool_foreground.install(|| {
+            //
+            // TEMPORARY INSTRUMENTATION: choose the scan path at random rather than by
+            // SCAN_SLOT_PAR_ITER_THRESHOLD, so both paths see the same distribution of slot
+            // sizes, and report each path under its own datapoint.
+            let num_accounts = slot_cache.len();
+            if rng().random_bool(0.5) {
+                let (results, scan_us) = measure_us!(self.thread_pool_foreground.install(|| {
                     slot_cache
                         .par_iter()
                         .filter_map(|cached_account| {
@@ -2750,10 +2758,18 @@ impl AccountsDb {
                                 cached_account.value(),
                             )))
                         })
-                        .collect()
-                }))
+                        .collect::<Vec<_>>()
+                }));
+                datapoint_info!(
+                    "scan_slot_cache_par_iter",
+                    ("slot", slot, i64),
+                    ("num_accounts", num_accounts, i64),
+                    ("num_results", results.len(), i64),
+                    ("scan_us", scan_us, i64),
+                );
+                ScanStorageResult::Cached(results)
             } else {
-                ScanStorageResult::Cached(
+                let (results, scan_us) = measure_us!(
                     slot_cache
                         .iter()
                         .filter_map(|cached_account| {
@@ -2761,8 +2777,16 @@ impl AccountsDb {
                                 cached_account.value(),
                             )))
                         })
-                        .collect(),
-                )
+                        .collect::<Vec<_>>()
+                );
+                datapoint_info!(
+                    "scan_slot_cache_serial",
+                    ("slot", slot, i64),
+                    ("num_accounts", num_accounts, i64),
+                    ("num_results", results.len(), i64),
+                    ("scan_us", scan_us, i64),
+                );
+                ScanStorageResult::Cached(results)
             }
         } else {
             let mut retval = B::default();

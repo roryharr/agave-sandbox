@@ -712,6 +712,11 @@ fn setup_slot_recording(
                         include_bank_hash_components,
                     )
                     .unwrap();
+                    // TEMPORARY INSTRUMENTATION: the accounts have already been scanned, and the
+                    // scan is what the run measures. Drop them so that a long run does not hold
+                    // every replayed slot's account data in memory until the file is written.
+                    // Restore this along with the scan path change in accounts_db.
+                    details.bank_hash_components = None;
                     let mut slots = slots.lock().unwrap();
 
                     if let Some(recorded_slot) = slots.iter_mut().find(|f| f.slot == details.slot) {
