@@ -4215,33 +4215,12 @@ impl AccountsDb {
         infos: &[AccountInfo],
         accounts: &impl StorableAccounts<'a>,
     ) {
+        assert_eq!(infos.len(), accounts.len());
         let target_slot = accounts.target_slot();
-        let len = std::cmp::min(accounts.len(), infos.len());
 
-        let update = |start, end| {
-            (start..end).for_each(|i| {
-                let info: AccountInfo = infos[i];
-                let old_slot = accounts.slot(i);
-                let pubkey = accounts.pubkey(i);
-                self.accounts_index
-                    .replace(target_slot, old_slot, pubkey, info);
-            });
-        };
-
-        let threshold = 1;
-        if len > threshold {
-            let thread_pool = &self.thread_pool_background;
-            let chunk_size = len.div_ceil(thread_pool.current_num_threads());
-            let batches = 1 + len / chunk_size;
-            thread_pool.install(|| {
-                (0..batches).into_par_iter().for_each(|batch| {
-                    let start = batch * chunk_size;
-                    let end = std::cmp::min(start + chunk_size, len);
-                    update(start, end)
-                })
-            });
-        } else {
-            update(0, len);
+        for ((old_slot, pubkey), info) in accounts.slots_and_pubkeys().zip(infos) {
+            self.accounts_index
+                .replace(target_slot, old_slot, pubkey, *info);
         }
     }
 
