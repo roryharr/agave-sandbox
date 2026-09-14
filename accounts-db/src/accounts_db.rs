@@ -1390,7 +1390,10 @@ impl AccountsDb {
         // Flush is not running while we verify, so storages are stable. Drop storages newer
         // than the bound.
         storages.retain(|s| s.slot() <= max_slot_inclusive);
+        let num_storages = storages.len();
+        let populate_threads = rayon::current_num_threads();
         // populate
+        let mut populate = Measure::start("populate");
         storages.par_iter().for_each_init(
             || Box::new(append_vec::new_scan_accounts_reader()),
             |reader, storage| {
@@ -1412,57 +1415,101 @@ impl AccountsDb {
                     .expect("must scan accounts storage");
             },
         );
+        populate.stop();
         let total = pubkey_slot_lists.len();
         if total == 0 {
             return;
         }
         let failed = AtomicBool::default();
-        let threads = rayon::current_num_threads();
-        let per_batch = total.div_ceil(threads);
-        (0..=threads).into_par_iter().for_each(|attempt| {
-            pubkey_slot_lists
-                .iter()
-                .skip(attempt * per_batch)
-                .take(per_batch)
-                .for_each(|entry| {
-                    let mut storage_slots = entry.value().clone();
-                    storage_slots.sort_unstable();
-                    self.accounts_index
-                        .get_and_then(entry.key(), |index_entry| {
-                            let Some(index_entry) = index_entry else {
-                                failed.store(true, Ordering::Relaxed);
-                                error!(
-                                    "verify_index: {} has no index entry, storages: \
-                                     {storage_slots:?}",
-                                    entry.key(),
-                                );
-                                return (false, ());
-                            };
-                            let slot_list = index_entry.slot_list_read_lock();
-                            // Slots newer than `max_slot_inclusive` are in the index but were
-                            // excluded from the storage scan, so exclude them from the comparison
-                            // too.
-                            let mut index_slots = slot_list
-                                .iter()
-                                .map(|(slot, _)| *slot)
-                                .filter(|slot| *slot <= max_slot_inclusive)
-                                .collect::<Vec<_>>();
-                            index_slots.sort_unstable();
 
-                            if index_slots != storage_slots {
-                                failed.store(true, Ordering::Relaxed);
-                                error!(
-                                    "verify_index: {} index slot list does not match storages: \
+        let compare_phase = || {
+            // width comes from the installed pool, so this repartitions on every ladder rung
+            let threads = rayon::current_num_threads();
+            let per_batch = total.div_ceil(threads);
+            (0..=threads).into_par_iter().for_each(|attempt| {
+                pubkey_slot_lists
+                    .iter()
+                    .skip(attempt * per_batch)
+                    .take(per_batch)
+                    .for_each(|entry| {
+                        let mut storage_slots = entry.value().clone();
+                        storage_slots.sort_unstable();
+                        self.accounts_index
+                            .get_and_then(entry.key(), |index_entry| {
+                                let Some(index_entry) = index_entry else {
+                                    failed.store(true, Ordering::Relaxed);
+                                    error!(
+                                        "verify_index: {} has no index entry, storages: \
+                                     {storage_slots:?}",
+                                        entry.key(),
+                                    );
+                                    return (false, ());
+                                };
+                                let slot_list = index_entry.slot_list_read_lock();
+                                // Slots newer than `max_slot_inclusive` are in the index but were
+                                // excluded from the storage scan, so exclude them from the comparison
+                                // too.
+                                let mut index_slots = slot_list
+                                    .iter()
+                                    .map(|(slot, _)| *slot)
+                                    .filter(|slot| *slot <= max_slot_inclusive)
+                                    .collect::<Vec<_>>();
+                                index_slots.sort_unstable();
+
+                                if index_slots != storage_slots {
+                                    failed.store(true, Ordering::Relaxed);
+                                    error!(
+                                        "verify_index: {} index slot list does not match storages: \
                                      index: {index_slots:?}, storages: {storage_slots:?}, slot \
                                      list: {:?}",
-                                    entry.key(),
-                                    slot_list,
-                                );
-                            }
-                            (false, ())
-                        });
-                });
-        });
+                                        entry.key(),
+                                        slot_list,
+                                    );
+                                }
+                                (false, ())
+                            });
+                    });
+            });
+        };
+
+        // TEMPORARY instrumentation: ladder sweep of the compare phase across pool widths, on
+        // the same populated map. Ascending then descending -- if the two halves disagree,
+        // index and CPU cache warming is dominating and the numbers are not trustworthy.
+        // Remove before landing.
+        const COMPARE_SWEEP_LADDER: [usize; 13] = [1, 2, 4, 8, 16, 32, 64, 32, 16, 8, 4, 2, 1];
+        let mut sweep_total = Measure::start("sweep_total");
+        for num_threads in COMPARE_SWEEP_LADDER {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .thread_name(|i| format!("solVfyIdxSwp{i:02}"))
+                .num_threads(num_threads)
+                .build()
+                .expect("new rayon threadpool");
+            let (_, compare_us) = measure_us!(pool.install(&compare_phase));
+            info!("verify_index sweep: {num_threads} threads, compare: {compare_us}us");
+            datapoint_info!(
+                "accounts_db_verify_index_sweep",
+                ("num_threads", num_threads, i64),
+                ("num_pubkeys", total, i64),
+                ("compare_us", compare_us, i64),
+            );
+        }
+        sweep_total.stop();
+
+        info!(
+            "verify_index: {total} pubkeys in {num_storages} storages, populate: {}us \
+             ({populate_threads} threads), sweep total: {}us",
+            populate.as_us(),
+            sweep_total.as_us(),
+        );
+        datapoint_info!(
+            "accounts_db_verify_index",
+            ("num_pubkeys", total, i64),
+            ("num_storages", num_storages, i64),
+            ("populate_threads", populate_threads, i64),
+            ("populate_us", populate.as_us(), i64),
+            ("sweep_total_us", sweep_total.as_us(), i64),
+        );
+
         if failed.load(Ordering::Relaxed) {
             panic!("verify_index failed");
         }
