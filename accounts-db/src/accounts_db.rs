@@ -2423,20 +2423,14 @@ impl AccountsDb {
 
         let num_selected = shrink_slots.len();
         let (_, shrink_all_us) = measure_us!({
-            self.thread_pool_background.install(|| {
-                shrink_slots
-                    .into_par_iter()
-                    .for_each(|(slot, slot_shrink_candidate)| {
-                        if self.ancient_append_vec_offset.is_some()
-                            && slot < oldest_non_ancient_slot
-                        {
-                            self.shrink_stats
-                                .num_ancient_slots_shrunk
-                                .fetch_add(1, Ordering::Relaxed);
-                        }
-                        self.shrink_storage(slot_shrink_candidate);
-                    });
-            })
+            for (slot, slot_shrink_candidate) in shrink_slots {
+                if self.ancient_append_vec_offset.is_some() && slot < oldest_non_ancient_slot {
+                    self.shrink_stats
+                        .num_ancient_slots_shrunk
+                        .fetch_add(1, Ordering::Relaxed);
+                }
+                self.shrink_storage(slot_shrink_candidate);
+            }
         });
 
         let mut pended_counts: usize = 0;
