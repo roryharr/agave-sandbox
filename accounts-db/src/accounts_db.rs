@@ -1422,8 +1422,42 @@ impl AccountsDb {
         }
         let failed = AtomicBool::default();
 
-        let compare_phase = || {
-            // width comes from the installed pool, so this repartitions on every ladder rung
+        // per-entry work, shared so the two compare implementations differ only in how they
+        // iterate the map
+        let verify_one = |pubkey: &Pubkey, storage_slots: &[Slot]| {
+            let mut storage_slots = storage_slots.to_vec();
+            storage_slots.sort_unstable();
+            self.accounts_index.get_and_then(pubkey, |index_entry| {
+                let Some(index_entry) = index_entry else {
+                    failed.store(true, Ordering::Relaxed);
+                    error!(
+                        "verify_index: {pubkey} has no index entry, storages: {storage_slots:?}"
+                    );
+                    return (false, ());
+                };
+                let slot_list = index_entry.slot_list_read_lock();
+                // Slots newer than `max_slot_inclusive` are in the index but were excluded from
+                // the storage scan, so exclude them from the comparison too.
+                let mut index_slots = slot_list
+                    .iter()
+                    .map(|(slot, _)| *slot)
+                    .filter(|slot| *slot <= max_slot_inclusive)
+                    .collect::<Vec<_>>();
+                index_slots.sort_unstable();
+
+                if index_slots != storage_slots {
+                    failed.store(true, Ordering::Relaxed);
+                    error!(
+                        "verify_index: {pubkey} index slot list does not match storages: index: \
+                         {index_slots:?}, storages: {storage_slots:?}, slot list: {slot_list:?}"
+                    );
+                }
+                (false, ())
+            });
+        };
+
+        // current shape: manual batching, each batch reaching its slice with a linear `skip`
+        let compare_batched = || {
             let threads = rayon::current_num_threads();
             let per_batch = total.div_ceil(threads);
             (0..=threads).into_par_iter().for_each(|attempt| {
@@ -1431,66 +1465,51 @@ impl AccountsDb {
                     .iter()
                     .skip(attempt * per_batch)
                     .take(per_batch)
-                    .for_each(|entry| {
-                        let mut storage_slots = entry.value().clone();
-                        storage_slots.sort_unstable();
-                        self.accounts_index
-                            .get_and_then(entry.key(), |index_entry| {
-                                let Some(index_entry) = index_entry else {
-                                    failed.store(true, Ordering::Relaxed);
-                                    error!(
-                                        "verify_index: {} has no index entry, storages: \
-                                     {storage_slots:?}",
-                                        entry.key(),
-                                    );
-                                    return (false, ());
-                                };
-                                let slot_list = index_entry.slot_list_read_lock();
-                                // Slots newer than `max_slot_inclusive` are in the index but were
-                                // excluded from the storage scan, so exclude them from the comparison
-                                // too.
-                                let mut index_slots = slot_list
-                                    .iter()
-                                    .map(|(slot, _)| *slot)
-                                    .filter(|slot| *slot <= max_slot_inclusive)
-                                    .collect::<Vec<_>>();
-                                index_slots.sort_unstable();
-
-                                if index_slots != storage_slots {
-                                    failed.store(true, Ordering::Relaxed);
-                                    error!(
-                                        "verify_index: {} index slot list does not match storages: \
-                                     index: {index_slots:?}, storages: {storage_slots:?}, slot \
-                                     list: {:?}",
-                                        entry.key(),
-                                        slot_list,
-                                    );
-                                }
-                                (false, ())
-                            });
-                    });
+                    .for_each(|entry| verify_one(entry.key(), entry.value()));
             });
         };
 
-        // TEMPORARY instrumentation: ladder sweep of the compare phase across pool widths, on
-        // the same populated map. Ascending then descending -- if the two halves disagree,
-        // index and CPU cache warming is dominating and the numbers are not trustworthy.
+        // candidate shape: let rayon partition the map's shards
+        let compare_par_iter = || {
+            pubkey_slot_lists
+                .par_iter()
+                .for_each(|entry| verify_one(entry.key(), entry.value()));
+        };
+
+        // TEMPORARY instrumentation: A/B the two compare implementations across pool widths,
+        // ascending then descending on the same populated map. If the two halves disagree, cache
+        // warming is dominating and the numbers are not trustworthy. The two implementations swap
+        // running order every rung so neither is systematically the warmer one.
         // Remove before landing.
-        const COMPARE_SWEEP_LADDER: [usize; 13] = [1, 2, 4, 8, 16, 32, 64, 32, 16, 8, 4, 2, 1];
+        const COMPARE_SWEEP_LADDER: [usize; 7] = [8, 16, 32, 64, 32, 16, 8];
         let mut sweep_total = Measure::start("sweep_total");
-        for num_threads in COMPARE_SWEEP_LADDER {
+        for (rung, num_threads) in COMPARE_SWEEP_LADDER.into_iter().enumerate() {
             let pool = rayon::ThreadPoolBuilder::new()
                 .thread_name(|i| format!("solVfyIdxSwp{i:02}"))
                 .num_threads(num_threads)
                 .build()
                 .expect("new rayon threadpool");
-            let (_, compare_us) = measure_us!(pool.install(&compare_phase));
-            info!("verify_index sweep: {num_threads} threads, compare: {compare_us}us");
+            let batched_first = rung % 2 == 0;
+            let (batched_us, par_iter_us) = if batched_first {
+                let (_, batched_us) = measure_us!(pool.install(&compare_batched));
+                let (_, par_iter_us) = measure_us!(pool.install(&compare_par_iter));
+                (batched_us, par_iter_us)
+            } else {
+                let (_, par_iter_us) = measure_us!(pool.install(&compare_par_iter));
+                let (_, batched_us) = measure_us!(pool.install(&compare_batched));
+                (batched_us, par_iter_us)
+            };
+            info!(
+                "verify_index sweep: {num_threads} threads, batched: {batched_us}us, par_iter: \
+                 {par_iter_us}us, batched_first: {batched_first}"
+            );
             datapoint_info!(
                 "accounts_db_verify_index_sweep",
                 ("num_threads", num_threads, i64),
                 ("num_pubkeys", total, i64),
-                ("compare_us", compare_us, i64),
+                ("batched_us", batched_us, i64),
+                ("par_iter_us", par_iter_us, i64),
+                ("batched_first", batched_first as i64, i64),
             );
         }
         sweep_total.stop();
