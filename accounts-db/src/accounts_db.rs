@@ -110,10 +110,6 @@ const DEFAULT_NUM_DIRS: u32 = 4;
 // several io_uring instances with fixed buffers for large disk IO operations.
 pub const TOTAL_IO_URING_BUFFERS_SIZE_LIMIT: usize = 2_000_000_000;
 
-// When getting accounts for shrinking from the index, this is the # of accounts to lookup per thread.
-// This allows us to split up accounts index accesses across multiple threads.
-const SHRINK_COLLECT_CHUNK_SIZE: usize = 50;
-
 /// The number of shrink candidate slots that is small enough so that
 /// additional storages from ancient slots can be added to the
 /// candidates for shrinking.
@@ -1974,13 +1970,8 @@ impl AccountsDb {
         stats
             .obsolete_accounts_filtered
             .fetch_add(num_obsolete_filtered as u64, Ordering::Relaxed);
-        self.thread_pool_background.install(|| {
-            stored_accounts
-                .par_chunks(SHRINK_COLLECT_CHUNK_SIZE)
-                .for_each(|stored_accounts| {
-                    self.verify_accounts_index_for_shrink(stored_accounts, stats, slot);
-                });
-        });
+
+        self.verify_accounts_index_for_shrink(stored_accounts, stats, slot);
 
         index_read_elapsed.stop();
 
