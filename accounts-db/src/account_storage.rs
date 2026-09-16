@@ -79,7 +79,7 @@ impl AccountStorage {
     /// return the append vec for 'slot' if it exists
     /// This is only ever called when shrink is not possibly running and there is a max of 1 append vec per slot.
     pub fn get_slot_storage_entry(&self, slot: Slot) -> Option<Arc<AccountStorageEntry>> {
-        assert!(
+        debug_assert!(
             self.no_shrink_in_progress(),
             "shrink is in progress! slots: {:?}",
             self.shrink_in_progress_map.read().unwrap().keys(),
@@ -88,7 +88,7 @@ impl AccountStorage {
     }
 
     pub(super) fn all_storages(&self) -> Vec<Arc<AccountStorageEntry>> {
-        assert!(
+        debug_assert!(
             self.no_shrink_in_progress(),
             "shrink is in progress! slots: {:?}",
             self.shrink_in_progress_map.read().unwrap().keys(),
@@ -120,7 +120,7 @@ impl AccountStorage {
     }
 
     pub(crate) fn all_slots(&self) -> Vec<Slot> {
-        assert!(
+        debug_assert!(
             self.no_shrink_in_progress(),
             "shrink is in progress! slots: {:?}",
             self.shrink_in_progress_map.read().unwrap().keys(),
@@ -130,7 +130,7 @@ impl AccountStorage {
 
     /// All slots with a storage entry below `max_slot_exclusive`.
     pub(crate) fn slots_less_than(&self, max_slot_exclusive: Slot) -> Vec<Slot> {
-        assert!(
+        debug_assert!(
             self.no_shrink_in_progress(),
             "shrink is in progress! slots: {:?}",
             self.shrink_in_progress_map.read().unwrap().keys(),
@@ -177,7 +177,7 @@ impl AccountStorage {
 
     /// iterate through all (slot, append-vec)
     pub(crate) fn iter(&self) -> AccountStorageIter<'_> {
-        assert!(
+        debug_assert!(
             self.no_shrink_in_progress(),
             "shrink is in progress! slots: {:?}",
             self.shrink_in_progress_map.read().unwrap().keys(),
@@ -186,7 +186,7 @@ impl AccountStorage {
     }
 
     pub(crate) fn insert(&self, store: Arc<AccountStorageEntry>) {
-        assert!(
+        debug_assert!(
             self.no_shrink_in_progress(),
             "shrink is in progress! slots: {:?}",
             self.shrink_in_progress_map.read().unwrap().keys(),
@@ -255,7 +255,7 @@ impl AccountStorage {
         &self,
         predicate: impl Fn(&Slot, &AccountStorageEntry) -> bool,
     ) -> Box<[(Slot, Arc<AccountStorageEntry>)]> {
-        assert!(
+        debug_assert!(
             self.no_shrink_in_progress(),
             "shrink is in progress! slots: {:?}",
             self.shrink_in_progress_map.read().unwrap().keys(),

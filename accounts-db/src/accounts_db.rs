@@ -4240,8 +4240,6 @@ impl AccountsDb {
     {
         let mut reclaimed_offsets = SlotOffsets::default();
 
-        assert!(self.storage.no_shrink_in_progress());
-
         let mut dead_slots = IntSet::default();
         let mut new_shrink_candidates = ShrinkCandidates::default();
         let mut measure = Measure::start("remove");
