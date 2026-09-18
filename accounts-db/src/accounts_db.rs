@@ -1058,6 +1058,7 @@ impl AccountsDb {
             self.clean_accounts_stats
                 .num_accounts_removed_from_index
                 .fetch_add(1, Ordering::Relaxed);
+            self.purge_read_cache_for_dead_keys(iter::once(pubkey));
             self.purge_secondary_indexes_for_dead_keys(iter::once(pubkey));
         }
         self.clean_accounts_stats
@@ -1208,6 +1209,15 @@ impl AccountsDb {
         }
     }
 
+    fn purge_read_cache_for_dead_keys<'a>(
+        &self,
+        removed_keys: impl IntoIterator<Item = &'a Pubkey>,
+    ) {
+        for key in removed_keys {
+            self.read_only_accounts_cache.remove_assume_not_present(key);
+        }
+    }
+
     #[must_use]
     pub fn purge_keys_exact<C>(
         &self,
@@ -1233,6 +1243,7 @@ impl AccountsDb {
 
         let (_, handle_dead_keys_us) = measure_us!({
             let removed_keys = self.accounts_index.handle_dead_keys(&dead_keys);
+            self.purge_read_cache_for_dead_keys(&removed_keys);
             self.purge_secondary_indexes_for_dead_keys(&removed_keys);
         });
 
@@ -3282,6 +3293,7 @@ impl AccountsDb {
         for mut pubkeys in pubkeys_removed_from_cache {
             if !self.account_indexes.is_empty() {
                 let removed_keys = self.accounts_index.handle_dead_keys(&pubkeys);
+                self.purge_read_cache_for_dead_keys(&removed_keys);
                 self.purge_secondary_indexes_for_dead_keys(&removed_keys);
             }
 
