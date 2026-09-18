@@ -72,6 +72,16 @@ impl Ancestors {
     pub fn max_slot(&self) -> Slot {
         self.ancestors.max_exclusive().saturating_sub(1)
     }
+
+    /// Is an index entry at `slot` visible from these ancestors?
+    ///
+    /// For the newest entry in a pubkey's slot list, which is all the read cache holds, this is
+    /// what `AccountsIndex::latest_slot` returns with the `max_root` bound that
+    /// `get_with_and_then` applies: an ancestor is found directly, and a root below every
+    /// ancestor is the newest root at or below `max_root`.
+    pub fn is_ancestor(&self, slot: Slot) -> bool {
+        self.contains_key(&slot) || self.min_slot().is_none_or(|max_root| slot <= max_root)
+    }
 }
 
 #[cfg(feature = "dev-context-only-utils")]
