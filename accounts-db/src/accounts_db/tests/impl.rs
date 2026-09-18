@@ -3496,6 +3496,40 @@ fn run_test_flush_accounts_cache_if_needed(num_roots: usize, num_unrooted: usize
 }
 
 #[test]
+fn test_read_only_accounts_cache_not_populated_from_older_ancestors() {
+    let db = AccountsDb::new_for_tests_with_config(Vec::new(), DEFAULT_ACCOUNTS_DB_CONFIG);
+
+    let account_key = Pubkey::new_unique();
+    let slot1_account = AccountSharedData::new(1, 0, AccountSharedData::default().owner());
+    let slot2_account = AccountSharedData::new(2, 0, AccountSharedData::default().owner());
+    db.store_for_tests((1, &[(&account_key, &slot1_account)][..]));
+    db.add_root(1);
+    db.flush_rooted_accounts_cache_without_clean();
+    // Flushing without clean keeps both versions in the index
+    db.store_for_tests((2, &[(&account_key, &slot2_account)][..]));
+    db.add_root(2);
+    db.flush_rooted_accounts_cache_without_clean();
+
+    // Ancestors that can't see slot 2 load slot 1, which is not the newest so is not cached
+    let (account, slot) = db
+        .do_load_for_tests(&Ancestors::from(vec![1]), &account_key)
+        .unwrap();
+    assert_eq!((account.lamports(), slot), (1, 1));
+    assert_eq!(db.read_only_accounts_cache.cache_len(), 0);
+
+    // Ancestors that can see slot 2 load it, and it is cached
+    let (account, slot) = db
+        .do_load_for_tests(&Ancestors::from(vec![1, 2]), &account_key)
+        .unwrap();
+    assert_eq!((account.lamports(), slot), (2, 2));
+    assert!(
+        db.read_only_accounts_cache
+            .load(&account_key, |cached_slot| cached_slot == 2)
+            .is_some()
+    );
+}
+
+#[test]
 fn test_read_only_accounts_cache() {
     let db = Arc::new(AccountsDb::new_for_tests_with_config(
         Vec::new(),
