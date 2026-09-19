@@ -203,6 +203,21 @@ fn schedule_entries_for_tests(bank: &BankWithScheduler, entries: Vec<Entry>) -> 
 fn process_entries(bank: &BankWithScheduler, entries: Vec<ReplayEntry>) -> Result<()> {
     let mut tick_hashes = vec![];
 
+    // Warm the read cache for the whole chunk before scheduling any of it, so the loads have
+    // the scheduler's queue depth to land in. Accounts either cache already holds are dropped
+    // by `prefetch_accounts`, so this only reaches storage for the ones a handler thread would
+    // otherwise block on.
+    bank.prefetch_accounts(
+        entries
+            .iter()
+            .filter_map(|replay_entry| match &replay_entry.entry {
+                EntryType::Transactions(transactions) => Some(transactions),
+                EntryType::Tick(_) => None,
+            })
+            .flatten()
+            .flat_map(|transaction| transaction.account_keys().iter().copied()),
+    );
+
     for ReplayEntry {
         entry,
         starting_index,

@@ -3680,6 +3680,120 @@ fn test_load_with_read_only_accounts_cache() {
 }
 
 #[test]
+fn test_prefetch_accounts_populates_read_cache() {
+    let db = Arc::new(AccountsDb::new_for_tests_with_config(
+        Vec::new(),
+        DEFAULT_ACCOUNTS_DB_CONFIG,
+    ));
+
+    let account_key = Pubkey::new_unique();
+    let account = AccountSharedData::new(42, 1, AccountSharedData::default().owner());
+    db.store_for_tests((0, &[(&account_key, &account)][..]));
+    db.add_root(0);
+    db.flush_accounts_cache(true, None);
+
+    // the flush left the account in storage and in neither cache
+    assert_eq!(db.read_only_accounts_cache.cache_len(), 0);
+    assert!(!db.read_only_accounts_cache.contains_cached(&account_key));
+
+    let load_path_storage_loads = || {
+        db.load_account_stats
+            .num_loaded_from_index_storage
+            .load(Ordering::Relaxed)
+    };
+    let load_path_storage_loads_before = load_path_storage_loads();
+
+    db.prefetch_accounts([account_key]);
+    assert_eq!(db.prefetch_stats.num_issued.load(Ordering::Relaxed), 1);
+    assert_eq!(db.prefetch_stats.num_skipped.load(Ordering::Relaxed), 0);
+
+    let timer = Instant::now();
+    while db.read_only_accounts_cache.cache_len() == 0 {
+        assert!(
+            timer.elapsed() < Duration::from_secs(5),
+            "timed out waiting for the prefetch to land",
+        );
+        sleep(Duration::from_millis(1));
+    }
+
+    let (prefetched, slot) = db
+        .read_only_accounts_cache
+        .load(&account_key, |_slot| true)
+        .unwrap();
+    assert_eq!(prefetched, account);
+    assert_eq!(slot, 0);
+
+    // the storage read the prefetch performed is charged to the prefetch, so it does not show
+    // up as a miss on the load path
+    assert_eq!(
+        db.prefetch_stats
+            .loads
+            .num_loaded_from_index_storage
+            .load(Ordering::Relaxed),
+        1
+    );
+    assert_eq!(load_path_storage_loads(), load_path_storage_loads_before);
+
+    // and the load path now takes the read cache instead of missing to storage
+    let (loaded, slot) = db
+        .load(
+            &Ancestors::default(),
+            &account_key,
+            LoadHint::Unspecified,
+            PopulateReadCache::True,
+            NO_LOAD_FILTER,
+        )
+        .unwrap();
+    assert_eq!(loaded, account);
+    assert_eq!(slot, 0);
+    assert_eq!(load_path_storage_loads(), load_path_storage_loads_before);
+    assert_eq!(
+        db.load_account_stats
+            .num_loaded_from_read_cache
+            .load(Ordering::Relaxed),
+        1
+    );
+}
+
+#[test]
+fn test_prefetch_accounts_skips_cached() {
+    let db = Arc::new(AccountsDb::new_for_tests_with_config(
+        Vec::new(),
+        DEFAULT_ACCOUNTS_DB_CONFIG,
+    ));
+
+    let read_cached_key = Pubkey::new_unique();
+    let write_cached_key = Pubkey::new_unique();
+    let account = AccountSharedData::new(42, 1, AccountSharedData::default().owner());
+
+    // one account flushed to storage and then loaded back into the read cache...
+    db.store_for_tests((0, &[(&read_cached_key, &account)][..]));
+    db.add_root(0);
+    db.flush_accounts_cache(true, None);
+    db.load(
+        &Ancestors::default(),
+        &read_cached_key,
+        LoadHint::Unspecified,
+        PopulateReadCache::True,
+        NO_LOAD_FILTER,
+    )
+    .unwrap();
+    // ...and one left sitting in the write cache
+    db.store_for_tests((1, &[(&write_cached_key, &account)][..]));
+
+    assert_eq!(db.read_only_accounts_cache.cache_len(), 1);
+    assert!(
+        db.read_only_accounts_cache
+            .contains_write(&write_cached_key)
+    );
+
+    db.prefetch_accounts([read_cached_key, write_cached_key]);
+
+    assert_eq!(db.prefetch_stats.num_issued.load(Ordering::Relaxed), 0);
+    assert_eq!(db.prefetch_stats.num_skipped.load(Ordering::Relaxed), 2);
+}
+
+#[test]
 fn test_load_filter_with_open_accounts() {
     let db = AccountsDb::new_for_tests_with_config(Vec::new(), DEFAULT_ACCOUNTS_DB_CONFIG);
     let ancestors = Ancestors::from(vec![0]);

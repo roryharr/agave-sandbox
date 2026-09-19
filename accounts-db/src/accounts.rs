@@ -210,6 +210,12 @@ impl Accounts {
         )
     }
 
+    /// Warms the read cache with `pubkeys` in the background; see
+    /// [`AccountsDb::prefetch_accounts`].
+    pub fn prefetch_accounts(&self, pubkeys: impl IntoIterator<Item = Pubkey>) {
+        self.accounts_db.prefetch_accounts(pubkeys)
+    }
+
     /// scans underlying accounts_db for this delta (slot) with a map function
     ///   from LoadedAccount to B
     /// returns only the latest/current version of B for this slot

@@ -260,6 +260,15 @@ impl ReadOnlyAccountsCache {
         Probe::Absent
     }
 
+    /// Is `pubkey` held by either cache, at any slot? An entry exists exactly while at least
+    /// one half is present, so this is one probe and no account clone.
+    ///
+    /// This is not a load: it leaves the entry's LRU timestamp and the hit/miss counters alone,
+    /// so a caller asking whether a load would have to reach storage does not look like one.
+    pub(crate) fn contains_cached(&self, pubkey: &Pubkey) -> bool {
+        self.cache.contains_key(pubkey)
+    }
+
     fn account_size(account: &AccountSharedData) -> usize {
         CACHE_ENTRY_SIZE + account.data().len()
     }
@@ -852,6 +861,54 @@ mod tests {
         assert!(cache.load(&pubkey, |slot| slot == 5).is_some());
         cache.remove(&pubkey);
         assert!(!cache.cache.contains_key(&pubkey));
+    }
+
+    /// `contains_cached` sees an entry held by either cache, and is not a load.
+    #[test]
+    fn test_contains_cached() {
+        let cache = ReadOnlyAccountsCache::new(usize::MAX, usize::MAX, 1, 8);
+        let read_key = Pubkey::new_unique();
+        let write_key = Pubkey::new_unique();
+        let absent_key = Pubkey::new_unique();
+
+        cache.store(
+            read_key,
+            5,
+            AccountSharedData::new(1, 16, &Pubkey::default()),
+        );
+        cache.insert_write(&write_key, 7);
+
+        assert!(cache.contains_cached(&read_key));
+        assert!(cache.contains_cached(&write_key));
+        assert!(!cache.contains_cached(&absent_key));
+
+        // not a load: the LRU timestamp and the hit/miss counters stay put
+        let last_update_time = |pubkey: &Pubkey| {
+            cache
+                .cache
+                .get(pubkey)
+                .unwrap()
+                .read
+                .as_ref()
+                .unwrap()
+                .last_update_time
+                .load(Ordering::Relaxed)
+        };
+        let before = last_update_time(&read_key);
+        let hits = cache.stats.hits.load(Ordering::Relaxed);
+        let misses = cache.stats.misses.load(Ordering::Relaxed);
+        assert!(cache.contains_cached(&read_key));
+        assert!(!cache.contains_cached(&absent_key));
+        assert_eq!(last_update_time(&read_key), before);
+        assert_eq!(cache.stats.hits.load(Ordering::Relaxed), hits);
+        assert_eq!(cache.stats.misses.load(Ordering::Relaxed), misses);
+
+        // an entry lives exactly as long as one of its halves, which is what makes a bare
+        // `contains_key` the right check
+        cache.remove(&read_key);
+        assert!(!cache.contains_cached(&read_key));
+        assert_eq!(cache.remove_write([write_key]), vec![write_key]);
+        assert!(!cache.contains_cached(&write_key));
     }
 
     #[test_case(11, 11; "equal")]
