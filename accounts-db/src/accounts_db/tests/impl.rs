@@ -1318,7 +1318,7 @@ fn test_shrink_carries_or_purges_flush_tombstone() {
         }
 
         // Shrink the slot. The behavior on the tombstone will depend on `latest_full_snapshot_slot`.
-        accounts.shrink_storage(accounts.get_storage_for_slot(slot).unwrap());
+        accounts.shrink_storage(storage);
 
         assert!(
             accounts.storage.get_slot_storage_entry(slot).is_some(),
