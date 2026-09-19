@@ -1204,8 +1204,8 @@ fn test_shrink_does_not_resurrect_dead_account() {
     accounts.store_for_tests((3, [(&pubkey, &zero_lamport_account)].as_slice()));
     accounts.add_root_and_flush_write_cache(3);
 
-    // Call shrink, which will shrink slot 1's storage
-    accounts.shrink_candidate_slots(&EpochSchedule::default());
+    // Shrink slot 1's storage, which still physically holds pubkey's reclaimed version
+    accounts.shrink_storage(accounts.get_storage_for_slot(1).unwrap());
 
     // The account should stay dead
     let loaded = accounts.do_load_for_tests(&Ancestors::default(), &pubkey);
@@ -1317,9 +1317,8 @@ fn test_shrink_carries_or_purges_flush_tombstone() {
             accounts.set_latest_full_snapshot_slot(latest_full_snapshot_slot);
         }
 
-        // Shrink, which will shrink the slot. The behavior on the tombstone will depend on
-        // `latest_full_snapshot_slot`.
-        accounts.shrink_candidate_slots(&EpochSchedule::default());
+        // Shrink the slot. The behavior on the tombstone will depend on `latest_full_snapshot_slot`.
+        accounts.shrink_storage(accounts.get_storage_for_slot(slot).unwrap());
 
         assert!(
             accounts.storage.get_slot_storage_entry(slot).is_some(),
@@ -1543,7 +1542,7 @@ fn test_fully_tombstoned_storage_reclaim() {
 
     // Shrink routes the fully-dead slot to clean; clean retains the storage because the latest full
     // snapshot is older than the slot, so the slot is not yet eligible for shrink.
-    accounts_db.shrink_candidate_slots(&EpochSchedule::default());
+    accounts_db.shrink_storage(accounts_db.get_storage_for_slot(slot).unwrap());
     accounts_db.clean_accounts(slot, false);
     assert!(accounts_db.storage.get_slot_storage_entry(slot).is_some());
     // Verify that the slot is not queued for shrink at this time
@@ -1692,7 +1691,8 @@ fn test_alive_bytes_after_shrink_with_zero_lamport_single_ref_accounts() {
         AppendVec::calculate_stored_size(alive_account.data().len()),
     );
 
-    accounts_db.shrink_candidate_slots(&EpochSchedule::default());
+    accounts_db.shrink_storage(storage);
+
     let storage_after_shrink = accounts_db.get_storage_for_slot(slot).unwrap();
     assert_eq!(
         storage_after_shrink.alive_bytes(),
