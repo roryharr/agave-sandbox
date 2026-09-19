@@ -42,9 +42,9 @@ use {
         accounts_cache::{AccountsCache, CachedAccount, CachedLoad, SlotCache},
         accounts_db::stats::{
             AccountsStats, CleanAccountsStats, FlushStats, LoadAccountsStats,
-            ObsoleteAccountsStats, PurgeStats, ShrinkAncientStats, ShrinkStats, ShrinkStatsSub,
-            StoreAccountsForFlushStats, StoreAccountsForShrinkStats, StoreAccountsForSquashStats,
-            StoreAccountsUnfrozenStats, WriteAccountsToCacheStats,
+            ObsoleteAccountsStats, PrefetchAccountsStats, PurgeStats, ShrinkAncientStats,
+            ShrinkStats, ShrinkStatsSub, StoreAccountsForFlushStats, StoreAccountsForShrinkStats,
+            StoreAccountsForSquashStats, StoreAccountsUnfrozenStats, WriteAccountsToCacheStats,
         },
         accounts_file::{self, AccountsFileProvider},
         accounts_hash::{AccountLtHash, AccountsLtHash, ZERO_LAMPORT_ACCOUNT_LT_HASH},
@@ -774,6 +774,11 @@ pub struct AccountsDb {
     /// Stats for loading accounts during transaction processing
     load_account_stats: LoadAccountsStats,
 
+    /// Stats for the background loads `prefetch_accounts` issues, kept apart from
+    /// `load_account_stats` so a prefetch's own storage read is not counted as a miss on the
+    /// critical path
+    prefetch_stats: PrefetchAccountsStats,
+
     /// Stats from storing accounts unfrozen
     store_accounts_unfrozen_stats: StoreAccountsUnfrozenStats,
 
@@ -974,6 +979,7 @@ impl AccountsDb {
             shrink_ancient_stats: ShrinkAncientStats::default(),
             stats: AccountsStats::default(),
             load_account_stats: LoadAccountsStats::default(),
+            prefetch_stats: PrefetchAccountsStats::default(),
             store_accounts_unfrozen_stats: StoreAccountsUnfrozenStats::default(),
             is_bank_drop_callback_enabled: AtomicBool::default(),
             latest_full_snapshot_slot_advanced_since_clean: AtomicBool::default(),
@@ -2606,6 +2612,7 @@ impl AccountsDb {
                 &pubkey,
                 PopulateReadCache::False,
                 None::<fn(_, &_, _) -> _>,
+                &self.load_account_stats,
             ) {
                 scan_func(Some((&pubkey, account, slot)));
             }
@@ -2721,8 +2728,69 @@ impl AccountsDb {
         populate_read_cache: PopulateReadCache,
         load_filter: Option<impl Fn(u64, &Pubkey, usize) -> bool>,
     ) -> Option<(AccountSharedData, Slot)> {
-        self.do_load(ancestors, pubkey, populate_read_cache, load_filter)
-            .filter(|(account, _)| !account.is_zero_lamport())
+        self.do_load(
+            ancestors,
+            pubkey,
+            populate_read_cache,
+            load_filter,
+            &self.load_account_stats,
+        )
+        .filter(|(account, _)| !account.is_zero_lamport())
+    }
+
+    /// Loads `pubkeys` from storage off this thread and stores them in the read cache, so that
+    /// a later load on the caller's critical path finds them there.
+    ///
+    /// Pubkeys that either cache already holds are dropped before anything is dispatched: a
+    /// write-cache version shadows storage, and a read-cache version is already warm. The rest
+    /// go through `do_load`, whose `PopulateReadCache::True` path stores a version only while
+    /// it is still the newest in the index.
+    ///
+    /// The loads run against the rooted view rather than any fork's. The read cache only ever
+    /// holds the newest version in storage, so a fork's ancestors would not change what gets
+    /// cached, and loading against a snapshot of them here is not safe: this call does not keep
+    /// the bank they came from alive, and `do_load` panics when it reaches the index entry of a
+    /// minor fork whose storages were purged out from under it.
+    ///
+    /// Fire and forget. The caller is not told when, or whether, a load lands: a prefetch that
+    /// finds nothing, races a flush, or is evicted before the account is used is wasted work
+    /// and nothing worse.
+    pub fn prefetch_accounts(self: &Arc<Self>, pubkeys: impl IntoIterator<Item = Pubkey>) {
+        let mut num_skipped = 0;
+        // in the caller's order, which is the order the accounts are about to be used
+        let to_load: Vec<_> = pubkeys
+            .into_iter()
+            .filter(|pubkey| {
+                let is_cached = self.read_only_accounts_cache.contains_cached(pubkey);
+                num_skipped += u64::from(is_cached);
+                !is_cached
+            })
+            .collect();
+        self.prefetch_stats
+            .num_skipped
+            .fetch_add(num_skipped, Ordering::Relaxed);
+        if to_load.is_empty() {
+            return;
+        }
+        self.prefetch_stats
+            .num_issued
+            .fetch_add(to_load.len() as u64, Ordering::Relaxed);
+
+        let accounts_db = Arc::clone(self);
+        // clean is the only other user of this pool and it rarely runs; a prefetch that does
+        // queue behind it just lands too late to help, which is where it started
+        self.thread_pool_background.spawn(move || {
+            let rooted_ancestors = Ancestors::default();
+            to_load.into_par_iter().for_each(|pubkey| {
+                accounts_db.do_load(
+                    &rooted_ancestors,
+                    &pubkey,
+                    PopulateReadCache::True,
+                    None::<fn(_, &_, _) -> _>,
+                    &accounts_db.prefetch_stats.loads,
+                );
+            });
+        });
     }
 
     fn do_load(
@@ -2731,18 +2799,19 @@ impl AccountsDb {
         pubkey: &Pubkey,
         populate_read_cache: PopulateReadCache,
         load_filter: Option<impl Fn(u64, &Pubkey, usize) -> bool>,
+        stats: &LoadAccountsStats,
     ) -> Option<(AccountSharedData, Slot)> {
         // One lookup covering the write cache and the read cache; a hit does not consult the index.
         if let Some(cached_load) = self.accounts_cache.load_cached(pubkey, ancestors) {
             let (account, slot) = match cached_load {
                 CachedLoad::WriteCache(cached_account, slot) => {
-                    self.load_account_stats
+                    stats
                         .num_loaded_from_write_cache
                         .fetch_add(1, Ordering::Relaxed);
                     (cached_account.account.clone(), slot)
                 }
                 CachedLoad::ReadCache(account, slot) => {
-                    self.load_account_stats
+                    stats
                         .num_loaded_from_read_cache
                         .fetch_add(1, Ordering::Relaxed);
                     (account, slot)
@@ -2767,7 +2836,7 @@ impl AccountsDb {
                 (slot, self.get_account_accessor(slot, &storage_location))
             },
         )?;
-        self.load_account_stats
+        stats
             .num_loaded_from_index_storage
             .fetch_add(1, Ordering::Relaxed);
 
@@ -4527,7 +4596,8 @@ impl AccountsDb {
                 ),
             );
 
-            self.load_account_stats.report();
+            self.load_account_stats.report("accounts_db_load_accounts");
+            self.prefetch_stats.report();
         }
     }
 
@@ -5367,6 +5437,7 @@ impl AccountsDb {
             pubkey,
             PopulateReadCache::True,
             None::<fn(_, &_, _) -> _>,
+            &self.load_account_stats,
         )
     }
 
