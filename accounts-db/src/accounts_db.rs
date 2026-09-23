@@ -3067,12 +3067,14 @@ impl AccountsDb {
         let maybe_account =
             account_accessor.check_and_get_loaded_account_shared_data(load_filter.as_ref());
 
+        // Skip zero lamport accounts; a cached one would still be returned after clean removes it
         if let Some(ref account) = maybe_account
             && populate_read_cache == PopulateReadCache::True
+            && !account.is_zero_lamport()
         {
             // Store only while `slot` is the newest version in the index, under the entry's lock;
-            // the read cache removals in `store_accounts_for_flush` and `store_accounts_for_squash`
-            // rely on this.
+            // the read cache removals in `store_accounts_for_flush`, `store_accounts_for_squash`
+            // and `purge_slot_storage` rely on this.
             self.accounts_index.get_and_then(pubkey, |entry| {
                 if let Some(entry) = entry {
                     let slot_list = entry.slot_list_read_lock();
@@ -3339,7 +3341,12 @@ impl AccountsDb {
 
         let mut purge_accounts_index_elapsed = Measure::start("purge_accounts_index_elapsed");
         // Purge this slot from the accounts index
-        let reclaims = self.purge_keys_exact(stored_keys);
+        let reclaims = self.purge_keys_exact(stored_keys.iter().copied());
+        // The read cache is checked before the index, so drop the purged keys from it too
+        for (pubkey, _slot) in &stored_keys {
+            self.read_only_accounts_cache
+                .remove_assume_not_present(pubkey);
+        }
         purge_accounts_index_elapsed.stop();
         purge_stats
             .purge_accounts_index_elapsed

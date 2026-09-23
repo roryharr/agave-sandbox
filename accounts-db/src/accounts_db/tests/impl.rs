@@ -3510,14 +3510,15 @@ fn test_read_only_accounts_cache_not_populated_from_older_ancestors() {
     db.add_root(2);
     db.flush_rooted_accounts_cache_without_clean();
 
-    // Ancestors that can't see slot 2 load slot 1, which is not the newest so is not cached
+    // Slot2 is not in ancestors, so load returns slot 1, which is not the newest and shouldn't
+    // be added to the read_cache
     let (account, slot) = db
         .do_load_for_tests(&Ancestors::from(vec![1]), &account_key)
         .unwrap();
     assert_eq!((account.lamports(), slot), (1, 1));
     assert_eq!(db.read_only_accounts_cache.cache_len(), 0);
 
-    // Ancestors that can see slot 2 load it, and it is cached
+    // Ancestors includes slot2, so now it is added to the read cache
     let (account, slot) = db
         .do_load_for_tests(&Ancestors::from(vec![1, 2]), &account_key)
         .unwrap();
@@ -3587,6 +3588,32 @@ fn test_read_only_accounts_cache() {
         .map(|(account, _)| account);
     assert!(account.is_none());
     assert_eq!(db.read_only_accounts_cache.cache_len(), 1);
+}
+
+#[test]
+fn test_read_only_accounts_cache_skips_zero_lamport() {
+    let db = Arc::new(AccountsDb::new_for_tests_with_config(
+        Vec::new(),
+        DEFAULT_ACCOUNTS_DB_CONFIG,
+    ));
+
+    let account_key = Pubkey::new_unique();
+    let zero_lamport_account = AccountSharedData::new(0, 0, AccountSharedData::default().owner());
+    let slot0_account = AccountSharedData::new(1, 1, AccountSharedData::default().owner());
+    db.store_for_tests((0, &[(&account_key, &slot0_account)][..]));
+    db.add_root(0);
+    db.flush_rooted_accounts_cache_without_clean();
+    // Flushing without clean keeps the zero lamport account in the index
+    db.store_for_tests((1, &[(&account_key, &zero_lamport_account)][..]));
+    db.add_root(1);
+    db.flush_rooted_accounts_cache_without_clean();
+
+    // The zero lamport account is loaded from storage but not stored in the read cache
+    let (account, slot) = db
+        .do_load_for_tests(&Ancestors::default(), &account_key)
+        .unwrap();
+    assert_eq!((account.lamports(), slot), (0, 1));
+    assert_eq!(db.read_only_accounts_cache.cache_len(), 0);
 }
 
 #[test]
@@ -3816,9 +3843,9 @@ fn test_load_filter_with_closed_accounts() {
     db.storage.insert(Arc::new(storage));
     db.add_root(slot);
 
-    // the filtered load reads storage and caches, so the unfiltered one hits the read cache
+    // Since accounts are zero lamport, they are not inserted into the read cache
     assert_absent(&stored_key);
-    assert_eq!(db.read_only_accounts_cache.cache_len(), 1);
+    assert_eq!(db.read_only_accounts_cache.cache_len(), 0);
 }
 
 /// `select_pubkeys_to_store` stores only the newest version of each account across the
