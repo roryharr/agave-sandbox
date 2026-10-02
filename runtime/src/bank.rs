@@ -118,7 +118,7 @@ use {
         accounts_index::IndexKey,
         accounts_scan::ScanResult,
         accounts_update_notifier_interface::AccountsUpdateNotifier,
-        ancestors::Ancestors,
+        ancestors::{Ancestor, Ancestors},
         blockhash_queue::BlockhashQueue,
         storable_accounts::StorableAccounts,
         utils::create_account_shared_data,
@@ -2443,6 +2443,14 @@ impl Bank {
         self.bank_id
     }
 
+    /// This bank as an entry in its own ancestry
+    pub fn ancestor(&self) -> Ancestor {
+        Ancestor {
+            slot: self.slot(),
+            bank_id: self.bank_id(),
+        }
+    }
+
     pub fn epoch(&self) -> Epoch {
         self.epoch
     }
@@ -3323,15 +3331,15 @@ impl Bank {
 
         //this bank and all its parents are now on the rooted path
         let mut roots = Vec::with_capacity(self.ancestors.len());
-        roots.push(self.slot());
-        roots.extend(self.parents_iter().map(|parent| parent.slot()));
+        roots.push(self.ancestor());
+        roots.extend(self.parents_iter().map(|parent| parent.ancestor()));
 
         let mut total_cache_us = 0;
 
         let mut squash_accounts_time = Measure::start("squash_accounts_time");
-        for slot in roots.iter().rev() {
+        for root in roots.iter().rev() {
             // root forks cannot be purged
-            let add_root_timing = self.rc.accounts.add_root(*slot);
+            let add_root_timing = self.rc.accounts.add_root(*root);
             total_cache_us += add_root_timing.cache_us;
         }
         squash_accounts_time.stop();
@@ -3342,7 +3350,7 @@ impl Bank {
         self.status_cache
             .write()
             .unwrap()
-            .add_roots(roots.iter().copied());
+            .add_roots(roots.iter().map(|root| root.slot));
         squash_cache_time.stop();
 
         SquashTiming {

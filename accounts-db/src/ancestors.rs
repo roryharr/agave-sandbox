@@ -1,8 +1,15 @@
 use {
-    crate::rolling_bit_field::RollingBitField,
+    crate::{bank_id::BankId, rolling_bit_field::RollingBitField},
     core::fmt::{Debug, Formatter},
     solana_clock::Slot,
 };
+
+/// A bank in a chain of ancestry, identified by its slot and its bank id.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Ancestor {
+    pub slot: Slot,
+    pub bank_id: BankId,
+}
 
 #[derive(Clone, PartialEq)]
 pub struct Ancestors {
@@ -77,6 +84,18 @@ impl Ancestors {
     /// This includes any ancestors and any slots older than the oldest ancestor in the list
     pub fn is_ancestor(&self, slot: Slot) -> bool {
         self.contains_key(&slot) || self.min_slot().is_none_or(|min_slot| slot <= min_slot)
+    }
+}
+
+#[cfg(feature = "dev-context-only-utils")]
+impl Ancestor {
+    /// For accounts-db tests that store and root slots with no bank: the bank id equals the slot.
+    /// Crate-private so that code outside accounts-db always names its bank id.
+    pub(crate) fn new_for_tests(slot: Slot) -> Self {
+        Self {
+            slot,
+            bank_id: BankId::new(slot),
+        }
     }
 }
 
