@@ -231,7 +231,7 @@ use {
 #[cfg(feature = "dev-context-only-utils")]
 use {
     dashmap::DashSet,
-    qualifier_attr::{field_qualifiers, qualifiers},
+    qualifier_attr::field_qualifiers,
     rayon::iter::{IntoParallelRefIterator, ParallelIterator},
     solana_accounts_db::accounts_db::{
         ACCOUNTS_DB_CONFIG_FOR_BENCHMARKS, ACCOUNTS_DB_CONFIG_FOR_TESTING,
@@ -344,13 +344,32 @@ pub struct BankRc {
 }
 
 impl BankRc {
-    #[cfg_attr(feature = "dev-context-only-utils", qualifiers(pub))]
     pub(crate) fn new(accounts: Accounts) -> Self {
         Self {
             accounts: Arc::new(accounts),
             parent: RwLock::new(None),
             bank_id_generator: Arc::default(),
         }
+    }
+
+    /// Creates a new accounts db with `accounts` stored and rooted at `slot`, under their own
+    /// bank id.
+    #[cfg(feature = "dev-context-only-utils")]
+    fn new_for_tests_with_rooted_accounts(
+        accounts_db_config: AccountsDbConfig,
+        slot: Slot,
+        accounts: &[(Pubkey, AccountSharedData)],
+    ) -> Self {
+        let accounts_db = AccountsDb::new_for_tests_with_config(Vec::new(), accounts_db_config);
+        let bank_rc = Self::new(Accounts::new(Arc::new(accounts_db)));
+        bank_rc.accounts.store_accounts(
+            (slot, accounts),
+            bank_rc.bank_id_generator.next(),
+            None,
+            &Ancestors::default(),
+        );
+        bank_rc.accounts.accounts_db.add_root(slot);
+        bank_rc
     }
 }
 
@@ -1268,11 +1287,15 @@ struct NewEpochBundle {
 
 impl Bank {
     fn default_with_accounts(accounts: Accounts) -> Self {
-        let partitioned_rewards_stake_account_stores_per_block = accounts
+        Self::default_with_bank_rc(BankRc::new(accounts))
+    }
+
+    fn default_with_bank_rc(rc: BankRc) -> Self {
+        let partitioned_rewards_stake_account_stores_per_block = rc
+            .accounts
             .accounts_db
             .partitioned_epoch_rewards_config
             .stake_account_stores_per_block;
-        let rc = BankRc::new(accounts);
         let bank_id = rc.bank_id_generator.next();
         let mut bank = Self {
             rc,
@@ -6962,13 +6985,15 @@ impl fmt::Debug for Bank {
 #[cfg(feature = "dev-context-only-utils")]
 impl Bank {
     /// Shared bank constructor used by `new_for_txn_tests` and
-    /// `new_for_block_tests`. Builds only the `Bank` struct from deserialized
+    /// `new_for_block_tests`. Builds the `Bank` struct from deserialized
     /// fields with the supplied `leader`, `stakes_cache`, and
-    /// `accounts_data_size_initial`. All post-init (feature application,
-    /// sysvar cache fill, partitioned rewards recalc,
+    /// `accounts_data_size_initial`, with `parent_accounts` stored and rooted
+    /// at `fields.parent_slot` in a new accounts db. All post-init (feature
+    /// application, sysvar cache fill, partitioned rewards recalc,
     /// `prepare_for_block_execution`, etc.) is the caller's responsibility.
     fn new_from_fields_for_tests(
-        bank_rc: BankRc,
+        accounts_db_config: AccountsDbConfig,
+        parent_accounts: &[(Pubkey, AccountSharedData)],
         fields: BankFieldsToDeserialize,
         feature_set: FeatureSet,
         epoch_stakes: HashMap<Epoch, VersionedEpochStakes>,
@@ -6976,15 +7001,18 @@ impl Bank {
         stakes_cache: StakesCache,
         accounts_data_size_initial: u64,
     ) -> Self {
+        let bank_rc = BankRc::new_for_tests_with_rooted_accounts(
+            accounts_db_config,
+            fields.parent_slot,
+            parent_accounts,
+        );
+
         let slot = fields.slot;
         let epoch = fields.epoch_schedule.get_epoch(slot);
         let ancestors = Ancestors::from(vec![slot]);
         let rent = Self::load_rent_from_account_for_snapshot_load(&bank_rc.accounts, &ancestors);
 
-        let accounts = Accounts::new(Arc::clone(&bank_rc.accounts.accounts_db));
-        let mut bank = Self::default_with_accounts(accounts);
-
-        bank.rc = bank_rc;
+        let mut bank = Self::default_with_bank_rc(bank_rc);
         bank.blockhash_queue = RwLock::new(fields.blockhash_queue);
         bank.ancestors = ancestors;
         bank.hash = RwLock::new(fields.hash);
@@ -7045,7 +7073,8 @@ impl Bank {
     /// [`BankForks`] before calling `load_and_execute_transactions`,
     /// because the program cache requires a `ForkGraph` to be present.
     pub fn new_for_txn_tests(
-        bank_rc: BankRc,
+        accounts_db_config: AccountsDbConfig,
+        parent_accounts: &[(Pubkey, AccountSharedData)],
         fields: BankFieldsToDeserialize,
         feature_set: FeatureSet,
         epoch_stakes: HashMap<Epoch, VersionedEpochStakes>,
@@ -7055,7 +7084,8 @@ impl Bank {
             vote_address: Pubkey::default(),
         };
         let mut bank = Self::new_from_fields_for_tests(
-            bank_rc,
+            accounts_db_config,
+            parent_accounts,
             fields,
             feature_set,
             epoch_stakes,
@@ -7081,7 +7111,8 @@ impl Bank {
     /// [`BankForks`] before calling `load_and_execute_transactions`,
     /// because the program cache requires a `ForkGraph` to be present.
     pub fn new_for_block_tests(
-        bank_rc: BankRc,
+        accounts_db_config: AccountsDbConfig,
+        parent_accounts: &[(Pubkey, AccountSharedData)],
         fields: BankFieldsToDeserialize,
         feature_set: FeatureSet,
         epoch_stakes: HashMap<Epoch, VersionedEpochStakes>,
@@ -7094,7 +7125,8 @@ impl Bank {
             Self::slot_leader_from_epoch_stakes(fields.slot, &fields.epoch_schedule, &epoch_stakes);
 
         let mut bank = Self::new_from_fields_for_tests(
-            bank_rc,
+            accounts_db_config,
+            parent_accounts,
             fields,
             feature_set,
             epoch_stakes,

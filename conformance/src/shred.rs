@@ -13,9 +13,7 @@ use {
     solana_account::{AccountSharedData, state_traits::StateMutWincode as _},
     solana_accounts_db::{
         account_locks::validate_account_locks,
-        accounts::Accounts,
-        accounts_db::{ACCOUNTS_DB_CONFIG_FOR_TESTING, AccountsDb, AccountsDbConfig},
-        ancestors::Ancestors,
+        accounts_db::{ACCOUNTS_DB_CONFIG_FOR_TESTING, AccountsDbConfig},
     },
     solana_clock::{DEFAULT_HASHES_PER_TICK, DEFAULT_TICKS_PER_SLOT, Slot},
     solana_epoch_schedule::EpochSchedule,
@@ -36,7 +34,7 @@ use {
     solana_packet::PACKET_DATA_SIZE,
     solana_rent::Rent,
     solana_runtime::{
-        bank::{Bank, BankFieldsToDeserialize, BankId, BankRc},
+        bank::{Bank, BankFieldsToDeserialize},
         epoch_stakes::VersionedEpochStakes,
     },
     solana_runtime_transaction::sanitize_config::sanitize_config,
@@ -328,16 +326,7 @@ fn build_root_bank(root_slot: Slot, feature_set: FeatureSet) -> Arc<Bank> {
     let epoch = epoch_schedule.get_epoch(root_slot);
     let parent_slot = root_slot.saturating_sub(1);
 
-    let accounts = create_accounts_db();
     let rent_account = AccountSharedData::new_data(1, &Rent::default(), &sysvar::id()).unwrap();
-    accounts.store_accounts(
-        (parent_slot, &[(sysvar::rent::id(), rent_account)][..]),
-        BankId::default(),
-        None,
-        &Ancestors::default(),
-    );
-    accounts.accounts_db.add_root(parent_slot);
-    let bank_rc = BankRc::new(accounts);
 
     let epoch_stakes = [epoch, epoch.saturating_add(1)]
         .into_iter()
@@ -362,25 +351,22 @@ fn build_root_bank(root_slot: Slot, feature_set: FeatureSet) -> Arc<Bank> {
     };
 
     Arc::new(Bank::new_for_txn_tests(
-        bank_rc,
+        accounts_db_config(),
+        &[(sysvar::rent::id(), rent_account)],
         fields,
         feature_set,
         epoch_stakes,
     ))
 }
 
-fn create_accounts_db() -> Accounts {
+fn accounts_db_config() -> AccountsDbConfig {
     let single_thread = NonZeroUsize::new(1).unwrap();
-    let accounts_db_config = AccountsDbConfig {
+    AccountsDbConfig {
         num_background_threads: Some(single_thread),
         read_cache_num_shards: Some(2),
         skip_initial_hash_calc: true,
         ..ACCOUNTS_DB_CONFIG_FOR_TESTING
-    };
-    Accounts::new(Arc::new(AccountsDb::new_for_tests_with_config(
-        vec![],
-        accounts_db_config,
-    )))
+    }
 }
 
 /// Conformance harness entry point for shred parsing.

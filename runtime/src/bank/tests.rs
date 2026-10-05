@@ -52,8 +52,7 @@ use {
     },
     solana_account_info::MAX_PERMITTED_DATA_INCREASE,
     solana_accounts_db::{
-        accounts::{AccountAddressFilter, Accounts},
-        accounts_db::AccountsDb,
+        accounts::AccountAddressFilter,
         accounts_hash::AccountsLtHash,
         accounts_index::{AccountIndex, AccountSecondaryIndexes, IndexKey},
         accounts_scan::ScanError,
@@ -13607,8 +13606,6 @@ fn test_new_for_txn_tests_system_transfer() {
     let recent_blockhash = Hash::new_unique();
     blockhash_queue.register_hash(&recent_blockhash, lamports_per_signature);
 
-    let accounts = Accounts::new(Arc::new(AccountsDb::default_for_tests()));
-
     let clock = solana_clock::Clock {
         slot,
         epoch,
@@ -13654,18 +13651,6 @@ fn test_new_for_txn_tests_system_transfer() {
             acct
         }),
     ];
-
-    let refs: Vec<_> = owned_accounts.iter().map(|(k, v)| (k, v)).collect();
-    let ancestors = Ancestors::from(vec![parent_slot]);
-    accounts.store_accounts(
-        (parent_slot, refs.as_slice()),
-        BankId::new(0),
-        None,
-        &ancestors,
-    );
-    accounts.accounts_db.add_root(parent_slot);
-
-    let bank_rc = BankRc::new(accounts);
 
     let mut epoch_stakes = HashMap::new();
     for key in [epoch, epoch.saturating_add(1)] {
@@ -13717,11 +13702,18 @@ fn test_new_for_txn_tests_system_transfer() {
         block_id: None,
     };
 
-    let bank = Bank::new_for_txn_tests(bank_rc, fields, FeatureSet::all_enabled(), epoch_stakes);
+    let bank = Bank::new_for_txn_tests(
+        ACCOUNTS_DB_CONFIG_FOR_TESTING,
+        &owned_accounts,
+        fields,
+        FeatureSet::all_enabled(),
+        epoch_stakes,
+    );
     let bank_forks = BankForks::new_rw_arc(bank);
     let bank = bank_forks.read().unwrap().root_bank();
 
     assert_eq!(bank.slot(), slot);
+    assert_eq!(bank.bank_id(), BankId::new(1));
     assert_eq!(bank.epoch(), epoch);
     assert_eq!(bank.last_blockhash(), recent_blockhash);
 
@@ -13796,8 +13788,6 @@ fn test_new_for_block_tests_with_vote_account() {
     let mut blockhash_queue = BlockhashQueue::default();
     blockhash_queue.register_hash(&recent_blockhash, lamports_per_signature);
 
-    let accounts = Accounts::new(Arc::new(AccountsDb::default_for_tests()));
-
     let owned_accounts = vec![
         (vote_pubkey, vote_account),
         (stake_pubkey, stake_account),
@@ -13838,18 +13828,6 @@ fn test_new_for_block_tests_with_vote_account() {
         .map(|(_, a)| a.data().len() as u64)
         .sum();
     let total_lamports = owned_accounts.iter().map(|(_, a)| a.lamports()).sum();
-
-    let refs: Vec<_> = owned_accounts.iter().map(|(k, v)| (k, v)).collect();
-    let ancestors = Ancestors::from(vec![parent_slot]);
-    accounts.store_accounts(
-        (parent_slot, refs.as_slice()),
-        BankId::new(0),
-        None,
-        &ancestors,
-    );
-    accounts.accounts_db.add_root(parent_slot);
-
-    let bank_rc = BankRc::new(accounts);
 
     let vote_accounts_map = HashMap::from([(vote_pubkey, (1_000_000, vote_acct))]);
     let mut epoch_stakes = HashMap::new();
@@ -13900,7 +13878,8 @@ fn test_new_for_block_tests_with_vote_account() {
     };
 
     let bank = Bank::new_for_block_tests(
-        bank_rc,
+        ACCOUNTS_DB_CONFIG_FOR_TESTING,
+        &owned_accounts,
         fields,
         FeatureSet::all_enabled(),
         epoch_stakes,
@@ -13911,6 +13890,7 @@ fn test_new_for_block_tests_with_vote_account() {
     let bank = bank_forks.read().unwrap().root_bank();
 
     assert_eq!(bank.slot(), slot);
+    assert_eq!(bank.bank_id(), BankId::new(1));
     assert_eq!(bank.epoch(), epoch);
     assert!(bank.capitalization() > 0);
     assert_eq!(bank.last_blockhash(), recent_blockhash);
