@@ -104,11 +104,11 @@ pub fn execute_txn_proto(context: &ProtoTxnContext) -> ProtoTxnResult {
     // Populate the accounts DB with the input accounts at the parent slot.
     let bank_rc = BankRc::new(new_accounts_for_tests_single_threaded());
     let bank_id = bank_rc.next_bank_id();
-    let ancestors = Ancestors::from(vec![parent_slot]);
     let ancestor = Ancestor {
         slot: parent_slot,
         bank_id,
     };
+    let ancestors = Ancestors::from(vec![ancestor]);
     bank_rc
         .accounts
         .store_accounts((parent_slot, &accounts[..]), bank_id, None, &ancestors);

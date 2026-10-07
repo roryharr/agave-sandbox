@@ -47,6 +47,17 @@ impl From<Vec<Slot>> for Ancestors {
     }
 }
 
+impl From<Vec<Ancestor>> for Ancestors {
+    fn from(source: Vec<Ancestor>) -> Ancestors {
+        Ancestors::from(
+            source
+                .into_iter()
+                .map(|ancestor| ancestor.slot)
+                .collect::<Vec<_>>(),
+        )
+    }
+}
+
 impl Ancestors {
     pub fn keys(&self) -> Vec<Slot> {
         self.ancestors.get_all()
