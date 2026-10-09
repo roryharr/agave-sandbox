@@ -44,6 +44,9 @@ const MIN_LOOP_INTERVAL: Duration = Duration::from_millis(100);
 // 200 slots, which ends up being 50 seconds plus buffer.
 const CLEAN_INTERVAL: Duration = Duration::from_secs(60);
 const SHRINK_INTERVAL: Duration = Duration::from_secs(1);
+// Roots newer than this stay in the write cache, so recently written accounts load from the
+// cache instead of storage. Both the background flush and snapshot requests stop here.
+pub const FLUSH_ROOT_LAG_SLOTS: Slot = 32;
 
 pub type SnapshotRequestSender = Sender<SnapshotRequest>;
 pub type SnapshotRequestReceiver = Receiver<SnapshotRequest>;
@@ -145,9 +148,10 @@ impl SnapshotRequestHandler {
     pub fn handle_snapshot_requests(
         &self,
         non_snapshot_time_us: u128,
+        max_snapshot_slot: Slot,
     ) -> Option<Result<Slot, SnapshotError>> {
         let (snapshot_request, num_outstanding_requests, num_re_enqueued_requests) =
-            self.get_next_snapshot_request()?;
+            self.get_next_snapshot_request(max_snapshot_slot)?;
 
         datapoint_info!(
             "handle_snapshot_requests",
@@ -166,15 +170,16 @@ impl SnapshotRequestHandler {
 
     /// Get the next snapshot request to handle
     ///
-    /// Look through the snapshot request channel to find the highest priority one to handle next.
-    /// If there are no snapshot requests in the channel, return None.  Otherwise return the
-    /// highest priority one.  Unhandled snapshot requests with slots GREATER-THAN the handled one
-    /// will be re-enqueued.  The remaining will be dropped.
+    /// Look through the snapshot request channel to find the highest priority one to handle next,
+    /// among the requests for slots at or below `max_snapshot_slot`.  If there is none, return
+    /// None.  Otherwise return the highest priority one.  Unhandled snapshot requests with slots
+    /// GREATER-THAN the handled one will be re-enqueued.  The remaining will be dropped.
     ///
     /// Also return the number of snapshot requests initially in the channel, and the number of
     /// ones re-enqueued.
     fn get_next_snapshot_request(
         &self,
+        max_snapshot_slot: Slot,
     ) -> Option<(
         SnapshotRequest,
         /*num outstanding snapshot requests*/ usize,
@@ -184,39 +189,44 @@ impl SnapshotRequestHandler {
         let requests_len = requests.len();
         debug!("outstanding snapshot requests ({requests_len}): {requests:?}");
 
-        match requests_len {
-            0 => None,
-            1 => {
-                // SAFETY: We know the len is 1, so `pop` will return `Some`
-                let snapshot_request = requests.pop().unwrap();
-                Some((snapshot_request, 1, 0))
+        // A fastboot request is sent at exit, when no further roots arrive, so it is handled
+        // regardless of `max_snapshot_slot`.
+        let max_idx = requests
+            .iter()
+            .enumerate()
+            .filter(|(_, snapshot_request)| {
+                snapshot_request.request_kind == SnapshotRequestKind::FastbootSnapshot
+                    || snapshot_request.snapshot_root_bank.slot() <= max_snapshot_slot
+            })
+            .max_by(|(_, a), (_, b)| cmp_requests_by_priority(a, b))
+            .map(|(idx, _)| idx);
+        let Some(max_idx) = max_idx else {
+            // Nothing to handle yet; keep every request for a later root.
+            for snapshot_request in requests {
+                self.snapshot_controller
+                    .request_sender()
+                    .try_send(snapshot_request)
+                    .expect("re-enqueue snapshot request");
             }
-            _ => {
-                let max_idx = requests
-                    .iter()
-                    .enumerate()
-                    .max_by(|(_, a), (_, b)| cmp_requests_by_priority(a, b))
-                    .map(|(idx, _)| idx)
-                    .unwrap(); // SAFETY: We know len > 1
-                let snapshot_request = requests.swap_remove(max_idx);
-                let handled_request_slot = snapshot_request.snapshot_root_bank.slot();
-                // re-enqueue any remaining requests for slots GREATER-THAN the one that will be handled
-                let num_re_enqueued_requests = requests
-                    .into_iter()
-                    .filter(|snapshot_request| {
-                        snapshot_request.snapshot_root_bank.slot() > handled_request_slot
-                    })
-                    .map(|snapshot_request| {
-                        self.snapshot_controller
-                            .request_sender()
-                            .try_send(snapshot_request)
-                            .expect("re-enqueue snapshot request");
-                    })
-                    .count();
+            return None;
+        };
+        let snapshot_request = requests.swap_remove(max_idx);
+        let handled_request_slot = snapshot_request.snapshot_root_bank.slot();
+        // re-enqueue any remaining requests for slots GREATER-THAN the one that will be handled
+        let num_re_enqueued_requests = requests
+            .into_iter()
+            .filter(|snapshot_request| {
+                snapshot_request.snapshot_root_bank.slot() > handled_request_slot
+            })
+            .map(|snapshot_request| {
+                self.snapshot_controller
+                    .request_sender()
+                    .try_send(snapshot_request)
+                    .expect("re-enqueue snapshot request");
+            })
+            .count();
 
-                Some((snapshot_request, requests_len, num_re_enqueued_requests))
-            }
-        }
+        Some((snapshot_request, requests_len, num_re_enqueued_requests))
     }
 
     fn handle_snapshot_request(
@@ -321,7 +331,7 @@ impl SnapshotRequestHandler {
         // for getting the highest priority request, *AND* we leverage its test coverage.
         // Additionally, since `get_next_snapshot_request()` drops old requests, we might get to
         // proactively clean up old banks earlier as well!
-        let (next_request, _, _) = self.get_next_snapshot_request()?;
+        let (next_request, _, _) = self.get_next_snapshot_request(Slot::MAX)?;
         let next_slot = next_request.snapshot_root_bank.slot();
 
         // make sure to re-enqueue the request, otherwise we'd lose it!
@@ -406,9 +416,10 @@ impl AbsRequestHandlers {
     pub fn handle_snapshot_requests(
         &self,
         non_snapshot_time_us: u128,
+        max_snapshot_slot: Slot,
     ) -> Option<Result<Slot, SnapshotError>> {
         self.snapshot_request_handler
-            .handle_snapshot_requests(non_snapshot_time_us)
+            .handle_snapshot_requests(non_snapshot_time_us, max_snapshot_slot)
     }
 }
 
@@ -487,8 +498,13 @@ impl AccountsBackgroundService {
                         // before setting a root `R > N`, and
                         // snapshot_request_handler.handle_requests() will always look for the
                         // latest available snapshot in the channel.
-                        let snapshot_handle_result =
-                            request_handlers.handle_snapshot_requests(non_snapshot_time);
+                        //
+                        // A request waits until FLUSH_ROOT_LAG_SLOTS roots are past it, so the
+                        // flush it forces leaves the newest roots in the write cache.
+                        let snapshot_handle_result = request_handlers.handle_snapshot_requests(
+                            non_snapshot_time,
+                            bank.slot().saturating_sub(FLUSH_ROOT_LAG_SLOTS),
+                        );
 
                         if let Some(snapshot_handle_result) = snapshot_handle_result {
                             // Safe, see proof above
@@ -531,7 +547,7 @@ impl AccountsBackgroundService {
                             // Bank::clean_accounts() for more information.
                             let max_clean_slot_inclusive = cmp::min(
                                 next_snapshot_request_slot.unwrap_or(Slot::MAX),
-                                bank.slot(),
+                                bank.slot().saturating_sub(FLUSH_ROOT_LAG_SLOTS),
                             )
                             .saturating_sub(1);
 
@@ -870,7 +886,7 @@ mod test {
         // (the older full snapshots are skipped and dropped)
         assert_eq!(latest_full_snapshot_slot(&bank0), None);
         let (snapshot_request, ..) = snapshot_request_handler
-            .get_next_snapshot_request()
+            .get_next_snapshot_request(Slot::MAX)
             .unwrap();
         assert_eq!(
             snapshot_request.request_kind,
@@ -883,7 +899,7 @@ mod test {
         // (the older incremental snapshots are skipped and dropped)
         assert_eq!(latest_full_snapshot_slot(&bank0), Some(240));
         let (snapshot_request, ..) = snapshot_request_handler
-            .get_next_snapshot_request()
+            .get_next_snapshot_request(Slot::MAX)
             .unwrap();
         assert_eq!(
             snapshot_request.request_kind,
@@ -895,7 +911,7 @@ mod test {
         // (the older fastboot snapshots are skipped and dropped)
         assert_eq!(latest_full_snapshot_slot(&bank0), Some(240));
         let (snapshot_request, ..) = snapshot_request_handler
-            .get_next_snapshot_request()
+            .get_next_snapshot_request(Slot::MAX)
             .unwrap();
         assert_eq!(
             snapshot_request.request_kind,
@@ -907,7 +923,7 @@ mod test {
         assert_eq!(latest_full_snapshot_slot(&bank0), Some(240));
         assert!(
             snapshot_request_handler
-                .get_next_snapshot_request()
+                .get_next_snapshot_request(Slot::MAX)
                 .is_none()
         );
     }
