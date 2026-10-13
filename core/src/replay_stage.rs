@@ -1396,6 +1396,48 @@ impl ReplayStage {
                     }
                     voting_time.stop();
 
+                    // Alpenglow simulation: root the highest replayed duplicate confirmed slot
+                    let root = bank_forks.read().unwrap().root();
+                    let new_root_bank = tbft_structs
+                        .duplicate_confirmed_slots
+                        .range(root + 1..)
+                        .rev()
+                        .find_map(|(slot, hash)| {
+                            bank_forks
+                                .read()
+                                .unwrap()
+                                .get(*slot)
+                                .filter(|bank| bank.is_frozen() && bank.hash() == *hash)
+                        });
+                    if let Some(new_root_bank) = new_root_bank {
+                        let new_root = new_root_bank.slot();
+                        let highest_super_majority_root = Some(
+                            block_commitment_cache
+                                .read()
+                                .unwrap()
+                                .highest_super_majority_root(),
+                        );
+                        Self::check_and_handle_new_root(
+                            &my_pubkey,
+                            new_root_bank.parent_slot(),
+                            new_root,
+                            &bank_forks,
+                            &mut progress,
+                            &blockstore,
+                            &leader_schedule_cache,
+                            snapshot_controller.as_deref(),
+                            rpc_subscriptions.as_deref(),
+                            highest_super_majority_root,
+                            &bank_notification_sender,
+                            &mut has_new_vote_been_rooted,
+                            &mut tracked_vote_transactions,
+                            &drop_bank_sender,
+                            &mut tbft_structs,
+                        );
+                        tower.vote_state.votes.retain(|lockout| lockout.slot() > new_root);
+                        tower.vote_state.root_slot = Some(new_root);
+                    }
+
                     let mut reset_bank_time = Measure::start("reset_bank");
                     // Reset onto a fork
                     if let Some(reset_bank) = reset_bank {
