@@ -2685,11 +2685,11 @@ impl AccountsDb {
         R: Send,
         B: Send + Default + Sync,
     {
-        if let Some(slot_cache) = self.accounts_cache.slot_cache(slot) {
+        if let Some(slot_cache) = self.accounts_cache.bank_cache(bank_id) {
             debug_assert_eq!(
-                slot_cache.bank_id(),
-                bank_id,
-                "slot {slot} holds accounts stored by another bank"
+                slot_cache.slot(),
+                slot,
+                "{bank_id:?} stored at another slot"
             );
             // If we see the slot in the cache, then all the account information
             // is in this cached slot

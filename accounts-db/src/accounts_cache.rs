@@ -3,7 +3,7 @@ use {
     dashmap::{DashMap, mapref::entry::Entry},
     solana_account::{AccountSharedData, ReadableAccount},
     solana_clock::Slot,
-    solana_nohash_hasher::BuildNoHashHasher,
+    solana_nohash_hasher::{BuildNoHashHasher, IntMap},
     solana_pubkey::Pubkey,
     std::{
         collections::BTreeSet,
@@ -38,8 +38,7 @@ impl MaxFlushedRoot {
 
 #[derive(Debug)]
 pub struct SlotCache {
-    /// The bank that stored the accounts in this slot
-    bank_id: BankId,
+    slot: Slot,
     cache: DashMap<Pubkey, Arc<CachedAccount>, ahash::RandomState>,
     same_account_writes: AtomicU64,
     same_account_writes_size: AtomicU64,
@@ -145,9 +144,8 @@ impl SlotCache {
             .map(|account_ref| account_ref.value().clone())
     }
 
-    /// The bank that stored the accounts in this slot
-    pub(crate) fn bank_id(&self) -> BankId {
-        self.bank_id
+    pub fn slot(&self) -> Slot {
+        self.slot
     }
 
     pub fn mark_slot_frozen(&self) {
@@ -241,7 +239,9 @@ impl AccountsCacheIndex {
 
 #[derive(Debug, Default)]
 pub struct AccountsCache {
-    cache: DashMap<Slot, Arc<SlotCache>, BuildNoHashHasher<Slot>>,
+    cache: DashMap<BankId, Arc<SlotCache>, BuildNoHashHasher<BankId>>,
+    /// Maps a slot to the id of the bank that stored accounts at it
+    bank_ids: RwLock<IntMap<Slot, BankId>>,
     // Index to find which slots a pubkey is stored in, to speed up lookups in load_latest
     index: AccountsCacheIndex,
     // Rooted slots that may still have accounts in the write cache. A slot enters via `add_root`
@@ -256,9 +256,9 @@ pub struct AccountsCache {
 }
 
 impl AccountsCache {
-    pub fn new_inner(&self, bank_id: BankId) -> Arc<SlotCache> {
+    pub fn new_inner(&self, slot: Slot) -> Arc<SlotCache> {
         Arc::new(SlotCache {
-            bank_id,
+            slot,
             cache: DashMap::default(),
             same_account_writes: AtomicU64::default(),
             same_account_writes_size: AtomicU64::default(),
@@ -299,20 +299,27 @@ impl AccountsCache {
         pubkey: &Pubkey,
         account: AccountSharedData,
     ) -> Arc<CachedAccount> {
-        let slot_cache = self.slot_cache(slot).unwrap_or_else(||
+        let slot_cache = self.bank_cache(bank_id).unwrap_or_else(|| {
+            let slot_bank_id = *self
+                .bank_ids
+                .write()
+                .unwrap()
+                .entry(slot)
+                .or_insert(bank_id);
+            debug_assert_eq!(
+                slot_bank_id, bank_id,
+                "slot {slot} already holds accounts stored by another bank"
+            );
             // DashMap entry.or_insert() returns a RefMut, essentially a write lock,
             // which is dropped after this block ends, minimizing time held by the lock.
             // However, we still want to persist the reference to the `SlotStores` behind
             // the lock, hence we clone it out, (`SlotStores` is an Arc so is cheap to clone).
-            self
-                .cache
-                .entry(slot)
-                .or_insert_with(|| self.new_inner(bank_id))
-                .clone());
-        debug_assert_eq!(
-            slot_cache.bank_id, bank_id,
-            "slot {slot} already holds accounts stored by another bank"
-        );
+            self.cache
+                .entry(bank_id)
+                .or_insert_with(|| self.new_inner(slot))
+                .clone()
+        });
+        debug_assert_eq!(slot_cache.slot, slot, "{bank_id:?} stores at another slot");
 
         let (item, is_new_key) = slot_cache.insert(pubkey, account);
         if is_new_key {
@@ -332,7 +339,10 @@ impl AccountsCache {
     /// Removes a slot from the accounts cache and returns the set of pubkeys removed from the index.
     #[must_use]
     pub fn remove_slot(&self, slot: Slot) -> Option<Vec<Pubkey>> {
-        let result = self.cache.remove(&slot).map(|(_, slot_cache)| slot_cache);
+        let bank_id = self.bank_ids.write().unwrap().remove(&slot);
+        let result = bank_id
+            .and_then(|bank_id| self.cache.remove(&bank_id))
+            .map(|(_, slot_cache)| slot_cache);
         // If this slot was a root, it has now left the cache, so stop tracking it as unflushed.
         self.unflushed_roots.write().unwrap().remove(&slot);
 
@@ -387,8 +397,22 @@ impl AccountsCache {
         None
     }
 
+    /// Returns the cache of the bank that stored accounts at `slot`
     pub fn slot_cache(&self, slot: Slot) -> Option<Arc<SlotCache>> {
-        self.cache.get(&slot).map(|result| result.value().clone())
+        let bank_id = self.bank_id(slot)?;
+        self.bank_cache(bank_id)
+    }
+
+    /// Returns `bank_id`'s cache
+    pub fn bank_cache(&self, bank_id: BankId) -> Option<Arc<SlotCache>> {
+        self.cache
+            .get(&bank_id)
+            .map(|result| result.value().clone())
+    }
+
+    /// Returns the id of the bank that stored accounts at `slot`
+    pub fn bank_id(&self, slot: Slot) -> Option<BankId> {
+        self.bank_ids.read().unwrap().get(&slot).copied()
     }
 
     pub fn add_root(&self, root: Slot) {
@@ -422,14 +446,14 @@ impl AccountsCache {
         self.cache
             .iter()
             .filter_map(|item| {
-                let (slot, slot_cache) = item.pair();
-                slot_cache.is_frozen().then_some(*slot)
+                let slot_cache = item.value();
+                slot_cache.is_frozen().then_some(slot_cache.slot)
             })
             .collect()
     }
 
     pub fn contains(&self, slot: Slot) -> bool {
-        self.cache.contains_key(&slot)
+        self.bank_ids.read().unwrap().contains_key(&slot)
     }
 
     pub fn contains_pubkey(&self, pubkey: &Pubkey) -> bool {
@@ -475,13 +499,17 @@ mod tests {
         // otherwise the slot removed could still be undergoing replay!
         pub fn remove_slots_le(&self, max_root: Slot) -> Vec<(Slot, Arc<SlotCache>)> {
             let mut removed_slots = vec![];
-            self.cache.retain(|slot, slot_cache| {
-                let should_remove = *slot <= max_root;
+            self.cache.retain(|_bank_id, slot_cache| {
+                let should_remove = slot_cache.slot <= max_root;
                 if should_remove {
-                    removed_slots.push((*slot, slot_cache.clone()))
+                    removed_slots.push((slot_cache.slot, slot_cache.clone()))
                 }
                 !should_remove
             });
+            self.bank_ids
+                .write()
+                .unwrap()
+                .retain(|slot, _bank_id| *slot > max_root);
             removed_slots
         }
     }
