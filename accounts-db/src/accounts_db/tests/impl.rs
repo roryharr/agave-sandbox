@@ -3570,7 +3570,6 @@ fn test_read_only_accounts_cache() {
     db.clean_accounts_for_tests();
     db.flush_accounts_cache(true, None);
     db.clean_accounts_for_tests();
-    db.add_root(2);
 
     assert_eq!(db.read_only_accounts_cache.cache_len(), 0);
     let account = db
@@ -3598,6 +3597,7 @@ fn test_read_only_accounts_cache() {
     assert_eq!(account.lamports(), 1);
     assert_eq!(db.read_only_accounts_cache.cache_len(), 1);
     db.store_for_tests((2, &[(&account_key, &zero_lamport_account)][..]));
+    db.add_root(2);
     assert_eq!(db.read_only_accounts_cache.cache_len(), 1);
     let account = db
         .load(
@@ -3656,7 +3656,6 @@ fn test_load_with_read_only_accounts_cache() {
     db.clean_accounts_for_tests();
     db.flush_accounts_cache(true, None);
     db.clean_accounts_for_tests();
-    db.add_root(2);
 
     assert_eq!(db.read_only_accounts_cache.cache_len(), 0);
     let (account, slot) = db
@@ -3686,6 +3685,7 @@ fn test_load_with_read_only_accounts_cache() {
     assert_eq!(slot, 1);
 
     db.store_for_tests((2, &[(&account_key, &zero_lamport_account)][..]));
+    db.add_root(2);
     let account = db.load(
         &Ancestors::default(),
         &account_key,
@@ -3708,8 +3708,9 @@ fn test_load_with_read_only_accounts_cache() {
     assert!(account.is_none());
     assert_eq!(db.read_only_accounts_cache.cache_len(), 0);
 
-    let slot2_account = AccountSharedData::new(2, 1, &Pubkey::default());
-    db.store_for_tests((2, &[(&account_key, &slot2_account)][..]));
+    let slot3_account = AccountSharedData::new(3, 1, &Pubkey::default());
+    db.store_for_tests((3, &[(&account_key, &slot3_account)][..]));
+    db.add_root(3);
     let (account, slot) = db
         .load(
             &Ancestors::default(),
@@ -3719,12 +3720,10 @@ fn test_load_with_read_only_accounts_cache() {
             NO_LOAD_FILTER,
         )
         .unwrap();
-    assert_eq!(account.lamports(), 2);
+    assert_eq!(account.lamports(), 3);
     assert_eq!(db.read_only_accounts_cache.cache_len(), 0);
-    assert_eq!(slot, 2);
+    assert_eq!(slot, 3);
 
-    let slot2_account = AccountSharedData::new(2, 1, &Pubkey::default());
-    db.store_for_tests((2, &[(&account_key, &slot2_account)][..]));
     let (account, slot) = db
         .load(
             &Ancestors::default(),
@@ -3734,10 +3733,10 @@ fn test_load_with_read_only_accounts_cache() {
             NO_LOAD_FILTER,
         )
         .unwrap();
-    assert_eq!(account.lamports(), 2);
+    assert_eq!(account.lamports(), 3);
     // The account shouldn't be added to read_only_cache because it is in write_cache.
     assert_eq!(db.read_only_accounts_cache.cache_len(), 0);
-    assert_eq!(slot, 2);
+    assert_eq!(slot, 3);
 }
 
 #[test]

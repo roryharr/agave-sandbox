@@ -6,7 +6,7 @@ use {
     solana_nohash_hasher::{BuildNoHashHasher, IntMap},
     solana_pubkey::Pubkey,
     std::{
-        collections::BTreeSet,
+        collections::{BTreeMap, BTreeSet},
         ops::Deref,
         sync::{
             Arc, RwLock,
@@ -244,10 +244,10 @@ pub struct AccountsCache {
     bank_ids: RwLock<IntMap<Slot, BankId>>,
     // Index to find which banks a pubkey is stored in, to speed up lookups in load_latest
     index: AccountsCacheIndex,
-    // Rooted slots that may still have accounts in the write cache. A slot enters via `add_root`
-    // and is dropped either by `remove_slot` when its cache is flushed, or by
-    // `remove_unflushed_root` when a flush finds it had no cache.
-    unflushed_roots: RwLock<BTreeSet<Slot>>,
+    // Rooted banks that still have accounts in the write cache, and the slot each stored at. A
+    // bank enters via `add_root` if it has a cache, and is dropped by `remove_slot` when its cache
+    // is flushed. Roots form one chain, so bank id order is slot order.
+    unflushed_roots: RwLock<BTreeMap<BankId, Slot>>,
     max_flushed_root: MaxFlushedRoot,
     /// The size of account data stored in the whole AccountsCache, in bytes
     total_size: Arc<AtomicU64>,
@@ -300,6 +300,10 @@ impl AccountsCache {
         account: AccountSharedData,
     ) -> Arc<CachedAccount> {
         let slot_cache = self.bank_cache(bank_id).unwrap_or_else(|| {
+            debug_assert!(
+                !self.unflushed_roots.read().unwrap().contains_key(&bank_id),
+                "slot {slot} stored after it was rooted"
+            );
             let slot_bank_id = *self
                 .bank_ids
                 .write()
@@ -341,12 +345,13 @@ impl AccountsCache {
     /// Removes a slot from the accounts cache and returns the set of pubkeys removed from the index.
     #[must_use]
     pub fn remove_slot(&self, slot: Slot) -> Option<Vec<Pubkey>> {
-        let bank_id = self.bank_ids.write().unwrap().remove(&slot);
-        let result = bank_id
-            .and_then(|bank_id| self.cache.remove(&bank_id))
+        let bank_id = self.bank_ids.write().unwrap().remove(&slot)?;
+        let result = self
+            .cache
+            .remove(&bank_id)
             .map(|(_, slot_cache)| slot_cache);
-        // If this slot was a root, it has now left the cache, so stop tracking it as unflushed.
-        self.unflushed_roots.write().unwrap().remove(&slot);
+        // If this bank was a root, it has now left the cache, so stop tracking it as unflushed.
+        self.unflushed_roots.write().unwrap().remove(&bank_id);
 
         result
             .as_ref()
@@ -378,18 +383,22 @@ impl AccountsCache {
         }
 
         // If the slot is not found in the ancestors fall back to searching roots.
-        // Bound the search to ancestors.min_slot() so that roots from slots beyond
-        // the querying bank's ancestor chain are not visible. Using min_slot is more
-        // correct than max_slot because a root between min and max that is not an
-        // ancestor belongs to a different fork and should not be returned.
-        let max_root_slot = ancestors.min_slot().unwrap_or(Slot::MAX);
+        // Bound the search to the oldest ancestor so that roots beyond the querying
+        // bank's ancestor chain are not visible. Using the oldest is more correct than
+        // the newest because a root between them that is not an ancestor belongs to a
+        // different fork and should not be returned.
+        let max_root_bank_id = ancestors
+            .bank_ids()
+            .next()
+            .map_or(index_max_bank_id, |bank_id| bank_id.min(index_max_bank_id));
 
         let r_unflushed_roots = self.unflushed_roots.read().unwrap();
-        for &slot in r_unflushed_roots.range(..=max_root_slot).rev() {
-            if let Some(found) = self
-                .bank_id(slot)
-                .and_then(|bank_id| self.load(bank_id, pubkey))
-            {
+        for &bank_id in r_unflushed_roots
+            .range(..=max_root_bank_id)
+            .rev()
+            .map(|(bank_id, _slot)| bank_id)
+        {
+            if let Some(found) = self.load(bank_id, pubkey) {
                 return Some(found);
             }
         }
@@ -417,8 +426,11 @@ impl AccountsCache {
         self.bank_ids.read().unwrap().get(&slot).copied()
     }
 
+    /// A root without a cache is not tracked; nothing stores into a slot once it is rooted
     pub fn add_root(&self, root: Slot) {
-        self.unflushed_roots.write().unwrap().insert(root);
+        if let Some(bank_id) = self.bank_id(root) {
+            self.unflushed_roots.write().unwrap().insert(bank_id, root);
+        }
     }
 
     pub fn num_unflushed_roots(&self) -> usize {
@@ -427,7 +439,8 @@ impl AccountsCache {
 
     /// Returns whether `slot` is a root that has been added but not yet flushed to storage.
     pub fn contains_unflushed_root(&self, slot: Slot) -> bool {
-        self.unflushed_roots.read().unwrap().contains(&slot)
+        self.bank_id(slot)
+            .is_some_and(|bank_id| self.unflushed_roots.read().unwrap().contains_key(&bank_id))
     }
 
     /// Returns the unflushed roots up to and including `max_root` (or all roots if `None`). The
@@ -439,7 +452,8 @@ impl AccountsCache {
         self.unflushed_roots
             .read()
             .unwrap()
-            .range(..=max_root)
+            .values()
+            .take_while(|slot| **slot <= max_root)
             .copied()
             .collect()
     }
@@ -479,12 +493,6 @@ impl AccountsCache {
 
     pub fn fetch_max_flush_root(&self) -> Option<Slot> {
         self.max_flushed_root.get()
-    }
-
-    /// Stop tracking `slot` as an unflushed root without touching its cache. Used when a flushed
-    /// root had no cache for `remove_slot` to drop (e.g. genesis), so it would otherwise linger.
-    pub fn remove_unflushed_root(&self, slot: Slot) {
-        self.unflushed_roots.write().unwrap().remove(&slot);
     }
 
     pub fn set_max_flush_root(&self, root: Slot) {
@@ -827,37 +835,42 @@ mod tests {
     #[test]
     fn test_roots_to_flush_with_max_root() {
         let cache = AccountsCache::default();
-        cache.add_root(1);
-        cache.add_root(3);
-        cache.add_root(5);
-        cache.add_root(7);
+        for slot in [1, 3, 5, 7] {
+            cache.store(
+                slot,
+                BankId::new(slot),
+                &Pubkey::new_unique(),
+                AccountSharedData::new(1, 0, &Pubkey::default()),
+            );
+            cache.add_root(slot);
+        }
 
         // roots_to_flush(Some(5)) returns {1, 3, 5}, excluding 7.
         let to_flush = cache.roots_to_flush(Some(5));
         assert_eq!(to_flush, BTreeSet::from([1, 3, 5]));
 
         // roots_to_flush only reads: the tracked roots are unchanged.
-        assert_eq!(
-            *cache.unflushed_roots.read().unwrap(),
-            BTreeSet::from([1, 3, 5, 7])
-        );
+        assert_eq!(cache.roots_to_flush(None), BTreeSet::from([1, 3, 5, 7]));
     }
 
     #[test]
     fn test_roots_to_flush_none_takes_all() {
         let cache = AccountsCache::default();
-        cache.add_root(2);
-        cache.add_root(4);
-        cache.add_root(6);
+        for slot in [2, 4, 6] {
+            cache.store(
+                slot,
+                BankId::new(slot),
+                &Pubkey::new_unique(),
+                AccountSharedData::new(1, 0, &Pubkey::default()),
+            );
+            cache.add_root(slot);
+        }
 
         let to_flush = cache.roots_to_flush(None);
         assert_eq!(to_flush, BTreeSet::from([2, 4, 6]));
 
         // roots_to_flush only reads: the tracked roots are unchanged.
-        assert_eq!(
-            *cache.unflushed_roots.read().unwrap(),
-            BTreeSet::from([2, 4, 6])
-        );
+        assert_eq!(cache.roots_to_flush(None), BTreeSet::from([2, 4, 6]));
     }
 
     #[test]
@@ -881,6 +894,6 @@ mod tests {
 
         // remove_slot drops slot 1 from both the cache and the tracked roots, leaving slot 2.
         let _ = cache.remove_slot(1);
-        assert_eq!(*cache.unflushed_roots.read().unwrap(), BTreeSet::from([2]));
+        assert_eq!(cache.roots_to_flush(None), BTreeSet::from([2]));
     }
 }
