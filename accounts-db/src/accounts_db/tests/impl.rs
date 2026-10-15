@@ -1034,14 +1034,9 @@ fn test_clean_zero_lamport_and_dead_slot() {
     let account = AccountSharedData::new(1, 1, &Pubkey::default());
     let zero_lamport_account = AccountSharedData::new(0, 0, &Pubkey::default());
 
-    // Store two accounts
-    accounts.store_for_tests((0, [(&pubkey1, &account)].as_slice()));
-    accounts.store_for_tests((0, [(&pubkey2, &account)].as_slice()));
-
-    // Make sure both accounts are in the same slot 0, which will prevent pubkey1
-    // from being cleaned up later even when it's a zero-lamport account
-    assert!(accounts.accounts_cache.load(0, &pubkey1).is_some());
-    assert!(accounts.accounts_cache.load(0, &pubkey2).is_some());
+    // Store both accounts in slot 0, which will prevent pubkey1 from being cleaned up later
+    // even when it's a zero-lamport account
+    accounts.store_for_tests((0, [(&pubkey1, &account), (&pubkey2, &account)].as_slice()));
 
     // Update account 1 in slot 1
     accounts.store_for_tests((1, [(&pubkey1, &account)].as_slice()));
@@ -6523,15 +6518,8 @@ fn test_new_zero_lamport_accounts_skipped() {
         BankId::new(slot),
         &ancestors,
     );
-    assert_eq!(
-        accounts_db
-            .accounts_cache
-            .load(slot, &pubkey2)
-            .unwrap()
-            .account
-            .lamports(),
-        0
-    );
+    let (loaded_account, _slot) = accounts_db.do_load_for_tests(&ancestors, &pubkey2).unwrap();
+    assert_eq!(loaded_account.lamports(), 0);
 
     // 4. Flush the slot (write cache -> storage). pubkey1 (only ever written as zero) and pubkey2
     //    (last written as zero in step 3) are absent; only pubkey3 is in the index.
