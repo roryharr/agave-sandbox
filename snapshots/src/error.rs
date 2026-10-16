@@ -254,6 +254,9 @@ pub enum ArchiveSnapshotPackageError {
     #[error("failed to archive account storage file '{1}': {0}")]
     ArchiveAccountStorageFile(#[source] io::Error, PathBuf),
 
+    #[error("failed to archive cached root {1}: {0}")]
+    ArchiveCachedRoot(#[source] io::Error, Slot),
+
     #[error("failed to archive snapshot: {0}")]
     FinishArchive(#[source] io::Error),
 

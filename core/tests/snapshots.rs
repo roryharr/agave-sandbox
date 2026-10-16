@@ -828,6 +828,7 @@ fn test_fastboot_snapshots_teardown(exit_backpressure: bool) {
                 SnapshotKind::Fastboot,
                 &bank,
                 bank.get_snapshot_storages(None),
+                Vec::new(),
                 bank.status_cache.read().unwrap().root_slot_deltas(),
             );
             pending_snapshot_packages

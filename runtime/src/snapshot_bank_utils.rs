@@ -718,6 +718,7 @@ pub fn bank_to_full_snapshot_archive(
         SnapshotKind::Archive(snapshot_archive_kind),
         bank,
         bank.get_snapshot_storages(None),
+        Vec::new(),
         bank.status_cache.read().unwrap().root_slot_deltas(),
     );
 
@@ -743,6 +744,7 @@ pub fn bank_to_full_snapshot_archive(
         snapshot_package.hash,
         bank_snapshot_info.snapshot_dir,
         snapshot_storages,
+        snapshot_package.cached_roots,
         &snapshot_config,
         &io_setup,
     )?;
@@ -783,6 +785,7 @@ pub fn bank_to_incremental_snapshot_archive(
         SnapshotKind::Archive(snapshot_archive_kind),
         bank,
         bank.get_snapshot_storages(Some(full_snapshot_slot)),
+        Vec::new(),
         bank.status_cache.read().unwrap().root_slot_deltas(),
     );
 
@@ -817,6 +820,7 @@ pub fn bank_to_incremental_snapshot_archive(
         snapshot_package.hash,
         bank_snapshot_info.snapshot_dir,
         snapshot_storages,
+        snapshot_package.cached_roots,
         &snapshot_config,
         &io_setup,
     )?;

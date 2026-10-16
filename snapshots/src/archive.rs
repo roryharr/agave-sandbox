@@ -14,8 +14,8 @@ use {
         account_storage::AccountStoragesOrderer,
         account_storage_entry::AccountStorageEntry,
         account_storage_reader::{
-            ACCOUNT_STORAGE_MAX_BUFFER_SIZE, AccountStorageReader, TombstonesFilter,
-            open_storage_files, storage_file_buf_reader,
+            ACCOUNT_STORAGE_MAX_BUFFER_SIZE, AccountStorageReader, SnapshotCachedRoot,
+            TombstonesFilter, open_storage_files, storage_file_buf_reader,
         },
         accounts_file::AccountsFile,
     },
@@ -52,6 +52,7 @@ pub fn archive_snapshot(
     snapshot_slot: Slot,
     snapshot_hash: SnapshotHash,
     snapshot_storages: &[Arc<AccountStorageEntry>],
+    cached_roots: &[SnapshotCachedRoot],
     bank_snapshot_dir: impl AsRef<Path>,
     archive_path: impl AsRef<Path>,
     archive_format: ArchiveFormat,
@@ -223,6 +224,24 @@ pub fn archive_snapshot(
                 buf_reader = chunk_reader
                     .rebind()
                     .map_err(E::StorageFileBufReaderError)?;
+            }
+
+            // Roots still in the write cache are archived straight from the cache, in the same
+            // format as the storage files above.
+            for cached_root in cached_roots {
+                let slot = cached_root.slot();
+                let path_in_archive =
+                    Path::new(ACCOUNTS_DIR).join(AccountsFile::file_name(slot, cached_root.id()));
+                let mut header = tar::Header::new_gnu();
+                header
+                    .set_path(path_in_archive)
+                    .map_err(|err| E::ArchiveCachedRoot(err, slot))?;
+                header.set_size(cached_root.len_for_archive() as u64);
+                header.set_cksum();
+                append_entry(archive.get_mut(), &header, |output| {
+                    cached_root.write_to(output)
+                })
+                .map_err(|err| E::ArchiveCachedRoot(err, slot))?;
             }
 
             archive.into_inner().map_err(E::FinishArchive)?;

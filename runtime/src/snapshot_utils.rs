@@ -41,6 +41,7 @@ use {
     solana_accounts_db::{
         account_storage::AccountStorageMap,
         account_storage_entry::AccountStorageEntry,
+        account_storage_reader::SnapshotCachedRoot,
         accounts_db::{AccountsFileId, AtomicAccountsFileId},
         utils::{ACCOUNTS_SNAPSHOT_DIR, move_and_async_delete_path},
     },
@@ -431,6 +432,7 @@ pub fn archive_snapshot_package(
     snapshot_hash: SnapshotHash,
     bank_snapshot_dir: impl AsRef<Path>,
     mut snapshot_storages: Vec<Arc<AccountStorageEntry>>,
+    mut cached_roots: Vec<SnapshotCachedRoot>,
     snapshot_config: &SnapshotConfig,
     io_setup: &IoSetupState,
 ) -> Result<SnapshotArchiveInfo> {
@@ -445,6 +447,7 @@ pub fn archive_snapshot_package(
             // After the snapshot has been serialized, it is now safe (and required) to prune all
             // the storages that are *not* to be archived for this incremental snapshot.
             snapshot_storages.retain(|storage| storage.slot() > incremental_snapshot_base_slot);
+            cached_roots.retain(|cached_root| cached_root.slot() > incremental_snapshot_base_slot);
             snapshot_paths::build_incremental_snapshot_archive_path(
                 &snapshot_config.incremental_snapshot_archives_dir,
                 incremental_snapshot_base_slot,
@@ -460,6 +463,7 @@ pub fn archive_snapshot_package(
         snapshot_slot,
         snapshot_hash,
         snapshot_storages.as_slice(),
+        cached_roots.as_slice(),
         &bank_snapshot_dir,
         snapshot_archive_path,
         snapshot_config.archive_format,

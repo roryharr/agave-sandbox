@@ -1,19 +1,25 @@
 use {
     crate::{
         account_info::Offset,
+        account_storage::stored_account_info::StoredAccountInfo,
         account_storage_entry::AccountStorageEntry,
-        accounts_file::OpenFileForBulkRead,
+        accounts_cache::SlotCache,
+        accounts_db::AccountsFileId,
+        accounts_file::{AccountsFileProvider, OpenFileForBulkRead},
         append_vec::{AppendVec, AppendVecAccountWriter},
     },
     agave_fs::{
         buffered_reader::{self, BufReaderWithOverflow, RequiredLenBufFileRead},
         io_setup::IoSetupState,
     },
+    solana_account::ReadableAccount,
     solana_clock::Slot,
     solana_system_interface::MAX_PERMITTED_DATA_LENGTH,
     std::{
         cmp,
         io::{self, Write},
+        path::PathBuf,
+        sync::Arc,
     },
 };
 
@@ -203,6 +209,97 @@ impl<'s, 'r, R: RequiredLenBufFileRead<'s>> AccountStorageReader<'s, 'r, R> {
             ));
         }
         Ok(())
+    }
+}
+
+/// A root that is still in the write cache, held by a snapshot so the root does not have to be
+/// flushed first. It is archived straight from the cache, and is only written to a storage file
+/// when a bank snapshot is finalized for fastboot.
+#[derive(Debug, Clone)]
+pub struct SnapshotCachedRoot {
+    slot: Slot,
+    id: AccountsFileId,
+    slot_cache: Arc<SlotCache>,
+    /// The accounts path to write this root's storage file into
+    path: PathBuf,
+    accounts_file_provider: AccountsFileProvider,
+}
+
+impl SnapshotCachedRoot {
+    pub(crate) fn new(
+        slot: Slot,
+        id: AccountsFileId,
+        slot_cache: Arc<SlotCache>,
+        path: PathBuf,
+        accounts_file_provider: AccountsFileProvider,
+    ) -> Self {
+        Self {
+            slot,
+            id,
+            slot_cache,
+            path,
+            accounts_file_provider,
+        }
+    }
+
+    pub fn slot(&self) -> Slot {
+        self.slot
+    }
+
+    /// The id of this root's storage file, in the archive and in the bank snapshot.
+    pub fn id(&self) -> AccountsFileId {
+        self.id
+    }
+
+    /// Returns the number of bytes required to archive this root, in the AppendVec format.
+    pub fn len_for_archive(&self) -> usize {
+        self.slot_cache
+            .iter()
+            .map(|entry| AppendVec::calculate_stored_size(entry.value().account.data().len()))
+            .sum()
+    }
+
+    /// Writes the cached accounts as AppendVec archive records.
+    pub fn write_to(&self, output: impl Write) -> io::Result<()> {
+        let mut account_writer = AppendVecAccountWriter::new(output);
+        for entry in self.slot_cache.iter() {
+            let account = &entry.value().account;
+            account_writer.write_account(&StoredAccountInfo {
+                pubkey: entry.key(),
+                lamports: account.lamports(),
+                owner: account.owner(),
+                data: account.data(),
+                executable: account.executable(),
+                rent_epoch: account.rent_epoch(),
+            })?;
+        }
+        Ok(())
+    }
+
+    /// Writes the cached accounts into a new storage file, for a bank snapshot that fastboot will
+    /// load. The storage is not added to the accounts db's storages or index.
+    pub fn write_to_storage(&self) -> Arc<AccountStorageEntry> {
+        let storage = AccountStorageEntry::new(
+            &self.path,
+            self.slot,
+            self.id,
+            self.len_for_archive() as u64,
+            self.accounts_file_provider,
+        );
+        let iter_items: Vec<_> = self.slot_cache.iter().collect();
+        let accounts: Vec<_> = iter_items
+            .iter()
+            .map(|iter_item| (iter_item.key(), &iter_item.value().account))
+            .collect();
+        storage
+            .write_accounts(&(self.slot, &accounts[..]))
+            .unwrap_or_else(|err| {
+                panic!(
+                    "failed to write cached root to storage! slot: {}, id: {}, error: {err}",
+                    self.slot, self.id,
+                )
+            });
+        Arc::new(storage)
     }
 }
 
