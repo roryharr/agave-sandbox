@@ -36,7 +36,9 @@ use {
             stored_account_info::{StoredAccountInfo, StoredAccountInfoWithoutData},
         },
         account_storage_entry::AccountStorageEntry,
-        account_storage_reader::{ACCOUNT_STORAGE_MAX_BUFFER_SIZE, storage_file_buf_reader},
+        account_storage_reader::{
+            ACCOUNT_STORAGE_MAX_BUFFER_SIZE, SnapshotCachedRoot, storage_file_buf_reader,
+        },
         accounts_cache::{AccountsCache, CachedAccount, SlotCache},
         accounts_db::stats::{
             AccountsStats, CleanAccountsStats, FlushStats, LoadAccountsStats,
@@ -1029,7 +1031,7 @@ impl AccountsDb {
         self.accounts_update_notifier.is_some()
     }
 
-    fn next_id(&self) -> AccountsFileId {
+    pub fn next_id(&self) -> AccountsFileId {
         let next_id = self.next_id.fetch_add(1, Ordering::AcqRel);
         assert!(
             next_id != AccountsFileId::MAX,
@@ -3124,6 +3126,27 @@ impl AccountsDb {
             size,
             self.accounts_file_provider,
         )
+    }
+
+    /// Returns the unflushed roots up to and including `max_root`, for a snapshot to hold instead
+    /// of flushing them. Each gets a new storage id for its file in the snapshot.
+    pub fn cached_roots_for_snapshot(&self, max_root: Slot) -> Vec<SnapshotCachedRoot> {
+        self.accounts_cache
+            .roots_to_flush(Some(max_root))
+            .into_iter()
+            .filter_map(|slot| {
+                self.accounts_cache.slot_cache(slot).map(|slot_cache| {
+                    let path_index = rng().random_range(0..self.paths.len());
+                    SnapshotCachedRoot::new(
+                        slot,
+                        self.next_id(),
+                        slot_cache,
+                        self.paths[path_index].clone(),
+                        self.accounts_file_provider,
+                    )
+                })
+            })
+            .collect()
     }
 
     pub fn enable_bank_drop_callback(&self) {

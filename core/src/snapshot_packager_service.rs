@@ -6,7 +6,9 @@ use {
         snapshot_hash::StartingSnapshotHashes,
     },
     snapshot_gossip_manager::SnapshotGossipManager,
-    solana_accounts_db::account_storage_entry::AccountStorageEntry,
+    solana_accounts_db::{
+        account_storage_entry::AccountStorageEntry, account_storage_reader::SnapshotCachedRoot,
+    },
     solana_clock::Slot,
     solana_gossip::cluster_info::ClusterInfo,
     solana_measure::{meas_dur, measure::Measure, measure_us},
@@ -19,6 +21,7 @@ use {
         snapshot_utils,
     },
     std::{
+        mem,
         sync::{
             Arc, Mutex,
             atomic::{AtomicBool, Ordering},
@@ -72,7 +75,7 @@ impl SnapshotPackagerService {
                         break;
                     }
 
-                    let Some(snapshot_package) =
+                    let Some(mut snapshot_package) =
                         Self::get_next_snapshot_package(&pending_snapshot_packages)
                     else {
                         std::thread::sleep(Self::LOOP_LIMITER);
@@ -88,6 +91,18 @@ impl SnapshotPackagerService {
 
                     snapshot_controller.set_latest_bank_snapshot_slot(snapshot_slot);
 
+                    if exit_backpressure.is_none() {
+                        // Without exit backpressure, every bank snapshot is finalized for
+                        // fastboot, which loads each root from a storage file. So write the
+                        // cached roots to storage files now, and archive those instead.
+                        let cached_roots = mem::take(&mut snapshot_package.cached_roots);
+                        snapshot_package.snapshot_storages.extend(
+                            cached_roots
+                                .iter()
+                                .map(SnapshotCachedRoot::write_to_storage),
+                        );
+                    }
+
                     if exit_backpressure.is_some() {
                         // With exit backpressure, we will delay flushing snapshot storages
                         // until we receive a graceful exit request.
@@ -98,6 +113,7 @@ impl SnapshotPackagerService {
                             teardown_state = Some(TeardownState {
                                 snapshot_slot: snapshot_package.slot,
                                 snapshot_storages: snapshot_package.snapshot_storages.clone(),
+                                cached_roots: snapshot_package.cached_roots.clone(),
                                 startup_hints: snapshot_package.startup_hints.clone(),
                                 bank_snapshot_package: Some(snapshot_package.bank_snapshot_package),
                             });
@@ -114,6 +130,7 @@ impl SnapshotPackagerService {
                             teardown_state = Some(TeardownState {
                                 snapshot_slot: snapshot_package.slot,
                                 snapshot_storages: snapshot_package.snapshot_storages.clone(),
+                                cached_roots: snapshot_package.cached_roots.clone(),
                                 startup_hints: snapshot_package.startup_hints.clone(),
                                 bank_snapshot_package: None,
                             });
@@ -162,6 +179,7 @@ impl SnapshotPackagerService {
                             snapshot_hash,
                             &bank_snapshot_info.snapshot_dir,
                             snapshot_package.snapshot_storages,
+                            snapshot_package.cached_roots,
                             snapshot_config,
                             &io_setup,
                         ) {
@@ -239,7 +257,8 @@ impl SnapshotPackagerService {
     fn teardown(state: TeardownState, snapshot_config: &SnapshotConfig) {
         let TeardownState {
             snapshot_slot,
-            snapshot_storages,
+            mut snapshot_storages,
+            cached_roots,
             bank_snapshot_package,
             startup_hints,
         } = state;
@@ -278,6 +297,18 @@ impl SnapshotPackagerService {
             }
             info!("Serializing bank snapshot... Done in {:?}", start.elapsed());
         }
+
+        info!("Writing cached roots to storage files...");
+        let start = Instant::now();
+        snapshot_storages.extend(
+            cached_roots
+                .iter()
+                .map(SnapshotCachedRoot::write_to_storage),
+        );
+        info!(
+            "Writing cached roots to storage files... Done in {:?}",
+            start.elapsed(),
+        );
 
         info!("Flushing account storages...");
         let start = Instant::now();
@@ -368,6 +399,9 @@ struct TeardownState {
     snapshot_slot: Slot,
     /// The storages of the latest snapshot
     snapshot_storages: Vec<Arc<AccountStorageEntry>>,
+    /// The roots of the latest snapshot that were still in the write cache, written to storage
+    /// files at teardown
+    cached_roots: Vec<SnapshotCachedRoot>,
     /// For fastboot snapshots archiving is not required so serialization of the bank snapshot
     /// can be deferred until teardown. In this case `bank_snapshot_package` will be `Some` and
     /// during teardown the bank snapshot will be serialized to storage. For other snapshot types

@@ -245,27 +245,6 @@ impl SnapshotRequestHandler {
                 .set_latest_full_snapshot_slot(snapshot_root_bank.slot());
         }
 
-        let mut flush_accounts_cache_time = Measure::start("flush_accounts_cache_time");
-        // Forced cache flushing MUST flush all roots <= snapshot_root_bank.slot().
-        // That's because `snapshot_root_bank.slot()` must be root at this point,
-        // and contains relevant updates because each bank has at least 1 account update due
-        // to sysvar maintenance. Otherwise, this would cause missing storages in the snapshot
-        snapshot_root_bank.force_flush_accounts_cache();
-        // Ensure all roots <= `self.slot()` have been flushed.
-        // Note `max_flush_root` could be larger than self.slot() if there are
-        // `> MAX_CACHE_SLOT` cached and rooted slots which triggered earlier flushes.
-        assert!(
-            snapshot_root_bank.slot()
-                <= snapshot_root_bank
-                    .rc
-                    .accounts
-                    .accounts_db
-                    .accounts_cache
-                    .fetch_max_flush_root()
-                    .expect("Roots have been flushed")
-        );
-        flush_accounts_cache_time.stop();
-
         let mut clean_time = Measure::start("clean_time");
         snapshot_root_bank.clean_accounts();
         clean_time.stop();
@@ -278,10 +257,19 @@ impl SnapshotRequestHandler {
 
         // Snapshot the bank and send over a snapshot package
         let mut snapshot_time = Measure::start("snapshot_time");
+        // Hold the roots <= `snapshot_root_bank.slot()` that are still in the write cache instead
+        // of flushing them. ABS is the only thread that flushes, so every such root is either
+        // held here or already in the storages below.
+        let cached_roots = snapshot_root_bank
+            .rc
+            .accounts
+            .accounts_db
+            .cached_roots_for_snapshot(snapshot_root_bank.slot());
         let snapshot_package = SnapshotPackage::new(
             snapshot_kind,
             &snapshot_root_bank,
             snapshot_root_bank.get_snapshot_storages(None),
+            cached_roots,
             status_cache_slot_deltas,
         );
         self.pending_snapshot_packages
@@ -300,11 +288,6 @@ impl SnapshotRequestHandler {
 
         datapoint_info!(
             "handle_snapshot_requests-timing",
-            (
-                "flush_accounts_cache_time",
-                flush_accounts_cache_time.as_us(),
-                i64
-            ),
             ("shrink_time", shrink_time.as_us(), i64),
             ("clean_time", clean_time.as_us(), i64),
             ("snapshot_time", snapshot_time.as_us(), i64),

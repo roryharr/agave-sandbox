@@ -6,7 +6,9 @@ use {
         serde_snapshot::StartupHints,
     },
     agave_snapshots::{SnapshotArchiveKind, SnapshotKind, snapshot_hash::SnapshotHash},
-    solana_accounts_db::account_storage_entry::AccountStorageEntry,
+    solana_accounts_db::{
+        account_storage_entry::AccountStorageEntry, account_storage_reader::SnapshotCachedRoot,
+    },
     solana_clock::Slot,
     std::{sync::Arc, time::Instant},
 };
@@ -20,6 +22,8 @@ pub struct SnapshotPackage {
     pub slot: Slot,
     pub hash: SnapshotHash,
     pub snapshot_storages: Vec<Arc<AccountStorageEntry>>,
+    /// Roots still in the write cache, held instead of flushing them into `snapshot_storages`
+    pub cached_roots: Vec<SnapshotCachedRoot>,
     pub bank_snapshot_package: BankSnapshotPackage,
     pub startup_hints: StartupHints,
 
@@ -33,6 +37,7 @@ impl SnapshotPackage {
         snapshot_kind: SnapshotKind,
         bank: &Bank,
         snapshot_storages: Vec<Arc<AccountStorageEntry>>,
+        cached_roots: Vec<SnapshotCachedRoot>,
         status_cache_slot_deltas: Vec<BankSlotDelta>,
     ) -> Self {
         let slot = bank.slot();
@@ -62,6 +67,7 @@ impl SnapshotPackage {
             bank_snapshot_package,
             startup_hints: StartupHints::new_from_bank(bank),
             snapshot_storages,
+            cached_roots,
             enqueued: Instant::now(),
         }
     }
@@ -83,6 +89,7 @@ impl SnapshotPackage {
             slot: Slot::default(),
             hash: SnapshotHash(Hash::default()),
             snapshot_storages: Vec::default(),
+            cached_roots: Vec::default(),
             bank_snapshot_package,
             startup_hints: StartupHints::default(),
             enqueued: Instant::now(),
