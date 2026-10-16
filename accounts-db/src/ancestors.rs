@@ -63,6 +63,13 @@ impl Ancestors {
             .is_ok()
     }
 
+    /// Is `bank_id`, at `slot`, one of these ancestors?
+    pub fn contains_bank(&self, slot: Slot, bank_id: BankId) -> bool {
+        self.ancestors
+            .binary_search_by_key(&slot, |(slot, _bank_id)| *slot)
+            .is_ok_and(|index| self.ancestors[index].1 == bank_id)
+    }
+
     pub fn len(&self) -> usize {
         self.ancestors.len()
     }
