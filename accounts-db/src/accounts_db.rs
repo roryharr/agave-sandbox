@@ -37,7 +37,7 @@ use {
         },
         account_storage_entry::AccountStorageEntry,
         account_storage_reader::{ACCOUNT_STORAGE_MAX_BUFFER_SIZE, storage_file_buf_reader},
-        accounts_cache::{AccountsCache, CachedAccount, SlotCache},
+        accounts_cache::{AccountsCache, CachedAccount, CachedLoad, SlotCache},
         accounts_db::stats::{
             AccountsStats, CleanAccountsStats, FlushStats, LoadAccountsStats,
             ObsoleteAccountsStats, PurgeStats, ShrinkAncientStats, ShrinkStats, ShrinkStatsSub,
@@ -771,7 +771,7 @@ pub struct AccountsDb {
 
     write_cache_limit_bytes: Option<u64>,
 
-    read_only_accounts_cache: ReadOnlyAccountsCache,
+    read_only_accounts_cache: Arc<ReadOnlyAccountsCache>,
 
     /// distribute the accounts across storage lists
     pub next_id: AtomicAccountsFileId,
@@ -952,6 +952,16 @@ impl AccountsDb {
             .build()
             .expect("new rayon threadpool");
 
+        // The read cache's pubkey map doubles as the write cache's index, so both caches
+        // share it and one probe in `do_load` covers both.
+        let read_only_accounts_cache = Arc::new(ReadOnlyAccountsCache::new(
+            read_cache_size.0,
+            read_cache_size.1,
+            read_cache_evict_sample_size,
+            read_cache_num_shards,
+        ));
+        let accounts_cache = AccountsCache::new(Arc::clone(&read_only_accounts_cache));
+
         let new = Self {
             accounts_index,
             paths,
@@ -971,12 +981,7 @@ impl AccountsDb {
             account_indexes: accounts_db_config.account_indexes.unwrap_or_default(),
             shrink_ratio: accounts_db_config.shrink_ratio,
             accounts_update_notifier,
-            read_only_accounts_cache: ReadOnlyAccountsCache::new(
-                read_cache_size.0,
-                read_cache_size.1,
-                read_cache_evict_sample_size,
-                read_cache_num_shards,
-            ),
+            read_only_accounts_cache,
             write_cache_limit_bytes: accounts_db_config.write_cache_limit_bytes,
             partitioned_epoch_rewards_config: accounts_db_config.partitioned_epoch_rewards_config,
             verify_index: accounts_db_config.verify_index,
@@ -984,7 +989,7 @@ impl AccountsDb {
             thread_pool_background,
             active_stats: ActiveStats::default(),
             storage: AccountStorage::default(),
-            accounts_cache: AccountsCache::default(),
+            accounts_cache,
             uncleaned_pubkeys: DashMap::default(),
             pubkeys_removed_from_cache: Mutex::default(),
             next_id: AtomicAccountsFileId::new(0),
@@ -3009,34 +3014,22 @@ impl AccountsDb {
     ) -> Option<(AccountSharedData, Slot)> {
         let starting_max_root = self.max_root();
 
-        // Check the write cache first; a hit is the freshest version visible on this fork
-        if let Some((cached_account, cached_slot)) =
-            self.accounts_cache.load_latest(pubkey, ancestors)
-        {
-            self.load_account_stats
-                .num_loaded_from_write_cache
-                .fetch_add(1, Ordering::Relaxed);
-
-            let account = &cached_account.account;
-            let should_load_account = load_filter.as_ref().is_none_or(|load_filter| {
-                load_filter(account.lamports(), account.owner(), account.data().len())
-            });
-
-            return should_load_account.then(|| (cached_account.account.clone(), cached_slot));
-        }
-
-        // Then the read cache. It holds one version per pubkey: loads store only the newest
-        // version in the index, and flushing a newer version drops the entry, so a hit is the
-        // newest version in storage; anything newer than that is still in the write cache,
-        // checked above. So the slot the account was cached at only has to be visible from
-        // `ancestors`, and the index is not consulted.
-        if let Some((account, slot)) = self
-            .read_only_accounts_cache
-            .load(pubkey, |slot| ancestors.is_ancestor(slot))
-        {
-            self.load_account_stats
-                .num_loaded_from_read_cache
-                .fetch_add(1, Ordering::Relaxed);
+        // One lookup covering the write cache and the read cache; a hit does not consult the index.
+        if let Some(cached_load) = self.accounts_cache.load_cached(pubkey, ancestors) {
+            let (account, slot) = match cached_load {
+                CachedLoad::WriteCache(cached_account, slot) => {
+                    self.load_account_stats
+                        .num_loaded_from_write_cache
+                        .fetch_add(1, Ordering::Relaxed);
+                    (cached_account.account.clone(), slot)
+                }
+                CachedLoad::ReadCache(account, slot) => {
+                    self.load_account_stats
+                        .num_loaded_from_read_cache
+                        .fetch_add(1, Ordering::Relaxed);
+                    (account, slot)
+                }
+            };
 
             let should_load_account = load_filter.as_ref().is_none_or(|load_filter| {
                 load_filter(account.lamports(), account.owner(), account.data().len())
