@@ -136,6 +136,19 @@ impl SlotCache {
         (item, is_new_key)
     }
 
+    /// Removes an account from this slot's cache
+    ///
+    /// Returns the removed account, or `None` if `pubkey` is not in this slot
+    fn remove(&self, pubkey: &Pubkey) -> Option<Arc<CachedAccount>> {
+        let (_, item) = self.cache.remove(pubkey)?;
+        let data_len = item.account.data().len() as u64;
+        self.size.fetch_sub(data_len, Ordering::Relaxed);
+        self.total_size.fetch_sub(data_len, Ordering::Relaxed);
+        self.accounts_count.fetch_sub(1, Ordering::Release);
+        self.total_accounts_count.fetch_sub(1, Ordering::Relaxed);
+        Some(item)
+    }
+
     fn get_cloned(&self, pubkey: &Pubkey) -> Option<Arc<CachedAccount>> {
         self.cache
             .get(pubkey)
@@ -232,6 +245,14 @@ impl AccountsCacheIndex {
     fn max_slot_for_pubkey(&self, pubkey: &Pubkey) -> Option<Slot> {
         self.entries.get(pubkey).map(|entry| entry.0)
     }
+}
+
+/// What a dedupe of the write cache's roots removed
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct DedupeStats {
+    pub num_accounts_removed: usize,
+    /// The size of the removed accounts' data, in bytes
+    pub num_bytes_removed: u64,
 }
 
 #[derive(Debug, Default)]
@@ -380,6 +401,50 @@ impl AccountsCache {
 
         // Found nothing, the version of the account in the cache must be on a different fork
         None
+    }
+
+    /// Removes older versions of accounts from `roots`, keeping each account's newest version
+    /// between consecutive `boundaries`. A version is never removed because of a newer version
+    /// above a boundary at or above it, so anything that only sees slots up to a boundary still
+    /// finds the same version.
+    pub fn dedupe_roots(&self, roots: &BTreeSet<Slot>, boundaries: &BTreeSet<Slot>) -> DedupeStats {
+        let mut stats = DedupeStats::default();
+        // The accounts with a version in a newer root between the same boundaries
+        let mut newer_pubkeys = ahash::HashSet::default();
+        let mut current_boundary = None;
+
+        // Iterate from newest root to oldest
+        for &root in roots.iter().rev() {
+            // The lowest boundary at or above a root separates it from newer roots
+            let boundary = boundaries.range(root..).next().copied();
+            if boundary != current_boundary {
+                newer_pubkeys.clear();
+                current_boundary = boundary;
+            }
+
+            let Some(slot_cache) = self.slot_cache(root) else {
+                continue;
+            };
+            // Collected first, since removing while iterating the dashmap would deadlock
+            let older_pubkeys: Vec<_> = slot_cache
+                .iter()
+                .map(|entry| *entry.key())
+                .filter(|pubkey| !newer_pubkeys.insert(*pubkey))
+                .collect();
+            for pubkey in &older_pubkeys {
+                let removed = slot_cache
+                    .remove(pubkey)
+                    .expect("only the dedupe removes accounts from a root");
+                stats.num_accounts_removed += 1;
+                stats.num_bytes_removed += removed.account.data().len() as u64;
+            }
+            let removed_from_index = self.index.remove(older_pubkeys);
+            debug_assert!(
+                removed_from_index.is_empty(),
+                "the newest version of each account stays in the cache",
+            );
+        }
+        stats
     }
 
     pub fn slot_cache(&self, slot: Slot) -> Option<Arc<SlotCache>> {
@@ -844,5 +909,72 @@ mod tests {
         // remove_slot drops slot 1 from both the cache and the tracked roots, leaving slot 2.
         let _ = cache.remove_slot(1);
         assert_eq!(*cache.unflushed_roots.read().unwrap(), BTreeSet::from([2]));
+    }
+
+    /// Stores `pubkey` with `data_len` bytes of data in each of `roots`, and roots them
+    fn store_in_roots(cache: &AccountsCache, pubkey: &Pubkey, roots: &[Slot], data_len: usize) {
+        for &root in roots {
+            cache.store(
+                root,
+                BankId::new(root),
+                pubkey,
+                AccountSharedData::new(root, data_len, &Pubkey::default()),
+            );
+            cache.add_root(root);
+        }
+    }
+
+    #[test]
+    fn test_dedupe_roots_keeps_newest_version() {
+        let cache = AccountsCache::default();
+        let pk = Pubkey::new_unique();
+        let other_pk = Pubkey::new_unique();
+        store_in_roots(&cache, &pk, &[1, 2, 3], 10);
+        store_in_roots(&cache, &other_pk, &[2], 10);
+
+        let stats = cache.dedupe_roots(&cache.roots_to_flush(None), &BTreeSet::new());
+        assert_eq!(
+            stats,
+            DedupeStats {
+                num_accounts_removed: 2,
+                num_bytes_removed: 20,
+            }
+        );
+        assert!(cache.load(1, &pk).is_none());
+        assert!(cache.load(2, &pk).is_none());
+        assert_eq!(cache.load(3, &pk).unwrap().account.lamports(), 3);
+        assert!(cache.load(2, &other_pk).is_some());
+        assert_eq!(cache.size(), 20);
+        assert_eq!(cache.slot_cache(2).unwrap().len(), 1);
+        assert_eq!(cache.index.entries.get(&pk).unwrap().1, 1);
+    }
+
+    #[test]
+    fn test_dedupe_roots_keeps_versions_across_boundaries() {
+        let cache = AccountsCache::default();
+        let pk = Pubkey::new_unique();
+        store_in_roots(&cache, &pk, &[1, 2, 3, 4], 0);
+
+        // A boundary at 2 keeps the newest version at or below 2, which is what a scan that
+        // sees up to 2 finds
+        let stats = cache.dedupe_roots(&cache.roots_to_flush(None), &BTreeSet::from([2]));
+        assert_eq!(stats.num_accounts_removed, 2);
+        assert!(cache.load(1, &pk).is_none());
+        assert!(cache.load(2, &pk).is_some());
+        assert!(cache.load(3, &pk).is_none());
+        assert!(cache.load(4, &pk).is_some());
+    }
+
+    #[test]
+    fn test_dedupe_roots_only_touches_given_roots() {
+        let cache = AccountsCache::default();
+        let pk = Pubkey::new_unique();
+        store_in_roots(&cache, &pk, &[1, 2, 3], 0);
+
+        let stats = cache.dedupe_roots(&BTreeSet::from([2, 3]), &BTreeSet::new());
+        assert_eq!(stats.num_accounts_removed, 1);
+        assert!(cache.load(1, &pk).is_some());
+        assert!(cache.load(2, &pk).is_none());
+        assert!(cache.load(3, &pk).is_some());
     }
 }

@@ -44,6 +44,7 @@ const MIN_LOOP_INTERVAL: Duration = Duration::from_millis(100);
 // 200 slots, which ends up being 50 seconds plus buffer.
 const CLEAN_INTERVAL: Duration = Duration::from_secs(60);
 const SHRINK_INTERVAL: Duration = Duration::from_secs(1);
+const DEDUPE_INTERVAL: Duration = Duration::from_secs(1);
 
 pub type SnapshotRequestSender = Sender<SnapshotRequest>;
 pub type SnapshotRequestReceiver = Receiver<SnapshotRequest>;
@@ -410,6 +411,7 @@ impl AccountsBackgroundService {
                     let mut last_snapshot_end_time = None;
                     let mut previous_clean_time = Instant::now();
                     let mut previous_shrink_time = Instant::now();
+                    let mut previous_dedupe_time = Instant::now();
 
                     let bank = bank_forks.read().unwrap().root_bank();
                     bank.rc.accounts.accounts_db.finish_startup();
@@ -534,6 +536,19 @@ impl AccountsBackgroundService {
                                 bank.shrink_candidate_slots();
                                 previous_shrink_time = Instant::now();
                             }
+                        }
+
+                        if previous_dedupe_time.elapsed() > DEDUPE_INTERVAL {
+                            // Don't dedupe past the next snapshot request slot, the same as clean
+                            let max_dedupe_root = request_handlers
+                                .snapshot_request_handler
+                                .peek_next_snapshot_request_slot()
+                                .map_or(bank.slot(), |slot| slot.min(bank.slot()));
+                            bank.rc
+                                .accounts
+                                .accounts_db
+                                .dedupe_accounts_cache(max_dedupe_root);
+                            previous_dedupe_time = Instant::now();
                         }
 
                         let loop_dur = start_time.elapsed();
