@@ -18,7 +18,7 @@ use {
     crossbeam_channel::{Receiver, SendError, Sender},
     log::*,
     solana_clock::Slot,
-    solana_measure::{measure::Measure, measure_us},
+    solana_measure::measure::Measure,
     stats::StatsManager,
     std::{
         boxed::Box,
@@ -245,16 +245,6 @@ impl SnapshotRequestHandler {
                 .set_latest_full_snapshot_slot(snapshot_root_bank.slot());
         }
 
-        let mut clean_time = Measure::start("clean_time");
-        snapshot_root_bank.clean_accounts();
-        clean_time.stop();
-
-        let (_, shrink_ancient_time_us) = measure_us!(snapshot_root_bank.shrink_ancient_slots());
-
-        let mut shrink_time = Measure::start("shrink_time");
-        snapshot_root_bank.shrink_candidate_slots();
-        shrink_time.stop();
-
         // Snapshot the bank and send over a snapshot package
         let mut snapshot_time = Measure::start("snapshot_time");
         // Hold the roots <= `snapshot_root_bank.slot()` that are still in the write cache instead
@@ -288,12 +278,9 @@ impl SnapshotRequestHandler {
 
         datapoint_info!(
             "handle_snapshot_requests-timing",
-            ("shrink_time", shrink_time.as_us(), i64),
-            ("clean_time", clean_time.as_us(), i64),
             ("snapshot_time", snapshot_time.as_us(), i64),
             ("total_us", total_time.as_us(), i64),
             ("non_snapshot_time_us", non_snapshot_time_us, i64),
-            ("shrink_ancient_time_us", shrink_ancient_time_us, i64),
         );
         Ok(snapshot_root_bank.slot())
     }
@@ -489,9 +476,6 @@ impl AccountsBackgroundService {
                                             .try_iter()
                                             .collect::<Vec<_>>(),
                                     );
-                                    last_cleaned_slot = snapshot_slot;
-                                    previous_clean_time = Instant::now();
-                                    previous_shrink_time = Instant::now();
                                 }
                                 Err(err) => {
                                     error!(
