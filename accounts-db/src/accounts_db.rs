@@ -538,7 +538,7 @@ pub enum PopulateReadCache {
 pub enum LoadedAccountAccessor {
     // StoredAccountInfo can't be held directly here due to its lifetime dependency on
     // AccountStorageEntry
-    Stored(Option<(Arc<AccountStorageEntry>, Offset)>),
+    Stored(Arc<AccountStorageEntry>, Offset),
 }
 
 impl LoadedAccountAccessor {
@@ -550,7 +550,7 @@ impl LoadedAccountAccessor {
         // ideal for representing this as rust type system....
 
         match self {
-            LoadedAccountAccessor::Stored(Some((maybe_storage_entry, offset))) => {
+            LoadedAccountAccessor::Stored(storage_entry, offset) => {
                 // If we do find the storage entry, we can guarantee that the storage entry is
                 // safe to read from because we grabbed a reference to the storage entry while it
                 // was still in the storage map. This means even if the storage entry is removed
@@ -561,7 +561,7 @@ impl LoadedAccountAccessor {
                 // This way we don't read the whole account (including its data)
                 // from disk, only to discard it later.
                 let should_load_account = load_filter.is_none_or(|load_filter| {
-                    maybe_storage_entry
+                    storage_entry
                         .accounts
                         .get_stored_account_without_data_callback(*offset, |account| {
                             load_filter(account.lamports, account.owner, account.data_len)
@@ -573,7 +573,7 @@ impl LoadedAccountAccessor {
                 });
 
                 should_load_account.then(|| {
-                    maybe_storage_entry
+                    storage_entry
                         .accounts
                         .get_account_shared_data(*offset)
                         .expect(
@@ -581,14 +581,6 @@ impl LoadedAccountAccessor {
                              been reset yet",
                         )
                 })
-            }
-
-            // It is safe ("""safe""") to skip consulting `load_filter` here because this
-            // branch immediately and invariably panics.
-            LoadedAccountAccessor::Stored(None) => {
-                let account = self
-                    .check_and_get_loaded_account(|loaded_account| loaded_account.take_account());
-                unreachable!("{account:?}");
             }
         }
     }
@@ -601,13 +593,7 @@ impl LoadedAccountAccessor {
         // ideal for representing this as rust type system....
 
         match self {
-            LoadedAccountAccessor::Stored(None) => {
-                panic!(
-                    "Should have already been taken care of when creating this \
-                     LoadedAccountAccessor"
-                );
-            }
-            LoadedAccountAccessor::Stored(Some(_maybe_storage_entry)) => {
+            LoadedAccountAccessor::Stored(..) => {
                 // If we do find the storage entry, we can guarantee that the storage entry is
                 // safe to read from because we grabbed a reference to the storage entry while it
                 // was still in the storage map. This means even if the storage entry is removed
@@ -626,29 +612,20 @@ impl LoadedAccountAccessor {
         mut callback: impl for<'local> FnMut(LoadedAccount<'local>) -> T,
     ) -> Option<T> {
         match self {
-            LoadedAccountAccessor::Stored(maybe_storage_entry) => {
-                // storage entry may not be present if slot was cleaned up in
-                // between reading the accounts index and calling this function to
-                // get account meta from the storage entry here
-                maybe_storage_entry
-                    .as_ref()
-                    .and_then(|(storage_entry, offset)| {
-                        storage_entry
-                            .accounts
-                            .get_stored_account_callback(*offset, |account| {
-                                callback(LoadedAccount::Stored(account))
-                            })
-                            .inspect_err(|err| {
-                                trace!(
-                                    "get_loaded_account() failed! storage slot: {}, id: {}, \
-                                     offset: {offset}, err: {err}",
-                                    storage_entry.slot(),
-                                    storage_entry.id(),
-                                );
-                            })
-                            .ok()
-                    })
-            }
+            LoadedAccountAccessor::Stored(storage_entry, offset) => storage_entry
+                .accounts
+                .get_stored_account_callback(*offset, |account| {
+                    callback(LoadedAccount::Stored(account))
+                })
+                .inspect_err(|err| {
+                    trace!(
+                        "get_loaded_account() failed! storage slot: {}, id: {}, offset: \
+                         {offset}, err: {err}",
+                        storage_entry.slot(),
+                        storage_entry.id(),
+                    );
+                })
+                .ok(),
         }
     }
 }
@@ -2780,8 +2757,6 @@ impl AccountsDb {
             return should_load_account.then_some((account, slot));
         }
 
-        // Get the storage under the index entry's lock: storages are removed only after the index
-        // stops referring to them, so it is present
         let (slot, mut account_accessor) = self.accounts_index.get_with_and_then(
             pubkey,
             ancestors,
@@ -2835,6 +2810,8 @@ impl AccountsDb {
         maybe_account.map(|account| (account, slot))
     }
 
+    /// Call under the index entry's lock: storages are removed only after the index stops
+    /// referring to them
     #[cfg_attr(test, qualifiers(pub(crate)))]
     fn get_account_accessor(
         &self,
@@ -2843,11 +2820,11 @@ impl AccountsDb {
     ) -> LoadedAccountAccessor {
         match storage_location {
             StorageLocation::AccountsFile(store_id, offset) => {
-                let maybe_storage_entry = self
+                let storage_entry = self
                     .storage
                     .get_account_storage_entry(slot, *store_id)
-                    .map(|account_storage_entry| (account_storage_entry, *offset));
-                LoadedAccountAccessor::Stored(maybe_storage_entry)
+                    .expect("storage must exist while the index refers to it");
+                LoadedAccountAccessor::Stored(storage_entry, *offset)
             }
         }
     }
@@ -5210,12 +5187,12 @@ impl AccountsDb {
                             // the info in 'max' is the most recent, current info for this pubkey
                             return;
                         }
-                        let maybe_storage_entry = self
+                        let storage_entry = self
                             .storage
-                            .get_account_storage_entry(*slot, account_info.store_id());
-                        let mut accessor = LoadedAccountAccessor::Stored(
-                            maybe_storage_entry.map(|entry| (entry, account_info.offset())),
-                        );
+                            .get_account_storage_entry(*slot, account_info.store_id())
+                            .expect("storage must exist while the index refers to it");
+                        let mut accessor =
+                            LoadedAccountAccessor::Stored(storage_entry, account_info.offset());
                         accessor.check_and_get_loaded_account(|loaded_account| {
                             let data_len = loaded_account.data_len();
                             let lamports = loaded_account.lamports();
