@@ -3583,7 +3583,6 @@ fn test_read_only_accounts_cache() {
         .load(
             &Ancestors::default(),
             &account_key,
-            LoadHint::FixedMaxRoot,
             PopulateReadCache::True,
             NO_LOAD_FILTER,
         )
@@ -3595,7 +3594,6 @@ fn test_read_only_accounts_cache() {
         .load(
             &Ancestors::default(),
             &account_key,
-            LoadHint::FixedMaxRoot,
             PopulateReadCache::True,
             NO_LOAD_FILTER,
         )
@@ -3609,7 +3607,6 @@ fn test_read_only_accounts_cache() {
         .load(
             &Ancestors::default(),
             &account_key,
-            LoadHint::FixedMaxRoot,
             PopulateReadCache::True,
             NO_LOAD_FILTER,
         )
@@ -3669,7 +3666,6 @@ fn test_load_with_read_only_accounts_cache() {
         .load(
             &Ancestors::default(),
             &account_key,
-            LoadHint::Unspecified,
             PopulateReadCache::False,
             NO_LOAD_FILTER,
         )
@@ -3682,7 +3678,6 @@ fn test_load_with_read_only_accounts_cache() {
         .load(
             &Ancestors::default(),
             &account_key,
-            LoadHint::Unspecified,
             PopulateReadCache::True,
             NO_LOAD_FILTER,
         )
@@ -3695,7 +3690,6 @@ fn test_load_with_read_only_accounts_cache() {
     let account = db.load(
         &Ancestors::default(),
         &account_key,
-        LoadHint::Unspecified,
         PopulateReadCache::False,
         NO_LOAD_FILTER,
     );
@@ -3707,7 +3701,6 @@ fn test_load_with_read_only_accounts_cache() {
     let account = db.load(
         &Ancestors::default(),
         &account_key,
-        LoadHint::Unspecified,
         PopulateReadCache::True,
         NO_LOAD_FILTER,
     );
@@ -3720,7 +3713,6 @@ fn test_load_with_read_only_accounts_cache() {
         .load(
             &Ancestors::default(),
             &account_key,
-            LoadHint::Unspecified,
             PopulateReadCache::False,
             NO_LOAD_FILTER,
         )
@@ -3735,7 +3727,6 @@ fn test_load_with_read_only_accounts_cache() {
         .load(
             &Ancestors::default(),
             &account_key,
-            LoadHint::Unspecified,
             PopulateReadCache::True,
             NO_LOAD_FILTER,
         )
@@ -3769,7 +3760,6 @@ fn test_load_filter_with_open_accounts() {
         db.load(
             ancestors,
             pubkey,
-            LoadHint::Unspecified,
             PopulateReadCache::True,
             Some(load_filter),
         )
@@ -3830,7 +3820,6 @@ fn test_load_filter_with_closed_accounts() {
             db.load(
                 &ancestors,
                 pubkey,
-                LoadHint::Unspecified,
                 PopulateReadCache::True,
                 Some(&always_load),
             )
@@ -3838,14 +3827,8 @@ fn test_load_filter_with_closed_accounts() {
         );
 
         assert!(
-            db.load(
-                &ancestors,
-                pubkey,
-                LoadHint::Unspecified,
-                PopulateReadCache::True,
-                NO_LOAD_FILTER,
-            )
-            .is_none()
+            db.load(&ancestors, pubkey, PopulateReadCache::True, NO_LOAD_FILTER,)
+                .is_none()
         );
     };
 
@@ -4010,12 +3993,10 @@ fn test_flush_cache_dont_clean_zero_lamport_account() {
 
     // The account itself is not in the index, so a load finds nothing. FixedMaxRoot is safe
     // since we are only using clean_accounts, with no out-of-band removals.
-    let load_hint = LoadHint::FixedMaxRoot;
     assert!(
         db.do_load(
             &Ancestors::default(),
             &zero_lamport_account_key,
-            load_hint,
             PopulateReadCache::True,
             NO_LOAD_FILTER,
         )
@@ -4995,19 +4976,12 @@ const RACY_SLEEP_MS: u64 = 10;
 const RACE_TIME: u64 = 5;
 
 fn start_load_thread(
-    with_retry: bool,
     ancestors: Ancestors,
     db: Arc<AccountsDb>,
     exit: Arc<AtomicBool>,
     pubkey: Arc<Pubkey>,
     expected_lamports: impl Fn(&(AccountSharedData, Slot)) -> u64 + Send + 'static,
 ) -> JoinHandle<()> {
-    let load_hint = if with_retry {
-        LoadHint::FixedMaxRoot
-    } else {
-        LoadHint::Unspecified
-    };
-
     std::thread::Builder::new()
         .name("account-do-load".to_string())
         .spawn(move || {
@@ -5017,13 +4991,7 @@ fn start_load_thread(
                 }
                 // Load should never be unable to find this key
                 let loaded_account = db
-                    .do_load(
-                        &ancestors,
-                        &pubkey,
-                        load_hint,
-                        PopulateReadCache::True,
-                        NO_LOAD_FILTER,
-                    )
+                    .do_load(&ancestors, &pubkey, PopulateReadCache::True, NO_LOAD_FILTER)
                     .unwrap();
                 // slot + 1 == account.lamports because of the account-cache-flush thread
                 assert_eq!(
@@ -5076,7 +5044,6 @@ fn test_load_account_and_cache_flush_race() {
     };
 
     let t_do_load = start_load_thread(
-        false,
         Ancestors::default(),
         db,
         exit.clone(),
@@ -5134,7 +5101,6 @@ fn test_load_during_batched_flush_returns_latest() {
     // The reader must always see slot 1's value; we check lamports == 2 to
     // catch stale reads of slot 0 (lamports == 1).
     let t_do_load = start_load_thread(
-        false,
         Ancestors::default(),
         db.clone(),
         exit.clone(),
@@ -5148,7 +5114,8 @@ fn test_load_during_batched_flush_returns_latest() {
     t_do_load.join().map_err(std::panic::resume_unwind).unwrap();
 }
 
-fn do_test_load_account_and_shrink_race(with_retry: bool) {
+#[test]
+fn test_load_account_and_shrink_race() {
     let db = AccountsDb::new_for_tests_with_config(Vec::new(), DEFAULT_ACCOUNTS_DB_CONFIG);
     let epoch_schedule = EpochSchedule::default();
     let db = Arc::new(db);
@@ -5184,29 +5151,14 @@ fn do_test_load_account_and_shrink_race(with_retry: bool) {
             .unwrap()
     };
 
-    let t_do_load = start_load_thread(
-        with_retry,
-        Ancestors::default(),
-        db,
-        exit.clone(),
-        pubkey,
-        move |_| lamports,
-    );
+    let t_do_load = start_load_thread(Ancestors::default(), db, exit.clone(), pubkey, move |_| {
+        lamports
+    });
 
     sleep(Duration::from_secs(RACE_TIME));
     exit.store(true, Ordering::Relaxed);
     t_shrink_accounts.join().unwrap();
     t_do_load.join().map_err(std::panic::resume_unwind).unwrap()
-}
-
-#[test]
-fn test_load_account_and_shrink_race_with_retry() {
-    do_test_load_account_and_shrink_race(true);
-}
-
-#[test]
-fn test_load_account_and_shrink_race_without_retry() {
-    do_test_load_account_and_shrink_race(false);
 }
 
 #[test]

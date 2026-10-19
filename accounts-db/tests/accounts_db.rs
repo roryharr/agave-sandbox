@@ -1,7 +1,7 @@
 use {
     solana_account::AccountSharedData,
     solana_accounts_db::{
-        accounts_db::{AccountsDb, LoadHint, PopulateReadCache},
+        accounts_db::{AccountsDb, PopulateReadCache},
         ancestors::Ancestors,
         bank_id::BankId,
     },
@@ -84,7 +84,6 @@ fn test_load_after_remove_unrooted_and_restore_to_same_slot() {
                     let _ = db.load(
                         &ancestors,
                         &pubkey,
-                        LoadHint::FixedMaxRoot,
                         PopulateReadCache::False,
                         None::<fn(_, &_, _) -> _>,
                     );
