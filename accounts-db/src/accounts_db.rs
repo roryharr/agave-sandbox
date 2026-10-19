@@ -535,10 +535,11 @@ pub enum PopulateReadCache {
 }
 
 #[derive(Debug)]
-pub enum LoadedAccountAccessor {
+pub struct LoadedAccountAccessor {
     // StoredAccountInfo can't be held directly here due to its lifetime dependency on
     // AccountStorageEntry
-    Stored(Arc<AccountStorageEntry>, Offset),
+    storage_entry: Arc<AccountStorageEntry>,
+    offset: Offset,
 }
 
 impl LoadedAccountAccessor {
@@ -549,40 +550,36 @@ impl LoadedAccountAccessor {
         // all of these following .expect() and .unwrap() are like serious logic errors,
         // ideal for representing this as rust type system....
 
-        match self {
-            LoadedAccountAccessor::Stored(storage_entry, offset) => {
-                // If we do find the storage entry, we can guarantee that the storage entry is
-                // safe to read from because we grabbed a reference to the storage entry while it
-                // was still in the storage map. This means even if the storage entry is removed
-                // from the storage map after we grabbed the storage entry, the recycler should not
-                // reset the storage entry until we drop the reference to the storage entry.
+        // If we do find the storage entry, we can guarantee that the storage entry is
+        // safe to read from because we grabbed a reference to the storage entry while it
+        // was still in the storage map. This means even if the storage entry is removed
+        // from the storage map after we grabbed the storage entry, the recycler should not
+        // reset the storage entry until we drop the reference to the storage entry.
 
-                // If there's a load filter, read only the account metadata first.
-                // This way we don't read the whole account (including its data)
-                // from disk, only to discard it later.
-                let should_load_account = load_filter.is_none_or(|load_filter| {
-                    storage_entry
-                        .accounts
-                        .get_stored_account_without_data_callback(*offset, |account| {
-                            load_filter(account.lamports, account.owner, account.data_len)
-                        })
-                        .expect(
-                            "If a storage entry was found in the storage map, it must not have \
-                             been reset yet",
-                        )
-                });
-
-                should_load_account.then(|| {
-                    storage_entry
-                        .accounts
-                        .get_account_shared_data(*offset)
-                        .expect(
-                            "If a storage entry was found in the storage map, it must not have \
-                             been reset yet",
-                        )
+        // If there's a load filter, read only the account metadata first.
+        // This way we don't read the whole account (including its data)
+        // from disk, only to discard it later.
+        let should_load_account = load_filter.is_none_or(|load_filter| {
+            self.storage_entry
+                .accounts
+                .get_stored_account_without_data_callback(self.offset, |account| {
+                    load_filter(account.lamports, account.owner, account.data_len)
                 })
-            }
-        }
+                .expect(
+                    "If a storage entry was found in the storage map, it must not have been reset \
+                     yet",
+                )
+        });
+
+        should_load_account.then(|| {
+            self.storage_entry
+                .accounts
+                .get_account_shared_data(self.offset)
+                .expect(
+                    "If a storage entry was found in the storage map, it must not have been reset \
+                     yet",
+                )
+        })
     }
 
     fn check_and_get_loaded_account<T>(
@@ -592,41 +589,33 @@ impl LoadedAccountAccessor {
         // all of these following .expect() and .unwrap() are like serious logic errors,
         // ideal for representing this as rust type system....
 
-        match self {
-            LoadedAccountAccessor::Stored(..) => {
-                // If we do find the storage entry, we can guarantee that the storage entry is
-                // safe to read from because we grabbed a reference to the storage entry while it
-                // was still in the storage map. This means even if the storage entry is removed
-                // from the storage map after we grabbed the storage entry, the recycler should not
-                // reset the storage entry until we drop the reference to the storage entry.
-                self.get_loaded_account(callback).expect(
-                    "If a storage entry was found in the storage map, it must not have been reset \
-                     yet",
-                )
-            }
-        }
+        // If we do find the storage entry, we can guarantee that the storage entry is
+        // safe to read from because we grabbed a reference to the storage entry while it
+        // was still in the storage map. This means even if the storage entry is removed
+        // from the storage map after we grabbed the storage entry, the recycler should not
+        // reset the storage entry until we drop the reference to the storage entry.
+        self.get_loaded_account(callback).expect(
+            "If a storage entry was found in the storage map, it must not have been reset yet",
+        )
     }
 
     fn get_loaded_account<T>(
         &mut self,
         mut callback: impl for<'local> FnMut(LoadedAccount<'local>) -> T,
     ) -> Option<T> {
-        match self {
-            LoadedAccountAccessor::Stored(storage_entry, offset) => storage_entry
-                .accounts
-                .get_stored_account_callback(*offset, |account| {
-                    callback(LoadedAccount::Stored(account))
-                })
-                .inspect_err(|err| {
-                    trace!(
-                        "get_loaded_account() failed! storage slot: {}, id: {}, offset: \
-                         {offset}, err: {err}",
-                        storage_entry.slot(),
-                        storage_entry.id(),
-                    );
-                })
-                .ok(),
-        }
+        let offset = self.offset;
+        self.storage_entry
+            .accounts
+            .get_stored_account_callback(offset, |account| callback(LoadedAccount::Stored(account)))
+            .inspect_err(|err| {
+                trace!(
+                    "get_loaded_account() failed! storage slot: {}, id: {}, offset: {offset}, \
+                     err: {err}",
+                    self.storage_entry.slot(),
+                    self.storage_entry.id(),
+                );
+            })
+            .ok()
     }
 }
 
@@ -2824,7 +2813,10 @@ impl AccountsDb {
                     .storage
                     .get_account_storage_entry(slot, *store_id)
                     .expect("storage must exist while the index refers to it");
-                LoadedAccountAccessor::Stored(storage_entry, *offset)
+                LoadedAccountAccessor {
+                    storage_entry,
+                    offset: *offset,
+                }
             }
         }
     }
@@ -5191,8 +5183,10 @@ impl AccountsDb {
                             .storage
                             .get_account_storage_entry(*slot, account_info.store_id())
                             .expect("storage must exist while the index refers to it");
-                        let mut accessor =
-                            LoadedAccountAccessor::Stored(storage_entry, account_info.offset());
+                        let mut accessor = LoadedAccountAccessor {
+                            storage_entry,
+                            offset: account_info.offset(),
+                        };
                         accessor.check_and_get_loaded_account(|loaded_account| {
                             let data_len = loaded_account.data_len();
                             let lamports = loaded_account.lamports();
