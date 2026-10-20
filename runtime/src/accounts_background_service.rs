@@ -175,8 +175,8 @@ impl SnapshotRequestHandler {
     /// highest priority one.  Unhandled snapshot requests with slots GREATER-THAN the handled one
     /// will be re-enqueued.  The remaining will be dropped.
     ///
-    /// Requests for slots above `max_snapshot_slot`, other than fastboot, are re-enqueued without
-    /// being considered.
+    /// Only fastboot requests, or requests for slots at or below `max_snapshot_slot`, can be
+    /// handled.
     ///
     /// Also return the number of snapshot requests initially in the channel, and the number of
     /// ones re-enqueued.
@@ -188,61 +188,44 @@ impl SnapshotRequestHandler {
         /*num outstanding snapshot requests*/ usize,
         /*num re-enqueued snapshot requests*/ usize,
     )> {
-        let (mut requests, held): (Vec<_>, Vec<_>) = self
-            .snapshot_request_receiver
-            .try_iter()
-            .partition(|snapshot_request| {
-                // A fastboot request is sent at exit, which should complete as soon as
-                // possible, so it is handled regardless of `max_snapshot_slot`.
-                snapshot_request.request_kind == SnapshotRequestKind::FastbootSnapshot
-                    || snapshot_request.snapshot_root_bank.slot() <= max_snapshot_slot
-            });
-        // Handling a request flushes the write cache up to its slot, so a request above
-        // `max_snapshot_slot` would flush roots that should stay in the cache. Re-enqueue it
-        // untouched, so it is neither handled nor dropped, and handle it once the root has
-        // advanced far enough past it.
-        for snapshot_request in held {
-            self.snapshot_controller
-                .request_sender()
-                .try_send(snapshot_request)
-                .expect("re-enqueue snapshot request");
-        }
+        let mut requests: Vec<_> = self.snapshot_request_receiver.try_iter().collect();
         let requests_len = requests.len();
         debug!("outstanding snapshot requests ({requests_len}): {requests:?}");
 
-        match requests_len {
-            0 => None,
-            1 => {
-                // SAFETY: We know the len is 1, so `pop` will return `Some`
-                let snapshot_request = requests.pop().unwrap();
-                Some((snapshot_request, 1, 0))
-            }
-            _ => {
-                let max_idx = requests
-                    .iter()
-                    .enumerate()
-                    .max_by(|(_, a), (_, b)| cmp_requests_by_priority(a, b))
-                    .map(|(idx, _)| idx)
-                    .unwrap(); // SAFETY: We know len > 1
-                let snapshot_request = requests.swap_remove(max_idx);
-                let handled_request_slot = snapshot_request.snapshot_root_bank.slot();
-                // re-enqueue any remaining requests for slots GREATER-THAN the one that will be handled
-                let num_re_enqueued_requests = requests
-                    .into_iter()
-                    .filter(|snapshot_request| {
-                        snapshot_request.snapshot_root_bank.slot() > handled_request_slot
-                    })
-                    .map(|snapshot_request| {
-                        self.snapshot_controller
-                            .request_sender()
-                            .try_send(snapshot_request)
-                            .expect("re-enqueue snapshot request");
-                    })
-                    .count();
+        let snapshot_request = requests
+            .iter()
+            .enumerate()
+            .filter(|(_, snapshot_request)| {
+                // Handling a request flushes the write cache up to its slot, so a request above
+                // `max_snapshot_slot` would flush roots that should stay in the cache. A fastboot
+                // request is sent at exit, which should complete as soon as possible, so it is
+                // handled regardless of `max_snapshot_slot`.
+                snapshot_request.request_kind == SnapshotRequestKind::FastbootSnapshot
+                    || snapshot_request.snapshot_root_bank.slot() <= max_snapshot_slot
+            })
+            .max_by(|(_, a), (_, b)| cmp_requests_by_priority(a, b))
+            .map(|(idx, _)| idx)
+            .map(|idx| requests.swap_remove(idx));
+        let handled_request_slot = snapshot_request
+            .as_ref()
+            .map_or(max_snapshot_slot, |snapshot_request| {
+                snapshot_request.snapshot_root_bank.slot()
+            });
+        // re-enqueue any remaining requests for slots GREATER-THAN the one that will be handled
+        let num_re_enqueued_requests = requests
+            .into_iter()
+            .filter(|snapshot_request| {
+                snapshot_request.snapshot_root_bank.slot() > handled_request_slot
+            })
+            .map(|snapshot_request| {
+                self.snapshot_controller
+                    .request_sender()
+                    .try_send(snapshot_request)
+                    .expect("re-enqueue snapshot request");
+            })
+            .count();
 
-                Some((snapshot_request, requests_len, num_re_enqueued_requests))
-            }
-        }
+        Some((snapshot_request?, requests_len, num_re_enqueued_requests))
     }
 
     fn handle_snapshot_request(
@@ -1027,17 +1010,14 @@ mod test {
         assert_eq!(snapshot_request_handler.snapshot_request_receiver.len(), 0);
 
         // Fastboot is handled within ROOTED_SLOTS_TO_KEEP_IN_CACHE of the root, while the older
-        // incremental is re-enqueued rather than dropped
+        // incremental is dropped
         send_snapshot_request(100, SnapshotRequestKind::IncrementalSnapshot);
         send_snapshot_request(130, SnapshotRequestKind::FastbootSnapshot);
         assert_eq!(
             next(130),
             Some((SnapshotRequestKind::FastbootSnapshot, 130))
         );
-        assert_eq!(
-            next(132),
-            Some((SnapshotRequestKind::IncrementalSnapshot, 100))
-        );
+        assert_eq!(next(132), None,);
         assert_eq!(snapshot_request_handler.snapshot_request_receiver.len(), 0);
     }
 

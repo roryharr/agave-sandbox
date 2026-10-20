@@ -550,8 +550,9 @@ fn restore_from_snapshots_and_check_banks_are_equal(
 }
 
 /// Spin up the background services fully then test taking & verifying snapshots
-#[test]
-fn test_snapshots_with_background_services() {
+#[test_case(false; "no_fastboot")]
+#[test_case(true; "fastboot_with_held_requests")]
+fn test_snapshots_with_background_services(request_fastboot: bool) {
     agave_logger::setup();
 
     const SET_ROOT_INTERVAL_SLOTS: Slot = 2;
@@ -561,6 +562,10 @@ fn test_snapshots_with_background_services() {
         INCREMENTAL_SNAPSHOT_ARCHIVE_INTERVAL_SLOTS * 5;
     const LAST_SLOT: Slot =
         FULL_SNAPSHOT_ARCHIVE_INTERVAL_SLOTS * 3 + INCREMENTAL_SNAPSHOT_ARCHIVE_INTERVAL_SLOTS * 2;
+    // Request fastboot while incremental snapshot requests are held behind the root. No full
+    // snapshot slot falls in the held window, so every full snapshot archive is still made.
+    const FASTBOOT_SLOT: Slot =
+        INCREMENTAL_SNAPSHOT_ARCHIVE_INTERVAL_SLOTS * 8 + SET_ROOT_INTERVAL_SLOTS;
 
     // Maximum amount of time to wait for each snapshot archive to be created.
     // This should be enough time, but if it times-out in CI, try increasing it.
@@ -675,6 +680,10 @@ fn test_snapshots_with_background_services() {
             }
         }
 
+        if request_fastboot && slot == FASTBOOT_SLOT {
+            snapshot_controller.request_fastboot_snapshot();
+        }
+
         // Call `BankForks::set_root()` to cause snapshots to be taken
         if slot % SET_ROOT_INTERVAL_SLOTS == 0 {
             bank_forks
@@ -683,12 +692,35 @@ fn test_snapshots_with_background_services() {
                 .set_root(slot, Some(&snapshot_controller), None);
         }
 
+        // Exit waits for the fastboot bank snapshot before stopping the validator
+        if request_fastboot && slot == FASTBOOT_SLOT {
+            let timer = Instant::now();
+            while snapshot_controller.latest_bank_snapshot_slot() != slot {
+                assert!(
+                    timer.elapsed() < MAX_WAIT_DURATION,
+                    "Waiting for fastboot snapshot {slot} exceeded the {MAX_WAIT_DURATION:?} \
+                     maximum wait duration!",
+                );
+                std::thread::sleep(Duration::from_secs(1));
+            }
+            // The held requests were dropped when the fastboot request was handled
+            assert!(snapshot_controller.request_sender().is_empty());
+        }
+
         // ABS handles a snapshot request once the root is ROOTED_SLOTS_TO_KEEP_IN_CACHE past it, so
         // wait for any snapshot requested that many slots ago
         if slot <= ROOTED_SLOTS_TO_KEEP_IN_CACHE {
             continue;
         }
         let snapshot_slot = slot - ROOTED_SLOTS_TO_KEEP_IN_CACHE;
+        // Any request between FASTBOOT_SLOT and ROOTED_SLOTS_TO_KEEP_IN_CACHE is dropped, so
+        // so skip
+        if request_fastboot
+            && (FASTBOOT_SLOT - ROOTED_SLOTS_TO_KEEP_IN_CACHE..FASTBOOT_SLOT)
+                .contains(&snapshot_slot)
+        {
+            continue;
+        }
         if snapshot_slot.is_multiple_of(FULL_SNAPSHOT_ARCHIVE_INTERVAL_SLOTS) {
             let timer = Instant::now();
             while snapshot_paths::get_highest_full_snapshot_archive_slot(
