@@ -45,6 +45,9 @@ const MIN_LOOP_INTERVAL: Duration = Duration::from_millis(100);
 const CLEAN_INTERVAL: Duration = Duration::from_secs(60);
 const SHRINK_INTERVAL: Duration = Duration::from_secs(1);
 const DEDUPE_INTERVAL: Duration = Duration::from_secs(1);
+// Roots within this many slots of the root bank stay in the write cache through the background
+// flush, so recently written accounts load from the cache instead of storage
+const ROOTED_SLOTS_TO_KEEP_IN_CACHE: Slot = 100;
 
 pub type SnapshotRequestSender = Sender<SnapshotRequest>;
 pub type SnapshotRequestReceiver = Receiver<SnapshotRequest>;
@@ -498,9 +501,11 @@ impl AccountsBackgroundService {
                             // We cannot clean past the next snapshot request slot because it may
                             // have zero-lamport accounts.  See the comments in
                             // Bank::clean_accounts() for more information.
+                            // The newest roots stay in the write cache, so neither flush nor
+                            // clean reaches them
                             let max_clean_slot_inclusive = cmp::min(
                                 next_snapshot_request_slot.unwrap_or(Slot::MAX),
-                                bank.slot(),
+                                bank.slot().saturating_sub(ROOTED_SLOTS_TO_KEEP_IN_CACHE),
                             )
                             .saturating_sub(1);
 

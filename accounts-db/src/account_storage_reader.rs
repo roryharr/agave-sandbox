@@ -214,8 +214,9 @@ impl<'s, 'r, R: RequiredLenBufFileRead<'s>> AccountStorageReader<'s, 'r, R> {
 
 /// A root that is still in the write cache, held by a snapshot so the root does not have to be
 /// flushed first. It is archived straight from the cache, and is only written to a storage file
-/// when a bank snapshot is finalized for fastboot.
-#[derive(Debug, Clone)]
+/// when a bank snapshot is finalized for fastboot. Holds the root's cache while alive, so the
+/// dedupe leaves it as it is.
+#[derive(Debug)]
 pub struct SnapshotCachedRoot {
     slot: Slot,
     id: AccountsFileId,
@@ -233,6 +234,7 @@ impl SnapshotCachedRoot {
         path: PathBuf,
         accounts_file_provider: AccountsFileProvider,
     ) -> Self {
+        slot_cache.hold_for_snapshot();
         Self {
             slot,
             id,
@@ -300,6 +302,24 @@ impl SnapshotCachedRoot {
                 )
             });
         Arc::new(storage)
+    }
+}
+
+impl Clone for SnapshotCachedRoot {
+    fn clone(&self) -> Self {
+        Self::new(
+            self.slot,
+            self.id,
+            Arc::clone(&self.slot_cache),
+            self.path.clone(),
+            self.accounts_file_provider,
+        )
+    }
+}
+
+impl Drop for SnapshotCachedRoot {
+    fn drop(&mut self) {
+        self.slot_cache.release_for_snapshot();
     }
 }
 

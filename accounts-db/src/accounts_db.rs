@@ -838,10 +838,6 @@ pub struct AccountsDb {
     /// Note, this is None if we're told to *not* take snapshots
     latest_full_snapshot_slot: SeqLock<Option<Slot>>,
 
-    /// The slot of the latest snapshot to hold roots from the write cache. The snapshot archives
-    /// those roots' caches as they are, so the dedupe leaves roots at or below it alone.
-    latest_snapshot_slot: AtomicU64,
-
     /// The full snapshot slot we last swept for zero-lamport-single-ref shrink
     /// eligibility.
     last_swept_full_snapshot_slot: AtomicU64,
@@ -986,7 +982,6 @@ impl AccountsDb {
             accounts_file_provider: accounts_db_config.accounts_file_provider,
             use_direct_io: accounts_db_config.use_direct_io,
             latest_full_snapshot_slot: SeqLock::new(None),
-            latest_snapshot_slot: AtomicU64::new(0),
             last_swept_full_snapshot_slot: AtomicU64::new(0),
             max_cleaned_root: AtomicU64::new(0),
             best_ancient_slots_to_shrink: RwLock::default(),
@@ -2905,7 +2900,6 @@ impl AccountsDb {
     /// Returns the unflushed roots up to and including `max_root`, for a snapshot to hold instead
     /// of flushing them. Each gets a new storage id for its file in the snapshot.
     pub fn cached_roots_for_snapshot(&self, max_root: Slot) -> Vec<SnapshotCachedRoot> {
-        self.latest_snapshot_slot.store(max_root, Ordering::Relaxed);
         self.accounts_cache
             .roots_to_flush(Some(max_root))
             .into_iter()
@@ -2925,8 +2919,8 @@ impl AccountsDb {
     }
 
     /// Removes older versions of accounts from the write cache's roots up to `max_root`, keeping
-    /// each account's newest version between ongoing scans' boundaries. Roots at or below the
-    /// latest snapshot are left alone.
+    /// each account's newest version between ongoing scans' boundaries. Roots held by a snapshot
+    /// are left alone.
     ///
     /// Must be called from the same thread as flush and `cached_roots_for_snapshot`.
     pub fn dedupe_accounts_cache(&self, max_root: Slot) {
@@ -2934,11 +2928,7 @@ impl AccountsDb {
         // Read before the boundaries: a scan that starts after can only see slots at or above it
         let max_root = max_root.min(self.max_root());
         let boundaries = self.scan_tracker.ongoing_scan_boundaries();
-        let latest_snapshot_slot = self.latest_snapshot_slot.load(Ordering::Relaxed);
-        let roots = self
-            .accounts_cache
-            .roots_to_flush(Some(max_root))
-            .split_off(&(latest_snapshot_slot + 1));
+        let roots = self.accounts_cache.roots_to_flush(Some(max_root));
         let stats = self.accounts_cache.dedupe_roots(&roots, &boundaries);
         dedupe_time.stop();
 

@@ -52,6 +52,8 @@ pub struct SlotCache {
     /// The size of account data stored in the whole AccountsCache, in bytes
     total_size: Arc<AtomicU64>,
     is_frozen: AtomicBool,
+    /// The number of snapshots holding this cache to archive it as it is
+    num_snapshot_holds: AtomicU64,
     /// The number of accounts stored in `cache` (just this slot)
     accounts_count: AtomicU64,
     /// The number of accounts stored in the whole AccountsCache
@@ -170,6 +172,20 @@ impl SlotCache {
         self.is_frozen.load(Ordering::Acquire)
     }
 
+    /// A held cache is left alone by the dedupe until every snapshot holding it releases it
+    pub(crate) fn hold_for_snapshot(&self) {
+        self.num_snapshot_holds.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Released after the snapshot is done reading this cache
+    pub(crate) fn release_for_snapshot(&self) {
+        self.num_snapshot_holds.fetch_sub(1, Ordering::Release);
+    }
+
+    pub(crate) fn is_held_by_snapshot(&self) -> bool {
+        self.num_snapshot_holds.load(Ordering::Acquire) > 0
+    }
+
     pub fn total_bytes(&self) -> u64 {
         self.unique_account_writes_size.load(Ordering::Relaxed)
             + self.same_account_writes_size.load(Ordering::Relaxed)
@@ -270,6 +286,7 @@ impl AccountsCache {
             size: AtomicU64::default(),
             total_size: Arc::clone(&self.total_size),
             is_frozen: AtomicBool::default(),
+            num_snapshot_holds: AtomicU64::default(),
             accounts_count: AtomicU64::new(0),
             total_accounts_count: Arc::clone(&self.total_accounts_count),
         })
@@ -487,7 +504,7 @@ impl AccountsCache {
     /// Removes older versions of accounts from `roots`, keeping each account's newest version
     /// between consecutive `boundaries`. A version is never removed because of a newer version
     /// above a boundary at or above it, so anything that only sees slots up to a boundary still
-    /// finds the same version.
+    /// finds the same version. Roots held by a snapshot are left as they are.
     pub fn dedupe_roots(&self, roots: &BTreeSet<Slot>, boundaries: &BTreeSet<Slot>) -> DedupeStats {
         let mut stats = DedupeStats::default();
         // The accounts with a version in a newer root between the same boundaries
@@ -509,6 +526,11 @@ impl AccountsCache {
             let Some(slot_cache) = self.bank_cache(bank_id) else {
                 continue;
             };
+            if slot_cache.is_held_by_snapshot() {
+                // Its versions still supersede older roots' versions
+                newer_pubkeys.extend(slot_cache.iter().map(|entry| *entry.key()));
+                continue;
+            }
             // Collected first, since removing while iterating the dashmap would deadlock
             let older_pubkeys: Vec<_> = slot_cache
                 .iter()

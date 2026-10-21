@@ -106,9 +106,9 @@ impl SnapshotPackagerService {
                     if exit_backpressure.is_some() {
                         // With exit backpressure, we will delay flushing snapshot storages
                         // until we receive a graceful exit request.
-                        // Save the snapshot storages here, so we can flush later (as needed).
-                        // For fastboot snapshot packages, the bank snapshot is saved and
-                        // the rest of the snapshotting process is skipped
+                        // Only a fastboot snapshot package is saved here, so we can flush it
+                        // later; its bank snapshot is saved and the rest of the snapshotting
+                        // process is skipped
                         if snapshot_kind == SnapshotKind::Fastboot {
                             teardown_state = Some(TeardownState {
                                 snapshot_slot: snapshot_package.slot,
@@ -126,14 +126,6 @@ impl SnapshotPackagerService {
                             );
 
                             continue;
-                        } else {
-                            teardown_state = Some(TeardownState {
-                                snapshot_slot: snapshot_package.slot,
-                                snapshot_storages: snapshot_package.snapshot_storages.clone(),
-                                cached_roots: snapshot_package.cached_roots.clone(),
-                                startup_hints: snapshot_package.startup_hints.clone(),
-                                bank_snapshot_package: None,
-                            });
                         }
                     }
 
