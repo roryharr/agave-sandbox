@@ -1,4 +1,5 @@
 use {
+    solana_clock::Slot,
     solana_time_utils::AtomicInterval,
     std::{
         iter::Sum,
@@ -765,12 +766,50 @@ pub struct LoadAccountsStats {
     pub num_loaded_from_write_cache: AtomicU64,
     pub num_loaded_from_read_cache: AtomicU64,
     pub num_loaded_from_index_storage: AtomicU64,
+    /// sum of (max flushed root - account slot) over loads from storage
+    pub storage_load_slot_lag_sum: AtomicU64,
+    /// max of (max flushed root - account slot) over loads from storage
+    pub storage_load_slot_lag_max: AtomicU64,
+    /// number of loads from storage with a lag of at most 32 slots
+    pub storage_load_slot_lag_le_32: AtomicU64,
+    /// number of loads from storage with a lag of at most 128 slots
+    pub storage_load_slot_lag_le_128: AtomicU64,
+    /// number of loads from storage with a lag of at most 1024 slots
+    pub storage_load_slot_lag_le_1024: AtomicU64,
+    /// number of loads from storage of a slot newer than the max flushed root
+    pub storage_load_slot_lag_saturated: AtomicU64,
 }
 
 impl LoadAccountsStats {
+    /// Records how many slots older than the max flushed root an account loaded from storage is
+    pub fn record_storage_load_slot_lag(&self, max_flushed_root: Slot, slot: Slot) {
+        // `slot` can be flushed before the max flushed root is advanced to it
+        if slot > max_flushed_root {
+            self.storage_load_slot_lag_saturated
+                .fetch_add(1, Ordering::Relaxed);
+        }
+        let lag = max_flushed_root.saturating_sub(slot);
+        self.storage_load_slot_lag_sum
+            .fetch_add(lag, Ordering::Relaxed);
+        self.storage_load_slot_lag_max
+            .fetch_max(lag, Ordering::Relaxed);
+        if lag <= 32 {
+            self.storage_load_slot_lag_le_32
+                .fetch_add(1, Ordering::Relaxed);
+        }
+        if lag <= 128 {
+            self.storage_load_slot_lag_le_128
+                .fetch_add(1, Ordering::Relaxed);
+        }
+        if lag <= 1024 {
+            self.storage_load_slot_lag_le_1024
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
     pub fn report(&self) {
         datapoint_info!(
-            "accounts_db_load_accounts",
+            "accounts_db_load_accounts_exp",
             (
                 "num_loaded_from_write_cache",
                 self.num_loaded_from_write_cache.swap(0, Ordering::Relaxed),
@@ -784,6 +823,38 @@ impl LoadAccountsStats {
             (
                 "num_loaded_from_index_storage",
                 self.num_loaded_from_index_storage
+                    .swap(0, Ordering::Relaxed),
+                i64
+            ),
+            (
+                "storage_load_slot_lag_sum",
+                self.storage_load_slot_lag_sum.swap(0, Ordering::Relaxed),
+                i64
+            ),
+            (
+                "storage_load_slot_lag_max",
+                self.storage_load_slot_lag_max.swap(0, Ordering::Relaxed),
+                i64
+            ),
+            (
+                "storage_load_slot_lag_le_32",
+                self.storage_load_slot_lag_le_32.swap(0, Ordering::Relaxed),
+                i64
+            ),
+            (
+                "storage_load_slot_lag_le_128",
+                self.storage_load_slot_lag_le_128.swap(0, Ordering::Relaxed),
+                i64
+            ),
+            (
+                "storage_load_slot_lag_le_1024",
+                self.storage_load_slot_lag_le_1024
+                    .swap(0, Ordering::Relaxed),
+                i64
+            ),
+            (
+                "storage_load_slot_lag_saturated",
+                self.storage_load_slot_lag_saturated
                     .swap(0, Ordering::Relaxed),
                 i64
             ),

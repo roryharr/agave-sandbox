@@ -2766,6 +2766,10 @@ impl AccountsDb {
         self.load_account_stats
             .num_loaded_from_index_storage
             .fetch_add(1, Ordering::Relaxed);
+        if let Some(max_flushed_root) = self.accounts_cache.fetch_max_flush_root() {
+            self.load_account_stats
+                .record_storage_load_slot_lag(max_flushed_root, slot);
+        }
 
         let maybe_account =
             account_accessor.check_and_get_loaded_account_shared_data(load_filter.as_ref());
