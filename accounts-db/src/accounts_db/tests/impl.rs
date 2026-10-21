@@ -695,7 +695,7 @@ fn test_remove_unrooted_slot_cached() {
     let ancestors = Ancestors::from(vec![unrooted_slot]);
     assert!(!db.contains(&key));
     db.store_for_tests((unrooted_slot, &[(&key, &account0)][..]));
-    assert!(db.accounts_cache.contains(unrooted_slot));
+    assert!(db.accounts_cache.contains(BankId::new(unrooted_slot)));
     assert!(!db.accounts_cache.contains_unflushed_root(unrooted_slot));
     assert!(db.contains(&key));
     db.assert_load_account(unrooted_slot, key, 1);
@@ -727,7 +727,7 @@ fn test_remove_unrooted_slot_purges_secondary_index_for_cache_only_account() {
     let owner = Pubkey::new_unique();
     let pubkey = Pubkey::new_unique();
     let slot = 1;
-    let bank_id = BankId::new(0);
+    let bank_id = BankId::new(1);
     let account = AccountSharedData::new(1, 0, &owner);
 
     // Write only to the cache at an unrooted slot: this populates the secondary index keyed by
@@ -755,21 +755,23 @@ fn test_remove_unrooted_slot_purges_secondary_index_for_cache_only_account() {
 /// A scan whose bank is removed via `remove_unrooted_slots` mid-scan aborts at the next account
 /// instead of scanning to completion.
 /// Removing some *other* bank must not abort the scan.
-#[test_case(BankId::new(1), Err(ScanError::SlotRemoved { slot: 1, bank_id: BankId::new(1) }), 1; "abort_bank_aborts_scan")]
-#[test_case(BankId::new(2), Ok(()), 10; "abort_other_bank_no_effect")]
+#[test_case(1, Err(ScanError::SlotRemoved { slot: 1, bank_id: BankId::new(1) }), 1; "abort_bank_aborts_scan")]
+#[test_case(2, Ok(()), 10; "abort_other_bank_no_effect")]
 fn test_remove_unrooted_slots_aborts_ongoing_scan(
-    removed_bank_id: BankId,
+    removed_bank: u64,
     expected_result: Result<(), ScanError>,
     expected_visits: usize,
 ) {
     let db = AccountsDb::new_for_tests_with_config(Vec::new(), DEFAULT_ACCOUNTS_DB_CONFIG);
     let slot = 1;
+    let slot2 = 2;
     let bank_id = BankId::new(1);
     let num_accounts = 10;
     let account = AccountSharedData::new(1, 0, &Pubkey::default());
     let pubkeys: Vec<_> = (0..num_accounts).map(|_| Pubkey::new_unique()).collect();
     let accounts: Vec<_> = pubkeys.iter().map(|pubkey| (pubkey, &account)).collect();
     db.store_for_tests((slot, accounts.as_slice()));
+    db.store_for_tests((slot2, accounts.as_slice()));
 
     let mut visited = 0;
     let result = db.scan_accounts(
@@ -780,7 +782,7 @@ fn test_remove_unrooted_slots_aborts_ongoing_scan(
                 visited += 1;
                 if visited == 1 {
                     // dump the fork mid-scan, as ReplayStage does for a duplicate fork
-                    db.remove_unrooted_slots(&[(slot, removed_bank_id)]);
+                    db.remove_unrooted_slots(&[(removed_bank, BankId::new(removed_bank))]);
                 }
             }
         },
@@ -2035,7 +2037,7 @@ fn test_clean_retains_secondary_index_for_still_cached_key() {
         "clean purged the secondary index entry for a live cached account",
     );
 
-    accounts.purge_slots_from_cache(iter::once(&cache_slot), &PurgeStats::default());
+    accounts.purge_slots_from_cache(iter::once(BankId::new(cache_slot)), &PurgeStats::default());
 
     // The pubkey has been removed from both the index and the write cache. The purge only
     // deferred it, so the following clean must remove it from the secondary index as well.
@@ -4175,7 +4177,7 @@ fn test_scan_flush_accounts_cache_then_clean_drop() {
 
     // Simulate dropping the bank, which finally removes the slot from the cache
     let bank_id = BankId::new(1);
-    db.purge_slot(1, bank_id, false);
+    db.purge_slot(bank_id, false);
     assert!(db.get_account_at_slot(&account_key, 1).is_none());
 }
 
@@ -5558,7 +5560,7 @@ fn test_purge_alive_unrooted_slots_after_clean() {
     assert_eq!(accounts.accounts_index.slot_list_len(&shared_key), 0);
 
     // Simulate purge_slot() all from AccountsBackgroundService
-    accounts.purge_slot(slot1, BankId::new(0), true);
+    accounts.purge_slot(BankId::new(slot1), true);
 
     // Now the key and slot are purged from the database
     assert!(!accounts.contains(&shared_key));
