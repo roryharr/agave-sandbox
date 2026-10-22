@@ -2386,8 +2386,8 @@ impl AccountsDb {
         });
 
         // If there are too few slots to shrink, add an ancient slot
-        // for shrinking.
-        if shrink_slots.len() < SHRINK_INSERT_ANCIENT_THRESHOLD {
+        // for shrinking. A pass with nothing to shrink adds none.
+        if !shrink_slots.is_empty() && shrink_slots.len() < SHRINK_INSERT_ANCIENT_THRESHOLD {
             let mut ancients = self.best_ancient_slots_to_shrink.write().unwrap();
             while let Some((slot, written_bytes)) = ancients.pop_front() {
                 if let Some(store) = self.storage.get_slot_storage_entry(slot)
@@ -2908,7 +2908,9 @@ impl AccountsDb {
             .roots_to_flush(Some(max_root))
             .into_iter()
             .filter_map(|slot| {
-                self.accounts_cache.slot_cache(slot).map(|slot_cache| {
+                let slot_cache = self.accounts_cache.slot_cache(slot)?;
+                // A root the dedupe emptied has no storage, the same as flushing it stores nothing
+                (!slot_cache.is_empty()).then(|| {
                     let path_index = rng().random_range(0..self.paths.len());
                     SnapshotCachedRoot::new(
                         slot,

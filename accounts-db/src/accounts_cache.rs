@@ -75,6 +75,10 @@ impl SlotCache {
         self.accounts_count.load(Ordering::Acquire) as usize
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     pub fn report_slot_store_metrics(&self) {
         datapoint_info!(
             "slot_repeated_writes",
