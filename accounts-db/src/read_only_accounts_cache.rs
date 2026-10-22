@@ -604,12 +604,11 @@ impl ReadOnlyAccountsCache {
                     // Safety: element is not ZST and iteration is over read-locked view of the table,
                     // so all buckets (pointers) are valid
                     let (key, entry) = unsafe { bucket.as_ref() };
-                    let last_update_time = entry
-                        .get()
-                        .read
-                        .as_ref()
-                        .map(|read| read.last_update_time.load(Ordering::Relaxed))
-                        .unwrap_or(u64::MAX);
+                    // An entry only in the write cache has nothing to evict, so it isn't a sample
+                    let Some(read) = entry.get().read.as_ref() else {
+                        continue;
+                    };
+                    let last_update_time = read.last_update_time.load(Ordering::Relaxed);
                     if last_update_time < min_update_time {
                         min_update_time = last_update_time;
                         key_to_evict = Some(key.to_owned());

@@ -3,7 +3,10 @@ use {
     std::{
         iter::Sum,
         num::Saturating,
-        sync::atomic::{AtomicU64, AtomicUsize, Ordering},
+        sync::{
+            Mutex,
+            atomic::{AtomicU64, AtomicUsize, Ordering},
+        },
         time::Duration,
     },
 };
@@ -227,6 +230,24 @@ impl PurgeStats {
             );
         }
     }
+}
+
+/// Flushes accumulated between reports. The background flush runs every ABS loop, so its
+/// datapoint is reported at most once a second.
+#[derive(Debug, Default)]
+pub struct FlushReport {
+    pub last_report: AtomicInterval,
+    pub pending: Mutex<PendingFlushReport>,
+}
+
+#[derive(Debug, Default)]
+pub struct PendingFlushReport {
+    pub total_new_cleaned_roots: usize,
+    pub num_cleaned_roots_flushed: usize,
+    pub total_new_excess_roots: usize,
+    pub num_excess_roots_flushed: usize,
+    pub flush_roots_us: u64,
+    pub stats: FlushStats,
 }
 
 #[derive(Debug, Default)]

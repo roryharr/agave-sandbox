@@ -47,7 +47,7 @@ const SHRINK_INTERVAL: Duration = Duration::from_secs(1);
 const DEDUPE_INTERVAL: Duration = Duration::from_secs(1);
 // Roots within this many slots of the root bank stay in the write cache through the background
 // flush, so recently written accounts load from the cache instead of storage
-const ROOTED_SLOTS_TO_KEEP_IN_CACHE: Slot = 100;
+const ROOTED_SLOTS_TO_KEEP_IN_CACHE: Slot = 1000;
 
 pub type SnapshotRequestSender = Sender<SnapshotRequest>;
 pub type SnapshotRequestReceiver = Receiver<SnapshotRequest>;
@@ -512,12 +512,11 @@ impl AccountsBackgroundService {
                             let duration_since_previous_clean = previous_clean_time.elapsed();
                             let should_clean = duration_since_previous_clean > CLEAN_INTERVAL;
 
-                            // if we're cleaning, then force flush, otherwise be lazy
-                            let force_flush = should_clean;
+                            // Flush each root as it leaves the window, rather than in batches
                             bank.rc
                                 .accounts
                                 .accounts_db
-                                .flush_accounts_cache(force_flush, Some(max_clean_slot_inclusive));
+                                .flush_accounts_cache(true, Some(max_clean_slot_inclusive));
 
                             if should_clean {
                                 bank.rc

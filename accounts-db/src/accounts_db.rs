@@ -41,8 +41,9 @@ use {
         },
         accounts_cache::{AccountsCache, CachedAccount, CachedLoad, SlotCache},
         accounts_db::stats::{
-            AccountsStats, CleanAccountsStats, FlushStats, LoadAccountsStats,
-            ObsoleteAccountsStats, PrefetchAccountsStats, PurgeStats, ShrinkAncientStats,
+            AccountsStats, CleanAccountsStats, FlushReport, FlushStats, LoadAccountsStats,
+            ObsoleteAccountsStats, PendingFlushReport, PrefetchAccountsStats, PurgeStats,
+            ShrinkAncientStats,
             ShrinkStats, ShrinkStatsSub, StoreAccountsForFlushStats, StoreAccountsForShrinkStats,
             StoreAccountsForSquashStats, StoreAccountsUnfrozenStats, WriteAccountsToCacheStats,
         },
@@ -774,6 +775,8 @@ pub struct AccountsDb {
     /// Stats for loading accounts during transaction processing
     load_account_stats: LoadAccountsStats,
 
+    flush_report: FlushReport,
+
     /// Stats for the background loads `prefetch_accounts` issues, kept apart from
     /// `load_account_stats` so a prefetch's own storage read is not counted as a miss on the
     /// critical path
@@ -975,6 +978,7 @@ impl AccountsDb {
             shrink_ancient_stats: ShrinkAncientStats::default(),
             stats: AccountsStats::default(),
             load_account_stats: LoadAccountsStats::default(),
+            flush_report: FlushReport::default(),
             prefetch_stats: PrefetchAccountsStats::default(),
             store_accounts_unfrozen_stats: StoreAccountsUnfrozenStats::default(),
             is_bank_drop_callback_enabled: AtomicBool::default(),
@@ -3324,13 +3328,33 @@ impl AccountsDb {
             };
         flush_stats.accumulate(&flush_stats_aggressively);
 
+        let mut pending = self.flush_report.pending.lock().unwrap();
+        pending.total_new_cleaned_roots += total_new_cleaned_roots;
+        pending.num_cleaned_roots_flushed += num_cleaned_roots_flushed;
+        pending.total_new_excess_roots += total_new_excess_roots;
+        pending.num_excess_roots_flushed += num_excess_roots_flushed;
+        pending.flush_roots_us += flush_roots_elapsed.as_us();
+        pending.stats.accumulate(&flush_stats);
+        if !self.flush_report.last_report.should_update(1000) {
+            return;
+        }
+        let PendingFlushReport {
+            total_new_cleaned_roots,
+            num_cleaned_roots_flushed,
+            total_new_excess_roots,
+            num_excess_roots_flushed,
+            flush_roots_us,
+            stats: flush_stats,
+        } = mem::take(&mut *pending);
+        drop(pending);
+
         datapoint_info!(
             "accounts_db-flush_accounts_cache",
             ("total_new_cleaned_roots", total_new_cleaned_roots, i64),
             ("num_cleaned_roots_flushed", num_cleaned_roots_flushed, i64),
             ("total_new_excess_roots", total_new_excess_roots, i64),
             ("num_excess_roots_flushed", num_excess_roots_flushed, i64),
-            ("flush_roots_elapsed", flush_roots_elapsed.as_us(), i64),
+            ("flush_roots_elapsed", flush_roots_us, i64),
             ("account_bytes_stored", flush_stats.num_bytes_stored.0, i64),
             (
                 "num_accounts_stored",
