@@ -20,6 +20,7 @@
 
 mod accounts_db_config;
 mod geyser_plugin_utils;
+mod prefetch;
 pub(crate) mod stats;
 pub(crate) mod tests;
 
@@ -38,11 +39,14 @@ use {
         account_storage_entry::AccountStorageEntry,
         account_storage_reader::{ACCOUNT_STORAGE_MAX_BUFFER_SIZE, storage_file_buf_reader},
         accounts_cache::{AccountsCache, CachedAccount, SlotCache},
-        accounts_db::stats::{
-            AccountsStats, CleanAccountsStats, FlushStats, LoadAccountsStats,
-            ObsoleteAccountsStats, PurgeStats, ShrinkAncientStats, ShrinkStats, ShrinkStatsSub,
-            StoreAccountsForFlushStats, StoreAccountsForShrinkStats, StoreAccountsForSquashStats,
-            StoreAccountsUnfrozenStats, WriteAccountsToCacheStats,
+        accounts_db::{
+            prefetch::AccountsPrefetcher,
+            stats::{
+                AccountsStats, CleanAccountsStats, FlushStats, LoadAccountsStats,
+                ObsoleteAccountsStats, PurgeStats, ShrinkAncientStats, ShrinkStats, ShrinkStatsSub,
+                StoreAccountsForFlushStats, StoreAccountsForShrinkStats,
+                StoreAccountsForSquashStats, StoreAccountsUnfrozenStats, WriteAccountsToCacheStats,
+            },
         },
         accounts_file::{self, AccountsFileProvider},
         accounts_hash::{AccountLtHash, AccountsLtHash, ZERO_LAMPORT_ACCOUNT_LT_HASH},
@@ -789,6 +793,9 @@ pub struct AccountsDb {
     /// Stats for loading accounts during transaction processing
     load_account_stats: LoadAccountsStats,
 
+    /// Warms the read cache in the background; see `prefetch_accounts`
+    prefetcher: AccountsPrefetcher,
+
     /// Stats from storing accounts unfrozen
     store_accounts_unfrozen_stats: StoreAccountsUnfrozenStats,
 
@@ -980,6 +987,7 @@ impl AccountsDb {
             shrink_ancient_stats: ShrinkAncientStats::default(),
             stats: AccountsStats::default(),
             load_account_stats: LoadAccountsStats::default(),
+            prefetcher: AccountsPrefetcher::default(),
             store_accounts_unfrozen_stats: StoreAccountsUnfrozenStats::default(),
             is_bank_drop_callback_enabled: AtomicBool::default(),
             latest_full_snapshot_slot_advanced_since_clean: AtomicBool::default(),
@@ -2759,17 +2767,8 @@ impl AccountsDb {
             return should_load_account.then_some((account, slot));
         }
 
-        // Get the storage under the index entry's lock: storages are removed only after the index
-        // stops referring to them, so it is present
-        let (slot, mut account_accessor) = self.accounts_index.get_with_and_then(
-            pubkey,
-            ancestors,
-            true,
-            |(slot, account_info)| {
-                let storage_location = account_info.storage_location();
-                (slot, self.get_account_accessor(slot, &storage_location))
-            },
-        )?;
+        let (slot, mut account_accessor) =
+            self.get_account_accessor_from_index(pubkey, ancestors)?;
         self.load_account_stats
             .num_loaded_from_index_storage
             .fetch_add(1, Ordering::Relaxed);
@@ -2785,6 +2784,21 @@ impl AccountsDb {
             self.store_in_read_cache_if_newest(pubkey, slot, account);
         }
         maybe_account.map(|account| (account, slot))
+    }
+
+    /// Returns the slot of `pubkey`'s version visible from `ancestors`, and its storage
+    fn get_account_accessor_from_index(
+        &self,
+        pubkey: &Pubkey,
+        ancestors: &Ancestors,
+    ) -> Option<(Slot, LoadedAccountAccessor)> {
+        // Get the storage under the index entry's lock: storages are removed only after the index
+        // stops referring to them, so it is present
+        self.accounts_index
+            .get_with_and_then(pubkey, ancestors, true, |(slot, account_info)| {
+                let storage_location = account_info.storage_location();
+                (slot, self.get_account_accessor(slot, &storage_location))
+            })
     }
 
     /// Stores `account` in the read cache if `slot` is the newest version of `pubkey` in the
@@ -4493,6 +4507,7 @@ impl AccountsDb {
             );
 
             self.load_account_stats.report();
+            self.prefetcher.stats.report();
         }
     }
 
