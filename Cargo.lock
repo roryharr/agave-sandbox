@@ -7091,6 +7091,7 @@ dependencies = [
  "dashmap",
  "io-uring",
  "itertools 0.15.0",
+ "libc",
  "log",
  "memoffset",
  "modular-bitfield",
