@@ -2904,13 +2904,25 @@ impl AccountsDb {
             if let Some(slot_cache) = self.accounts_cache.bank_cache(bank_id) {
                 num_cached_slots_removed += 1;
                 total_removed_cached_bytes += slot_cache.total_bytes();
+                purge_stats
+                    .num_cached_accounts_removed
+                    .fetch_add(slot_cache.len(), Ordering::Relaxed);
+                // Nobody else should have removed the slot cache entry yet
+                let (pubkeys_removed, remove_bank_us) = measure_us!(
+                    self.accounts_cache
+                        .remove_bank(bank_id)
+                        .expect("slot cache entry must still be present")
+                );
+                // Normally the last reference, so this frees every cached account
+                let ((), drop_slot_cache_us) = measure_us!(drop(slot_cache));
                 remove_cache_elapsed.stop();
                 remove_cache_elapsed_across_slots += remove_cache_elapsed.as_us();
-                // Nobody else should have removed the slot cache entry yet
-                let pubkeys_removed = self
-                    .accounts_cache
-                    .remove_bank(bank_id)
-                    .expect("slot cache entry must still be present");
+                purge_stats
+                    .remove_bank_us
+                    .fetch_add(remove_bank_us, Ordering::Relaxed);
+                purge_stats
+                    .drop_slot_cache_us
+                    .fetch_add(drop_slot_cache_us, Ordering::Relaxed);
                 self.add_pubkeys_removed_from_cache(pubkeys_removed);
             }
         }
@@ -3104,7 +3116,7 @@ impl AccountsDb {
     }
 
     pub fn remove_unrooted_slots(&self, remove_slots: &[(Slot, BankId)]) {
-        assert!(
+        let ((), safety_checks_us) = measure_us!(assert!(
             remove_slots.iter().all(|(_, bank_id)| {
                 debug_assert!(
                     self.accounts_cache.contains(*bank_id),
@@ -3113,18 +3125,26 @@ impl AccountsDb {
                 !self.accounts_cache.contains_unflushed_bank(*bank_id)
             }),
             "Trying to remove accounts for rooted slots {remove_slots:?}"
-        );
+        ));
 
         // Mark down these slots are about to be purged so that new attempts to scan these
         // banks fail, and any ongoing scans over these slots abort promptly, releasing the
         // bank references their callers hold
-        self.scan_tracker.mark_banks_removed(
-            remove_slots
-                .iter()
-                .map(|(_slot, remove_bank_id)| *remove_bank_id),
+        let ((), mark_banks_removed_us) = measure_us!(
+            self.scan_tracker.mark_banks_removed(
+                remove_slots
+                    .iter()
+                    .map(|(_slot, remove_bank_id)| *remove_bank_id),
+            )
         );
 
         let remove_unrooted_purge_stats = PurgeStats::default();
+        remove_unrooted_purge_stats
+            .safety_checks_elapsed
+            .store(safety_checks_us, Ordering::Relaxed);
+        remove_unrooted_purge_stats
+            .mark_banks_removed_us
+            .store(mark_banks_removed_us, Ordering::Relaxed);
         self.purge_slots_from_cache(
             remove_slots.iter().map(|(_, bank_id)| *bank_id),
             &remove_unrooted_purge_stats,

@@ -70,7 +70,7 @@ use {
         entry_notifier_service::EntryNotifierSender,
         leader_schedule_cache::LeaderScheduleCache,
     },
-    solana_measure::measure::Measure,
+    solana_measure::{measure::Measure, measure_us},
     solana_poh::{
         poh_controller::PohController,
         poh_recorder::{
@@ -889,6 +889,21 @@ impl ReplayStage {
             let epoch_slots_frozen_slots = EpochSlotsFrozenSlots::default();
             let mut duplicate_slots_to_repair = DuplicateSlotsToRepair::default();
             let mut purge_repair_slot_counter = PurgeRepairSlotCounter::default();
+            // TEST ONLY: dump a frozen bank every this many slots, so replay rebuilds it
+            let test_dump_interval_slots = std::env::var("AGAVE_TEST_DUMP_INTERVAL_SLOTS")
+                .ok()
+                .map(|interval| {
+                    interval
+                        .parse::<Slot>()
+                        .expect("dump interval must be a slot count")
+                });
+            match test_dump_interval_slots {
+                Some(interval) => {
+                    warn!("TEST ONLY: dumping a frozen bank every {interval} slots")
+                }
+                None => warn!("TEST ONLY: AGAVE_TEST_DUMP_INTERVAL_SLOTS unset, not dumping"),
+            }
+            let mut last_test_dump_slot: Slot = 0;
             let unfrozen_gossip_verified_vote_hashes = UnfrozenGossipVerifiedVoteHashes::default();
             let mut latest_validator_votes_for_frozen_banks =
                 LatestValidatorVotesForFrozenBanks::default();
@@ -1168,6 +1183,28 @@ impl ReplayStage {
                     // Banks might have been switched above, these maps are no longer accurate
                     drop(ancestors);
                     drop(descendants);
+
+                    if let Some(test_dump_interval_slots) = test_dump_interval_slots
+                        && !has_active_leader_bank
+                        && let Some(slot) = Self::test_frozen_bank_to_dump(
+                            test_dump_interval_slots,
+                            &mut last_test_dump_slot,
+                            &bank_forks,
+                        )
+                    {
+                        warn!("TEST ONLY: clearing slot {slot}");
+                        let Ok(()) = Self::clear_slots(
+                            [slot],
+                            &bank_forks,
+                            &mut progress,
+                            &mut async_verification_freelist,
+                            None,
+                        ) else {
+                            unreachable!(
+                                "clearing a bank without a transaction-history purge cannot fail"
+                            )
+                        };
+                    }
                 } else {
                     let forks_root = bank_forks.read().unwrap().root();
                     // Process cluster-agreed versions of duplicate slots for which we potentially
@@ -1541,6 +1578,19 @@ impl ReplayStage {
                         .load()
                         .working_bank()
                         .map(Arc::clone);
+                    if let Some(test_dump_interval_slots) = test_dump_interval_slots {
+                        if poh_bank.is_none() {
+                            Self::test_dump_frozen_bank(
+                                test_dump_interval_slots,
+                                &mut last_test_dump_slot,
+                                &mut ancestors,
+                                &mut descendants,
+                                &mut progress,
+                                &bank_forks,
+                                &blockstore,
+                            );
+                        }
+                    }
                     // Dump any duplicate slots that have been confirmed by the network in
                     // anticipation of repairing the confirmed version of the slot.
                     //
@@ -2311,6 +2361,60 @@ impl ReplayStage {
         }
     }
 
+    /// TEST ONLY: returns the newest frozen bank above root once `test_dump_interval_slots` have
+    /// passed since the last dump. Its descendants (usually its replaying child) are dumped too,
+    /// and their shreds are kept so replay rebuilds the same blocks under new bank ids.
+    fn test_frozen_bank_to_dump(
+        test_dump_interval_slots: Slot,
+        last_test_dump_slot: &mut Slot,
+        bank_forks: &RwLock<BankForks>,
+    ) -> Option<Slot> {
+        let frozen_slot = {
+            let bank_forks = bank_forks.read().unwrap();
+            let root = bank_forks.root();
+            bank_forks
+                .frozen_banks()
+                .map(|(slot, _bank)| slot)
+                .filter(|slot| *slot > root)
+                .max()?
+        };
+        if frozen_slot < last_test_dump_slot.saturating_add(test_dump_interval_slots) {
+            return None;
+        }
+        *last_test_dump_slot = frozen_slot;
+        Some(frozen_slot)
+    }
+
+    /// TEST ONLY: dumps a frozen bank through the TowerBFT duplicate-slot path
+    fn test_dump_frozen_bank(
+        test_dump_interval_slots: Slot,
+        last_test_dump_slot: &mut Slot,
+        ancestors: &mut HashMap<Slot, HashSet<Slot>>,
+        descendants: &mut HashMap<Slot, HashSet<Slot>>,
+        progress: &mut ProgressMap,
+        bank_forks: &RwLock<BankForks>,
+        blockstore: &Blockstore,
+    ) {
+        let Some(frozen_slot) = Self::test_frozen_bank_to_dump(
+            test_dump_interval_slots,
+            last_test_dump_slot,
+            bank_forks,
+        ) else {
+            return;
+        };
+        let root_bank = bank_forks.read().unwrap().root_bank();
+        Self::purge_unconfirmed_slot_with_options(
+            frozen_slot,
+            ancestors,
+            descendants,
+            progress,
+            &root_bank,
+            bank_forks,
+            blockstore,
+            false,
+        );
+    }
+
     fn purge_unconfirmed_slot(
         slot_to_purge: Slot,
         ancestors: &mut HashMap<Slot, HashSet<Slot>>,
@@ -2320,7 +2424,31 @@ impl ReplayStage {
         bank_forks: &RwLock<BankForks>,
         blockstore: &Blockstore,
     ) {
+        Self::purge_unconfirmed_slot_with_options(
+            slot_to_purge,
+            ancestors,
+            descendants,
+            progress,
+            root_bank,
+            bank_forks,
+            blockstore,
+            true,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn purge_unconfirmed_slot_with_options(
+        slot_to_purge: Slot,
+        ancestors: &mut HashMap<Slot, HashSet<Slot>>,
+        descendants: &mut HashMap<Slot, HashSet<Slot>>,
+        progress: &mut ProgressMap,
+        root_bank: &Bank,
+        bank_forks: &RwLock<BankForks>,
+        blockstore: &Blockstore,
+        clear_blockstore: bool,
+    ) {
         warn!("purging slot {slot_to_purge}");
+        let total_time = Measure::start("purge_unconfirmed_slot");
 
         // Doesn't need to be root bank, just needs a common bank to
         // access the status cache and accounts
@@ -2337,8 +2465,14 @@ impl ReplayStage {
         // Clear the ancestors/descendants map to keep them
         // consistent
         let slot_descendants = slot_descendants.unwrap();
-        Self::purge_ancestors_descendants(slot_to_purge, &slot_descendants, ancestors, descendants);
+        let ((), purge_ancestors_descendants_us) = measure_us!(Self::purge_ancestors_descendants(
+            slot_to_purge,
+            &slot_descendants,
+            ancestors,
+            descendants
+        ));
 
+        let quiesce_time = Measure::start("quiesce");
         let banks_to_remove: Vec<_> = {
             let bank_forks = bank_forks.read().unwrap();
             slot_descendants
@@ -2351,9 +2485,11 @@ impl ReplayStage {
             bank.quiesce_transaction_execution();
             let _ = bank.wait_for_completed_scheduler();
         }
+        let quiesce_us = quiesce_time.end_as_us();
 
         // Grab the Slot and BankId's of the banks we need to purge, then clear the banks
         // from BankForks
+        let dump_slots_time = Measure::start("dump_slots");
         let (slots_to_purge, removed_banks): (Vec<(Slot, BankId)>, Vec<BankWithScheduler>) = {
             let mut w_bank_forks = bank_forks.write().unwrap();
             w_bank_forks.dump_slots(
@@ -2364,26 +2500,37 @@ impl ReplayStage {
             )
         };
 
+        let dump_slots_us = dump_slots_time.end_as_us();
+        let num_banks_dumped = slots_to_purge.len();
+
         // Clear the accounts for these slots so that any ongoing RPC scans fail.
         // These have to be atomically cleared together in the same batch, in order
         // to prevent RPC from seeing inconsistent results in scans.
-        root_bank.remove_unrooted_slots(&slots_to_purge);
+        let ((), remove_unrooted_slots_us) =
+            measure_us!(root_bank.remove_unrooted_slots(&slots_to_purge));
 
         // Once the slots above have been purged, now it's safe to remove the banks from
         // BankForks, allowing the Bank::drop() purging to run and not race with the
         // `remove_unrooted_slots()` call.
-        drop(removed_banks);
+        let ((), drop_banks_us) = measure_us!(drop(removed_banks));
 
+        let mut clear_slot_signatures_us = 0;
+        let mut prune_program_cache_us = 0;
+        let mut blockstore_us = 0;
         for (slot, bank_id) in slots_to_purge {
             // Clear the slot signatures from status cache for this slot.
             // TODO: What about RPC queries that had already cloned the Bank for this slot
             // and are looking up the signature for this slot?
-            root_bank.clear_slot_signatures(slot);
+            clear_slot_signatures_us += measure_us!(root_bank.clear_slot_signatures(slot)).1;
 
             // Remove cached entries of the programs that were deployed in this slot.
-            root_bank.prune_program_cache_by_deployment_slot(slot);
+            prune_program_cache_us +=
+                measure_us!(root_bank.prune_program_cache_by_deployment_slot(slot)).1;
 
-            if let Some(bank_hash) = blockstore.get_bank_hash(slot) {
+            let blockstore_time = Measure::start("blockstore");
+            if !clear_blockstore {
+                // TEST ONLY: keep the shreds so replay rebuilds this block
+            } else if let Some(bank_hash) = blockstore.get_bank_hash(slot) {
                 // If a descendant was successfully replayed and chained from a duplicate it must
                 // also be a duplicate. In this case we *need* to repair it, so we clear from
                 // blockstore.
@@ -2413,10 +2560,31 @@ impl ReplayStage {
                 // this slot once the parent is repaired
                 blockstore.remove_dead_slot(slot).unwrap();
             }
+            blockstore_us += blockstore_time.end_as_us();
 
             // Clear the progress map of these forks
             let _ = progress.remove(&slot);
         }
+
+        datapoint_info!(
+            "replay_stage-purge_unconfirmed_slot",
+            ("slot", slot_to_purge, i64),
+            ("test_dump", !clear_blockstore, bool),
+            ("num_banks_dumped", num_banks_dumped, i64),
+            (
+                "purge_ancestors_descendants_us",
+                purge_ancestors_descendants_us,
+                i64
+            ),
+            ("quiesce_us", quiesce_us, i64),
+            ("dump_slots_us", dump_slots_us, i64),
+            ("remove_unrooted_slots_us", remove_unrooted_slots_us, i64),
+            ("drop_banks_us", drop_banks_us, i64),
+            ("clear_slot_signatures_us", clear_slot_signatures_us, i64),
+            ("prune_program_cache_us", prune_program_cache_us, i64),
+            ("blockstore_us", blockstore_us, i64),
+            ("total_us", total_time.end_as_us(), i64),
+        );
     }
 
     // Purge given slot and all its descendants from the `ancestors` and
@@ -2653,6 +2821,7 @@ impl ReplayStage {
             TransactionHistoryPurgeInput,
         )>,
     ) -> Result<(), ReplayStageError> {
+        let total_time = Measure::start("clear_slots");
         let (slots_to_purge, banks_to_clear) =
             bank_forks.read().unwrap().slots_to_clear(slots_to_clear);
         if slots_to_purge.is_empty() {
@@ -2660,6 +2829,7 @@ impl ReplayStage {
         }
 
         // Wait for async verify to complete
+        let wait_for_verification_time = Measure::start("wait_for_verification");
         for slot in &slots_to_purge {
             if let Some(replay_progress) = progress.remove(slot) {
                 let mut w_replay_progress = replay_progress.replay_progress.write().unwrap();
@@ -2671,11 +2841,15 @@ impl ReplayStage {
             }
         }
 
+        let wait_for_verification_us = wait_for_verification_time.end_as_us();
+
         // Wait for any in progress execution
+        let quiesce_time = Measure::start("quiesce");
         for bank in banks_to_clear.iter() {
             bank.quiesce_transaction_execution();
             let _ = bank.wait_for_completed_scheduler();
         }
+        let quiesce_us = quiesce_time.end_as_us();
         let bank_slots_to_clear = banks_to_clear
             .iter()
             .map(|bank| bank.slot())
@@ -2684,6 +2858,7 @@ impl ReplayStage {
         // Only dump banks that are still present. `slots_to_purge` can also contain slots that
         // were already removed, but whose shared cache entries still need to be cleared before the
         // slots are revived.
+        let dump_slots_time = Measure::start("dump_slots");
         let (root_bank, slot_bank_ids_to_purge, removed_banks) = {
             let mut w_bank_forks = bank_forks.write().unwrap();
 
@@ -2696,27 +2871,55 @@ impl ReplayStage {
                 w_bank_forks.dump_slots(bank_slots_to_clear.iter(), false);
             (root_bank, slot_bank_ids_to_purge, removed_banks)
         };
+        let dump_slots_us = dump_slots_time.end_as_us();
+        let num_banks_dumped = slot_bank_ids_to_purge.len();
 
         // Clear the accounts for these slots so that any ongoing RPC scans fail.
         // These have to be atomically cleared together in the same batch, in order
         // to prevent RPC from seeing inconsistent results in scans.
+        let remove_unrooted_slots_time = Measure::start("remove_unrooted_slots");
         if !slot_bank_ids_to_purge.is_empty() {
             root_bank.remove_unrooted_slots(&slot_bank_ids_to_purge);
         }
+        let remove_unrooted_slots_us = remove_unrooted_slots_time.end_as_us();
 
         // Once the slots above have been purged, now it's safe to remove the banks from
         // BankForks, allowing the Bank::drop() purging to run and not race with the
         // `remove_unrooted_slots()` call.
+        let drop_banks_time = Measure::start("drop_banks");
         drop(banks_to_clear);
         drop(removed_banks);
+        let drop_banks_us = drop_banks_time.end_as_us();
 
         // Clear the shared caches even for requested slots whose banks were already removed.
         // Those slots can be revived by an Alpenglow switch, and stale entries from the old block
         // version must not affect replay of the new version.
+        let mut clear_slot_signatures_us = 0;
+        let mut prune_program_cache_us = 0;
         for slot in &slots_to_purge {
-            root_bank.clear_slot_signatures(*slot);
-            root_bank.prune_program_cache_by_deployment_slot(*slot);
+            clear_slot_signatures_us += measure_us!(root_bank.clear_slot_signatures(*slot)).1;
+            prune_program_cache_us +=
+                measure_us!(root_bank.prune_program_cache_by_deployment_slot(*slot)).1;
         }
+
+        datapoint_info!(
+            "replay_stage-clear_slots",
+            (
+                "slot",
+                slots_to_purge.first().copied().unwrap_or_default(),
+                i64
+            ),
+            ("num_slots_cleared", slots_to_purge.len(), i64),
+            ("num_banks_dumped", num_banks_dumped, i64),
+            ("wait_for_verification_us", wait_for_verification_us, i64),
+            ("quiesce_us", quiesce_us, i64),
+            ("dump_slots_us", dump_slots_us, i64),
+            ("remove_unrooted_slots_us", remove_unrooted_slots_us, i64),
+            ("drop_banks_us", drop_banks_us, i64),
+            ("clear_slot_signatures_us", clear_slot_signatures_us, i64),
+            ("prune_program_cache_us", prune_program_cache_us, i64),
+            ("total_us", total_time.end_as_us(), i64),
+        );
 
         if let Some((transaction_status_sender, source, input)) = transaction_history_purge {
             for slot in slots_to_purge {

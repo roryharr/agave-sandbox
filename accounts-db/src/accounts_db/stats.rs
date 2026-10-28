@@ -157,6 +157,10 @@ pub struct PurgeStats {
     pub scan_storages_elapsed: AtomicU64,
     pub purge_accounts_index_elapsed: AtomicU64,
     pub handle_reclaims_elapsed: AtomicU64,
+    pub mark_banks_removed_us: AtomicU64,
+    pub remove_bank_us: AtomicU64,
+    pub drop_slot_cache_us: AtomicU64,
+    pub num_cached_accounts_removed: AtomicUsize,
 }
 
 impl PurgeStats {
@@ -222,6 +226,26 @@ impl PurgeStats {
                 (
                     "handle_reclaims_elapsed",
                     self.handle_reclaims_elapsed.swap(0, Ordering::Relaxed),
+                    i64
+                ),
+                (
+                    "mark_banks_removed_us",
+                    self.mark_banks_removed_us.swap(0, Ordering::Relaxed),
+                    i64
+                ),
+                (
+                    "remove_bank_us",
+                    self.remove_bank_us.swap(0, Ordering::Relaxed),
+                    i64
+                ),
+                (
+                    "drop_slot_cache_us",
+                    self.drop_slot_cache_us.swap(0, Ordering::Relaxed),
+                    i64
+                ),
+                (
+                    "num_cached_accounts_removed",
+                    self.num_cached_accounts_removed.swap(0, Ordering::Relaxed),
                     i64
                 ),
             );
