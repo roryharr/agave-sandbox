@@ -1188,11 +1188,14 @@ impl ReplayStage {
                         && !has_active_leader_bank
                         && let Some(slot) = Self::test_frozen_bank_to_dump(
                             test_dump_interval_slots,
-                            &mut last_test_dump_slot,
+                            last_test_dump_slot,
                             &bank_forks,
                         )
                     {
-                        warn!("TEST ONLY: clearing slot {slot}");
+                        warn!(
+                            "TEST ONLY: clearing slot {slot}, root {}",
+                            bank_forks.read().unwrap().root()
+                        );
                         let Ok(()) = Self::clear_slots(
                             [slot],
                             &bank_forks,
@@ -1204,6 +1207,10 @@ impl ReplayStage {
                                 "clearing a bank without a transaction-history purge cannot fail"
                             )
                         };
+                        // Root can pass the slot before it is cleared; retry next loop if so
+                        if bank_forks.read().unwrap().get(slot).is_none() {
+                            last_test_dump_slot = slot;
+                        }
                     }
                 } else {
                     let forks_root = bank_forks.read().unwrap().root();
@@ -2366,7 +2373,7 @@ impl ReplayStage {
     /// and their shreds are kept so replay rebuilds the same blocks under new bank ids.
     fn test_frozen_bank_to_dump(
         test_dump_interval_slots: Slot,
-        last_test_dump_slot: &mut Slot,
+        last_test_dump_slot: Slot,
         bank_forks: &RwLock<BankForks>,
     ) -> Option<Slot> {
         let frozen_slot = {
@@ -2378,11 +2385,8 @@ impl ReplayStage {
                 .filter(|slot| *slot > root)
                 .max()?
         };
-        if frozen_slot < last_test_dump_slot.saturating_add(test_dump_interval_slots) {
-            return None;
-        }
-        *last_test_dump_slot = frozen_slot;
-        Some(frozen_slot)
+        (frozen_slot >= last_test_dump_slot.saturating_add(test_dump_interval_slots))
+            .then_some(frozen_slot)
     }
 
     /// TEST ONLY: dumps a frozen bank through the TowerBFT duplicate-slot path
@@ -2397,11 +2401,12 @@ impl ReplayStage {
     ) {
         let Some(frozen_slot) = Self::test_frozen_bank_to_dump(
             test_dump_interval_slots,
-            last_test_dump_slot,
+            *last_test_dump_slot,
             bank_forks,
         ) else {
             return;
         };
+        *last_test_dump_slot = frozen_slot;
         let root_bank = bank_forks.read().unwrap().root_bank();
         Self::purge_unconfirmed_slot_with_options(
             frozen_slot,
@@ -2825,6 +2830,10 @@ impl ReplayStage {
         let (slots_to_purge, banks_to_clear) =
             bank_forks.read().unwrap().slots_to_clear(slots_to_clear);
         if slots_to_purge.is_empty() {
+            warn!(
+                "TEST ONLY: clear_slots found nothing to clear, root {}",
+                bank_forks.read().unwrap().root()
+            );
             return Ok(());
         }
 
@@ -2902,6 +2911,14 @@ impl ReplayStage {
                 measure_us!(root_bank.prune_program_cache_by_deployment_slot(*slot)).1;
         }
 
+        let total_us = total_time.end_as_us();
+        warn!(
+            "TEST ONLY: clear_slots {slots_to_purge:?} num_banks_dumped={num_banks_dumped} \
+             wait_for_verification_us={wait_for_verification_us} quiesce_us={quiesce_us} \
+             dump_slots_us={dump_slots_us} remove_unrooted_slots_us={remove_unrooted_slots_us} \
+             drop_banks_us={drop_banks_us} clear_slot_signatures_us={clear_slot_signatures_us} \
+             prune_program_cache_us={prune_program_cache_us} total_us={total_us}"
+        );
         datapoint_info!(
             "replay_stage-clear_slots",
             (
@@ -2918,7 +2935,7 @@ impl ReplayStage {
             ("drop_banks_us", drop_banks_us, i64),
             ("clear_slot_signatures_us", clear_slot_signatures_us, i64),
             ("prune_program_cache_us", prune_program_cache_us, i64),
-            ("total_us", total_time.end_as_us(), i64),
+            ("total_us", total_us, i64),
         );
 
         if let Some((transaction_status_sender, source, input)) = transaction_history_purge {

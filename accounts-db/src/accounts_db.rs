@@ -3149,6 +3149,19 @@ impl AccountsDb {
             remove_slots.iter().map(|(_, bank_id)| *bank_id),
             &remove_unrooted_purge_stats,
         );
+        let stats = &remove_unrooted_purge_stats;
+        warn!(
+            "TEST ONLY: remove_unrooted_slots {remove_slots:?} safety_checks_us={} \
+             mark_banks_removed_us={} remove_cache_us={} remove_bank_us={} \
+             drop_slot_cache_us={} num_cached_accounts_removed={} total_removed_cached_bytes={}",
+            stats.safety_checks_elapsed.load(Ordering::Relaxed),
+            stats.mark_banks_removed_us.load(Ordering::Relaxed),
+            stats.remove_cache_elapsed.load(Ordering::Relaxed),
+            stats.remove_bank_us.load(Ordering::Relaxed),
+            stats.drop_slot_cache_us.load(Ordering::Relaxed),
+            stats.num_cached_accounts_removed.load(Ordering::Relaxed),
+            stats.total_removed_cached_bytes.load(Ordering::Relaxed),
+        );
         remove_unrooted_purge_stats.report("remove_unrooted_slots_purge_slots_stats", None);
     }
 
