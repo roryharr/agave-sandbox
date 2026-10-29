@@ -1828,7 +1828,7 @@ fn cleanup_outdated_tower_bft_startup_banks(
     blockstore: &Blockstore,
     slots_to_cleanup: &[(Slot, BankId)],
 ) {
-    root_bank.remove_unrooted_slots(slots_to_cleanup);
+    root_bank.mark_banks_removed(slots_to_cleanup);
 
     for &(slot, _) in slots_to_cleanup {
         root_bank.clear_slot_signatures(slot);
@@ -6220,10 +6220,11 @@ pub mod tests {
 
         assert!(!blockstore.is_dead(1));
         assert!(!blockstore.is_dead(2));
+        // A removed bank's write cache stays until the bank drops
         assert!(
             first_alpenglow_bank
                 .get_account(&first_alpenglow_key)
-                .is_none()
+                .is_some()
         );
 
         let queued_slots: BTreeSet<_> = pending_slots
