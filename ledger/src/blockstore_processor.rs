@@ -1816,7 +1816,7 @@ fn cleanup_outdated_tower_bft_startup_banks(
     blockstore: &Blockstore,
     slots_to_cleanup: &[(Slot, BankId)],
 ) {
-    root_bank.remove_unrooted_slots(slots_to_cleanup);
+    root_bank.mark_banks_removed(slots_to_cleanup.iter().map(|(_slot, bank_id)| *bank_id));
 
     for &(slot, _) in slots_to_cleanup {
         root_bank.clear_slot_signatures(slot);

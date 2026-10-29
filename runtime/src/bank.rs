@@ -4086,8 +4086,8 @@ impl Bank {
         self.rc.accounts.unlock_accounts(txs_and_results)
     }
 
-    pub fn remove_unrooted_slots(&self, slots: &[(Slot, BankId)]) {
-        self.rc.accounts.accounts_db.remove_unrooted_slots(slots)
+    pub fn mark_banks_removed(&self, bank_ids: impl Iterator<Item = BankId> + Clone) {
+        self.rc.accounts.accounts_db.mark_banks_removed(bank_ids)
     }
 
     pub fn get_hash_age(&self, hash: &Hash) -> Option<u64> {
