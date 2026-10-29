@@ -62,11 +62,11 @@ pub struct ScanTracker {
     // Each scan has some latest slot `S` that is the tip of the fork the scan
     // is iterating over. The unique id of that slot `S` is recorded here (note we don't use
     // `S` as the id because there can be more than one version of a slot `S`). If a fork
-    // is abandoned, all of the slots on that fork up to `S` will be removed via
-    // `AccountsDb::remove_unrooted_slots()`. When the scan finishes, it'll realize that the
-    // results of the scan may have been corrupted by `remove_unrooted_slots` and abort its results.
+    // is abandoned, all of the slots on that fork up to `S` will be marked removed via
+    // `AccountsDb::mark_banks_removed()`. When the scan finishes, it'll realize that it
+    // scanned an abandoned fork and abort its results.
     //
-    // `removed_bank_ids` tracks all the slot ids that were removed via `remove_unrooted_slots()` so any attempted scans
+    // `removed_bank_ids` tracks all the slot ids that were marked via `mark_banks_removed()` so any attempted scans
     // on any of these slots fails. This is safe to purge once the associated Bank is dropped and
     // scanning the fork with that Bank at the tip is no longer possible.
     pub removed_bank_ids: Mutex<HashSet<BankId>>,
