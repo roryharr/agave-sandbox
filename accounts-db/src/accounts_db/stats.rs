@@ -304,6 +304,114 @@ impl CleanAccountsStats {
     }
 }
 
+/// Histogram of the data lengths `remove_dead_accounts` reads from storage for reclaimed accounts,
+/// and how flush changes the data length of the versions it reclaims
+#[derive(Debug, Default)]
+pub struct ReclaimDataLenStats {
+    pub len_0: AtomicU64,
+    /// nonce account
+    pub len_80: AtomicU64,
+    /// spl token mint
+    pub len_82: AtomicU64,
+    /// spl token account
+    pub len_165: AtomicU64,
+    /// stake account
+    pub len_200: AtomicU64,
+    /// vote account
+    pub len_3762: AtomicU64,
+    pub other_up_to_1k: AtomicU64,
+    pub other_above_1k: AtomicU64,
+    pub size_unchanged: AtomicU64,
+    pub size_grew: AtomicU64,
+    pub size_shrank: AtomicU64,
+    /// the reclaimed version's storage or record was not found
+    pub size_unknown: AtomicU64,
+}
+
+impl ReclaimDataLenStats {
+    pub fn record(&self, data_lens: &[usize]) {
+        let mut counts = [0u64; 8];
+        for data_len in data_lens {
+            let bucket = match *data_len {
+                0 => 0,
+                80 => 1,
+                82 => 2,
+                165 => 3,
+                200 => 4,
+                3762 => 5,
+                ..=1024 => 6,
+                _ => 7,
+            };
+            counts[bucket] += 1;
+        }
+        for (stat, count) in [
+            &self.len_0,
+            &self.len_80,
+            &self.len_82,
+            &self.len_165,
+            &self.len_200,
+            &self.len_3762,
+            &self.other_up_to_1k,
+            &self.other_above_1k,
+        ]
+        .into_iter()
+        .zip(counts)
+        {
+            if count > 0 {
+                stat.fetch_add(count, Ordering::Relaxed);
+            }
+        }
+    }
+
+    pub fn record_size_change(&self, old_data_len: Option<usize>, new_data_len: usize) {
+        let stat = match old_data_len {
+            None => &self.size_unknown,
+            Some(old_data_len) if old_data_len == new_data_len => &self.size_unchanged,
+            Some(old_data_len) if old_data_len < new_data_len => &self.size_grew,
+            Some(_) => &self.size_shrank,
+        };
+        stat.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn report(&self) {
+        datapoint_info!(
+            "accounts_db-reclaim_data_lens",
+            ("len_0", self.len_0.swap(0, Ordering::Relaxed), i64),
+            ("len_80", self.len_80.swap(0, Ordering::Relaxed), i64),
+            ("len_82", self.len_82.swap(0, Ordering::Relaxed), i64),
+            ("len_165", self.len_165.swap(0, Ordering::Relaxed), i64),
+            ("len_200", self.len_200.swap(0, Ordering::Relaxed), i64),
+            ("len_3762", self.len_3762.swap(0, Ordering::Relaxed), i64),
+            (
+                "other_up_to_1k",
+                self.other_up_to_1k.swap(0, Ordering::Relaxed),
+                i64
+            ),
+            (
+                "other_above_1k",
+                self.other_above_1k.swap(0, Ordering::Relaxed),
+                i64
+            ),
+            (
+                "size_unchanged",
+                self.size_unchanged.swap(0, Ordering::Relaxed),
+                i64
+            ),
+            ("size_grew", self.size_grew.swap(0, Ordering::Relaxed), i64),
+            (
+                "size_shrank",
+                self.size_shrank.swap(0, Ordering::Relaxed),
+                i64
+            ),
+            (
+                "size_unknown",
+                self.size_unknown.swap(0, Ordering::Relaxed),
+                i64
+            ),
+        );
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct ShrinkAncientStats {
     pub shrink_stats: ShrinkStats,

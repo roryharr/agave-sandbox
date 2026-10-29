@@ -40,9 +40,9 @@ use {
         accounts_cache::{AccountsCache, CachedAccount, SlotCache},
         accounts_db::stats::{
             AccountsStats, CleanAccountsStats, FlushStats, LoadAccountsStats,
-            ObsoleteAccountsStats, PurgeStats, ShrinkAncientStats, ShrinkStats, ShrinkStatsSub,
-            StoreAccountsForFlushStats, StoreAccountsForShrinkStats, StoreAccountsForSquashStats,
-            StoreAccountsUnfrozenStats, WriteAccountsToCacheStats,
+            ObsoleteAccountsStats, PurgeStats, ReclaimDataLenStats, ShrinkAncientStats,
+            ShrinkStats, ShrinkStatsSub, StoreAccountsForFlushStats, StoreAccountsForShrinkStats,
+            StoreAccountsForSquashStats, StoreAccountsUnfrozenStats, WriteAccountsToCacheStats,
         },
         accounts_file::{self, AccountsFileProvider},
         accounts_hash::{AccountLtHash, AccountsLtHash, ZERO_LAMPORT_ACCOUNT_LT_HASH},
@@ -794,6 +794,8 @@ pub struct AccountsDb {
 
     clean_accounts_stats: CleanAccountsStats,
 
+    reclaim_data_len_stats: ReclaimDataLenStats,
+
     // Stats for purges called outside of clean_accounts()
     external_purge_slots_stats: PurgeStats,
 
@@ -976,6 +978,7 @@ impl AccountsDb {
             write_version: AtomicU64::new(0),
             external_purge_slots_stats: PurgeStats::default(),
             clean_accounts_stats: CleanAccountsStats::default(),
+            reclaim_data_len_stats: ReclaimDataLenStats::default(),
             shrink_stats: ShrinkStats::default(),
             shrink_ancient_stats: ShrinkAncientStats::default(),
             stats: AccountsStats::default(),
@@ -3287,6 +3290,7 @@ impl AccountsDb {
                 i64
             ),
         );
+        self.reclaim_data_len_stats.report();
     }
 
     /// Flush all rooted slots up to `requested_flush_root` with cleaning. Cleaning stores only
@@ -3868,6 +3872,7 @@ impl AccountsDb {
                 continue;
             }
             let old_slot = accounts.slot(i);
+            let num_reclaims_before = reclaims.len();
             self.accounts_index.upsert(
                 target_slot,
                 old_slot,
@@ -3876,6 +3881,22 @@ impl AccountsDb {
                 &mut reclaims,
                 reclaim,
             );
+            // Compare each reclaimed version's data length with the version replacing it
+            let new_data_len = accounts.data_len(i);
+            for (reclaimed_slot, reclaimed_info) in &reclaims[num_reclaims_before..] {
+                let old_data_len = self
+                    .storage
+                    .get_slot_storage_entry(*reclaimed_slot)
+                    .and_then(|storage| {
+                        storage
+                            .accounts
+                            .get_account_data_lens(iter::once(reclaimed_info.offset()))
+                            .first()
+                            .copied()
+                    });
+                self.reclaim_data_len_stats
+                    .record_size_change(old_data_len, new_data_len);
+            }
 
             if !self.account_indexes.is_empty() {
                 // Since StorableAccounts::account() may read the account from disk,
@@ -4024,6 +4045,7 @@ impl AccountsDb {
                         let data_lens = store
                             .accounts
                             .get_account_data_lens(offsets.iter().copied());
+                        self.reclaim_data_len_stats.record(&data_lens);
                         let dead_bytes = data_lens
                             .iter()
                             .map(|len| store.accounts.calculate_stored_size(*len))
