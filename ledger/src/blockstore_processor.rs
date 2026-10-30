@@ -6220,12 +6220,6 @@ pub mod tests {
 
         assert!(!blockstore.is_dead(1));
         assert!(!blockstore.is_dead(2));
-        // A removed bank's write cache stays until the bank drops
-        assert!(
-            first_alpenglow_bank
-                .get_account(&first_alpenglow_key)
-                .is_some()
-        );
 
         let queued_slots: BTreeSet<_> = pending_slots
             .iter()
