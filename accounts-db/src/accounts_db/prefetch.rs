@@ -224,7 +224,7 @@ mod tests {
     fn test_read_for_prefetch_skips_outstanding() {
         let db = AccountsDb::default_for_tests();
         let pubkey = Pubkey::new_unique();
-        let account = AccountSharedData::new(42, 1, AccountSharedData::default().owner());
+        let account = AccountSharedData::new(42, 1, &Pubkey::default());
         db.store_for_tests((0, &[(&pubkey, &account)][..]));
         db.add_root_and_flush_write_cache(0);
         let mut outstanding = Outstanding::default();
