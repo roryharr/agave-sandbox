@@ -10,6 +10,7 @@ use {
         },
         reward_info::RewardInfo,
         stake_account::StakeAccount,
+        stakes::StakeDelegations,
     },
     log::error,
     serde::{Deserialize, Serialize},
@@ -19,7 +20,6 @@ use {
     solana_accounts_db::stake_rewards::{StakeReward, StakeRewardInfo},
     solana_clock::Epoch,
     solana_measure::measure_us,
-    solana_pubkey::Pubkey,
     solana_rent::Rent,
     solana_reward_info::RewardType,
     solana_stake_history::StakeHistory,
@@ -258,15 +258,14 @@ impl Bank {
         distribution_epoch: u64,
         stake_history: &StakeHistory,
         new_warmup_cooldown_rate_epoch: Option<Epoch>,
-        stakes_cache_accounts: &imbl::HashMap<Pubkey, StakeAccount<Delegation>>,
+        stakes_cache_accounts: &StakeDelegations<StakeAccount<Delegation>>,
         partitioned_stake_reward: &PartitionedStakeReward,
         rent: &Rent,
         adjust_delegations_for_rent: bool,
     ) -> Result<StakeReward, DistributionError> {
         let stake_account = stakes_cache_accounts
             .get(&partitioned_stake_reward.stake_pubkey)
-            .ok_or(DistributionError::AccountNotFound)?
-            .clone();
+            .ok_or(DistributionError::AccountNotFound)?;
 
         let (mut account, stake_state): (AccountSharedData, StakeStateV2) = stake_account.into();
         let StakeStateV2::Stake(meta, stake, flags) = stake_state else {
@@ -459,6 +458,7 @@ mod tests {
         solana_epoch_schedule::EpochSchedule,
         solana_hash::Hash,
         solana_native_token::LAMPORTS_PER_SOL,
+        solana_pubkey::Pubkey,
         solana_reward_info::RewardType,
         solana_stake_history::StakeHistoryEntry,
         solana_stake_interface::{

@@ -9,7 +9,6 @@ use {
         alpenglow_epoch_type::RewardEpochDelegatedStakes, bank::rewards_calculation_thread_pool,
         stake_account, stake_history::StakeHistory,
     },
-    imbl::HashMap as ImblHashMap,
     num_derive::ToPrimitive,
     rayon::{ThreadPool, prelude::*},
     solana_account::{AccountSharedData, ReadableAccount},
@@ -28,7 +27,7 @@ use {
         collections::HashMap,
         sync::{Arc, RwLock, RwLockReadGuard},
     },
-    wincode::{SchemaWrite, containers::FromIntoIterator, len::BincodeLen},
+    wincode::SchemaWrite,
 };
 #[cfg(feature = "dev-context-only-utils")]
 use {
@@ -37,8 +36,11 @@ use {
 };
 
 mod serde_stakes;
+mod stake_delegations;
 pub(crate) use serde_stakes::DeserializableDelegationStakes;
 pub use serde_stakes::SerdeStakesToStakeFormat;
+use stake_delegations::StakeDelegationsSchema;
+pub use stake_delegations::{StakeDelegations, StakeDelegationsView};
 #[derive(Debug, Clone, PartialEq, Eq, ToPrimitive)]
 pub enum InvalidCacheEntryReason {
     Missing,
@@ -47,7 +49,7 @@ pub enum InvalidCacheEntryReason {
 }
 
 type StakeAccount = stake_account::StakeAccount<Delegation>;
-pub(crate) type DelegatedStakes = ImblHashMap<Pubkey, u64>;
+pub(crate) type DelegatedStakes = HashMap<Pubkey, u64>;
 
 /// Maximum number of inert delegations evicted from StakesCache at epoch
 /// boundaries. This number is chosen to cover normal deactivation pressure
@@ -85,6 +87,17 @@ impl StakesCache {
     #[cfg_attr(feature = "dev-context-only-utils", qualifiers(pub))]
     pub(crate) fn stakes(&self) -> RwLockReadGuard<'_, Stakes<StakeAccount>> {
         self.0.read().unwrap()
+    }
+
+    /// Returns the stakes for a child bank.
+    pub(crate) fn new_child(&self) -> Stakes<StakeAccount> {
+        self.0.write().unwrap().new_child()
+    }
+
+    /// Moves the stake delegations written by this bank and its ancestors into the rooted map.
+    /// Called when this bank is rooted.
+    pub(crate) fn squash(&self) {
+        self.0.write().unwrap().stake_delegations.squash();
     }
 
     pub(crate) fn check_and_store(
@@ -216,8 +229,8 @@ pub struct Stakes<T: Clone> {
         feature = "stable-abi",
         stable_abi_sample(with = "sample_collection_sized(rng, SequenceLenMax(1))")
     )]
-    #[wincode(with = "FromIntoIterator<ImblHashMap<Pubkey, T>, BincodeLen>")]
-    stake_delegations: ImblHashMap<Pubkey, T>,
+    #[wincode(with = "StakeDelegationsSchema<T>")]
+    stake_delegations: StakeDelegations<T>,
 
     /// current effective stake delegated to each vote account pubkey
     #[cfg_attr(feature = "stable-abi", stable_abi_sample(with = "Default::default()"))]
@@ -239,7 +252,7 @@ impl<T: Clone> Stakes<T> {
         Stakes {
             vote_accounts,
             epoch,
-            stake_delegations: ImblHashMap::new(),
+            stake_delegations: StakeDelegations::default(),
             delegated_stakes: DelegatedStakes::default(),
             unused: 0,
             stake_history: StakeHistory::default(),
@@ -292,7 +305,7 @@ impl Stakes<StakeAccount> {
         let stake_history = StakeHistory::default();
         let mut vote_accounts = VoteAccountsHashMap::default();
         let mut delegated_stakes = DelegatedStakes::default();
-        let mut stake_delegations = ImblHashMap::new();
+        let mut stake_delegations = HashMap::new();
         let epoch = 0;
 
         for (pubkey, account) in accounts {
@@ -327,7 +340,7 @@ impl Stakes<StakeAccount> {
 
         Self {
             vote_accounts,
-            stake_delegations,
+            stake_delegations: stake_delegations.into_iter().collect(),
             delegated_stakes,
             unused: 0,
             epoch,
@@ -357,20 +370,14 @@ impl Stakes<StakeAccount> {
         let vote_pubkeys = pubkeys_by_owner
             .remove(&solana_vote_program::id())
             .unwrap_or_default();
-        let stake_delegations = stake_pubkeys
+        let stake_delegations: HashMap<_, _> = stake_pubkeys
             .into_par_iter()
-            // We use fold/reduce to aggregate the results, which does a bit more work than calling
-            // collect()/collect_vec_list() and then imbl::HashMap::from_iter(collected.into_iter()),
-            // but it does it in background threads, so effectively it's faster.
-            .fold(ImblHashMap::new, |mut map, pubkey| {
-                if let Some(stake_account) =
-                    get_account(&pubkey).and_then(|account| StakeAccount::try_from(account).ok())
-                {
-                    map.insert(pubkey, stake_account);
-                }
-                map
+            .filter_map(|pubkey| {
+                let stake_account = get_account(&pubkey)
+                    .and_then(|account| StakeAccount::try_from(account).ok())?;
+                Some((pubkey, stake_account))
             })
-            .reduce(ImblHashMap::new, |a, b| a.union(b));
+            .collect();
         let vote_accounts = vote_pubkeys
             .into_iter()
             .filter_map(|pubkey| {
@@ -392,7 +399,7 @@ impl Stakes<StakeAccount> {
         );
         Self {
             vote_accounts,
-            stake_delegations,
+            stake_delegations: stake_delegations.into_iter().collect(),
             delegated_stakes,
             unused: 0,
             epoch,
@@ -404,14 +411,15 @@ impl Stakes<StakeAccount> {
     pub fn new_for_tests(
         epoch: Epoch,
         vote_accounts: VoteAccounts,
-        stake_delegations: ImblHashMap<Pubkey, StakeAccount>,
+        stake_delegations: impl IntoIterator<Item = (Pubkey, StakeAccount)>,
     ) -> Self {
         let stake_history = StakeHistory::default();
+        let stake_delegations: HashMap<_, _> = stake_delegations.into_iter().collect();
         let delegated_stakes =
             Self::calculate_delegated_stakes(&stake_delegations, epoch, &stake_history, None);
         Self {
             vote_accounts,
-            stake_delegations,
+            stake_delegations: stake_delegations.into_iter().collect(),
             delegated_stakes,
             unused: 0,
             epoch,
@@ -521,7 +529,7 @@ impl Stakes<StakeAccount> {
         // earn no rewards, so we can drop them here with no consensus effect.
         // We bound the number of removals for performance reasons. If we have
         // more inactives than MAX_INERT_STAKES_REMOVED_PER_EPOCH, this will
-        // remove a random subset on each validator due to how imbl is seeded,
+        // remove a random subset on each validator due to hash map seeding,
         // again with no consensus effect.
         //
         // Before SIMD-0599, inert_stake_delegations is empty, so this is a no-op.
@@ -535,7 +543,7 @@ impl Stakes<StakeAccount> {
 
     #[cfg(feature = "dev-context-only-utils")]
     fn calculate_delegated_stakes(
-        stake_delegations: &ImblHashMap<Pubkey, StakeAccount>,
+        stake_delegations: &HashMap<Pubkey, StakeAccount>,
         epoch: Epoch,
         stake_history: &StakeHistory,
         new_rate_activation_epoch: Option<Epoch>,
@@ -559,8 +567,8 @@ impl Stakes<StakeAccount> {
         new_rate_activation_epoch: Option<Epoch>,
         in_epoch_rewards_period: bool,
     ) {
-        let inert_stake_delegations: Vec<Pubkey> = self
-            .stake_delegations
+        let stake_delegations = self.stake_delegations.view();
+        let inert_stake_delegations: Vec<Pubkey> = stake_delegations
             .iter()
             .filter(|(_stake_pubkey, stake_account)| {
                 let delegation = stake_account.delegation();
@@ -586,6 +594,7 @@ impl Stakes<StakeAccount> {
             })
             .map(|(stake_pubkey, _stake_account)| *stake_pubkey)
             .collect();
+        drop(stake_delegations);
         // Inert delegations contribute no stake to `delegated_stakes` or
         // `vote_accounts`, so no further bookkeeping is needed.
         for stake_pubkey in &inert_stake_delegations {
@@ -715,36 +724,21 @@ impl Stakes<StakeAccount> {
         }
     }
 
-    /// Returns a reference to the map of stake delegations.
-    ///
-    /// # Performance
-    ///
-    /// `[imbl::HashMap]` is a [hash array mapped trie (HAMT)][hamt], which means
-    /// that inserts, deletions and lookups are average-case O(1) and
-    /// worst-case O(log n). However, the performance of iterations is poor due
-    /// to depth-first traversal and jumps. Currently it's also impossible to
-    /// iterate over it with [`rayon`].
-    ///
-    /// [hamt]: https://en.wikipedia.org/wiki/Hash_array_mapped_trie
-    pub(crate) fn stake_delegations(&self) -> &ImblHashMap<Pubkey, StakeAccount> {
+    #[cfg_attr(feature = "dev-context-only-utils", qualifiers(pub))]
+    pub(crate) fn stake_delegations(&self) -> &StakeDelegations<StakeAccount> {
         &self.stake_delegations
     }
 
-    /// Collects stake delegations into a vector, which then can be used for
-    /// parallel iteration with [`rayon`].
-    ///
-    /// # Performance
-    ///
-    /// The execution of this method takes ~200ms and it collects elements of
-    /// the [`imbl::HashMap`], which is a [hash array mapped trie (HAMT)][hamt],
-    /// so that operation involves a depth-first traversal with jumps. However,
-    /// it's still a reasonable tradeoff if the caller iterates over these
-    /// elements.
-    ///
-    /// [hamt]: https://en.wikipedia.org/wiki/Hash_array_mapped_trie
-    #[cfg_attr(feature = "dev-context-only-utils", qualifiers(pub))]
-    pub(crate) fn stake_delegations_vec(&self) -> Vec<(&Pubkey, &StakeAccount)> {
-        self.stake_delegations.iter().collect()
+    /// Returns the stakes for a child bank.
+    fn new_child(&mut self) -> Self {
+        Self {
+            vote_accounts: self.vote_accounts.clone(),
+            stake_delegations: self.stake_delegations.new_child(),
+            delegated_stakes: self.delegated_stakes.clone(),
+            unused: self.unused,
+            epoch: self.epoch,
+            stake_history: self.stake_history.clone(),
+        }
     }
 
     pub(crate) fn highest_staked_node(&self) -> Option<SlotLeader> {
@@ -900,7 +894,7 @@ pub(crate) mod tests {
         pub(crate) fn from_deserialized(stakes: DeserializableDelegationStakes) -> Self {
             Self {
                 vote_accounts: stakes.vote_accounts,
-                stake_delegations: ImblHashMap::from_iter(stakes.stake_delegations),
+                stake_delegations: stakes.stake_delegations.into_iter().collect(),
                 delegated_stakes: DelegatedStakes::default(),
                 unused: stakes.unused,
                 epoch: stakes.epoch,
@@ -1312,7 +1306,8 @@ pub(crate) mod tests {
             inert_stake_delegations,
         } = {
             let stakes = stakes_cache.stakes();
-            let stake_delegations = stakes.stake_delegations_vec();
+            let stake_delegations_view = stakes.stake_delegations().view();
+            let stake_delegations = stake_delegations_view.to_vec();
             stakes.calculate_activated_stake(
                 next_epoch,
                 &thread_pool,
@@ -1568,8 +1563,12 @@ pub(crate) mod tests {
             get_account,
         );
         assert_eq!(
-            stakes.stake_delegations().keys().collect::<Vec<_>>(),
-            vec![&stake_pubkey]
+            stakes
+                .stake_delegations()
+                .to_map()
+                .into_keys()
+                .collect::<Vec<_>>(),
+            vec![stake_pubkey]
         );
     }
 

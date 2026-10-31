@@ -577,6 +577,11 @@ impl BankForks {
                 i64
             ),
             (
+                "total_squash_stakes_us",
+                set_root_metrics.timings.total_squash_time.squash_stakes_us,
+                i64
+            ),
+            (
                 "total_squash_accounts_ms",
                 set_root_metrics
                     .timings

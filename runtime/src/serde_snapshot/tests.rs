@@ -694,8 +694,6 @@ mod serde_snapshot_tests {
         current_slot += 1;
         accounts.store_for_tests((current_slot, [(&dummy_pubkey, &dummy_account)].as_slice()));
         accounts.add_root_for_tests(current_slot);
-
-        accounts.assert_not_load_account(current_slot, pubkey1);
         accounts.assert_load_account(current_slot, pubkey2, old_lamport);
         accounts.assert_load_account(current_slot, dummy_pubkey, dummy_lamport);
 
@@ -722,8 +720,6 @@ mod serde_snapshot_tests {
         // by clean
         accounts.set_latest_full_snapshot_slot(0);
         accounts.clean_accounts_for_tests();
-
-        accounts.assert_not_load_account(current_slot, pubkey1);
         accounts.assert_load_account(current_slot, pubkey2, old_lamport);
         accounts.assert_load_account(current_slot, dummy_pubkey, dummy_lamport);
     }

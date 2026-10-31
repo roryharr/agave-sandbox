@@ -1784,6 +1784,7 @@ mod tests {
             rewards_calculation: _,
             calculate_activated_stake_time_us: _,
             update_rewards_with_thread_pool_time_us: _,
+            collect_stake_delegations_time_us: _,
         } = simulated_bank.compute_new_epoch_caches_and_rewards(
             &thread_pool,
             simulated_bank.epoch() - 1,

@@ -10196,7 +10196,6 @@ dependencies = [
  "crossbeam-queue",
  "crossbeam-utils",
  "dashmap",
- "imbl",
  "itertools 0.15.0",
  "libc",
  "libsecp256k1",

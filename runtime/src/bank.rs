@@ -289,6 +289,7 @@ pub struct SquashTiming {
     pub squash_accounts_ms: u64,
     pub squash_accounts_cache_ms: u64,
     pub squash_cache_ms: u64,
+    pub squash_stakes_us: u64,
 }
 
 impl AddAssign for SquashTiming {
@@ -296,6 +297,7 @@ impl AddAssign for SquashTiming {
         self.squash_accounts_ms += rhs.squash_accounts_ms;
         self.squash_accounts_cache_ms += rhs.squash_accounts_cache_ms;
         self.squash_cache_ms += rhs.squash_cache_ms;
+        self.squash_stakes_us += rhs.squash_stakes_us;
     }
 }
 
@@ -1204,6 +1206,7 @@ struct NewEpochBundle {
     /// (distribution) epoch *after* applying VAT filtering.
     filtered_distribution_vote_accounts: VoteAccounts,
     rewards_calculation: Arc<PartitionedRewardsCalculation>,
+    collect_stake_delegations_time_us: u64,
     calculate_activated_stake_time_us: u64,
     update_rewards_with_thread_pool_time_us: u64,
 }
@@ -1446,7 +1449,7 @@ impl Bank {
             measure_us!(RwLock::new(parent.blockhash_queue.read().unwrap().clone()));
 
         let (stakes_cache, stakes_cache_time_us) =
-            measure_us!(StakesCache::new(parent.stakes_cache.stakes().clone()));
+            measure_us!(StakesCache::new(parent.stakes_cache.new_child()));
 
         let (epoch_stakes, epoch_stakes_time_us) = measure_us!(parent.epoch_stakes.clone());
 
@@ -1802,7 +1805,10 @@ impl Bank {
         // update vote accounts with warmed up stakes before saving a
         // snapshot of stakes in epoch stakes
         let stakes = self.stakes_cache.stakes();
-        let stake_delegations = stakes.stake_delegations_vec();
+        let collect_stake_delegations_time = Measure::start("collect_stake_delegations");
+        let stake_delegations_view = stakes.stake_delegations().view();
+        let stake_delegations = stake_delegations_view.to_vec();
+        let collect_stake_delegations_time_us = collect_stake_delegations_time.end_as_us();
         let (
             EpochBoundaryStakes {
                 stake_history,
@@ -1853,6 +1859,7 @@ impl Bank {
             inert_stake_delegations,
             filtered_distribution_vote_accounts,
             rewards_calculation,
+            collect_stake_delegations_time_us,
             calculate_activated_stake_time_us,
             update_rewards_with_thread_pool_time_us,
         }
@@ -1884,6 +1891,7 @@ impl Bank {
             inert_stake_delegations,
             filtered_distribution_vote_accounts,
             rewards_calculation,
+            collect_stake_delegations_time_us,
             calculate_activated_stake_time_us,
             update_rewards_with_thread_pool_time_us,
         } = self.compute_new_epoch_caches_and_rewards(
@@ -1938,6 +1946,7 @@ impl Bank {
             parent_slot,
             NewEpochTimings {
                 apply_feature_activations_time_us,
+                collect_stake_delegations_time_us,
                 calculate_activated_stake_time_us,
                 update_epoch_stakes_time_us,
                 update_rewards_with_thread_pool_time_us,
@@ -3265,6 +3274,8 @@ impl Bank {
         }
         squash_accounts_time.stop();
 
+        let (_, squash_stakes_us) = measure_us!(self.stakes_cache.squash());
+
         *self.rc.parent.write().unwrap() = None;
 
         let mut squash_cache_time = Measure::start("squash_cache_time");
@@ -3278,6 +3289,7 @@ impl Bank {
             squash_accounts_ms: squash_accounts_time.as_ms(),
             squash_accounts_cache_ms: total_cache_us / 1000,
             squash_cache_ms: squash_cache_time.as_ms(),
+            squash_stakes_us,
         }
     }
 
@@ -7184,6 +7196,7 @@ impl Bank {
         self.stakes_cache
             .stakes()
             .stake_delegations()
+            .view()
             .iter()
             .for_each(|(pubkey, _)| {
                 minimized_account_set.insert(*pubkey);
