@@ -23,7 +23,7 @@ use {
         },
         reward_info::RewardInfo,
         stake_account::StakeAccount,
-        stakes::{Stakes, is_delegation_inert},
+        stakes::{StakeDelegationsView, Stakes, is_delegation_inert},
     },
     log::{debug, info},
     rayon::{
@@ -452,7 +452,11 @@ impl Bank {
             total_stake_rewards_lamports
         );
 
-        let num_stake_accounts = self.stakes_cache.stakes().stake_delegations().len();
+        let num_stake_accounts = self
+            .stakes_cache
+            .stakes()
+            .stake_delegations()
+            .len(&self.ancestors);
         let num_vote_accounts = *num_filtered_vote_accounts;
         self.capitalization.fetch_add(
             distributed_lamports + distributed_to_incinerator_lamports,
@@ -624,10 +628,11 @@ impl Bank {
         &'a self,
         rewarded_epoch: Epoch,
         stakes: &'a Stakes<StakeAccount<Delegation>>,
+        stake_delegations: &'a StakeDelegationsView<'_, StakeAccount<Delegation>>,
     ) -> EpochRewardCalculateParamInfo<'a> {
         // Use `stakes` for stake-related info
         let stake_history = stakes.history().clone();
-        let stake_delegations = stakes.stake_delegations_vec();
+        let stake_delegations = stake_delegations.to_vec();
 
         // Use the VAT-filtered vote-account snapshot from epoch_stakes.
         // Recalculation should match the vote-account admission policy used for
@@ -1108,11 +1113,16 @@ impl Bank {
         };
 
         let stakes = self.stakes_cache.stakes();
+        let stake_delegations_view = stakes.stake_delegations().view(&self.ancestors);
         let EpochRewardCalculateParamInfo {
             stake_history,
             stake_delegations,
             cached_vote_accounts,
-        } = self.get_epoch_params_for_recalculation(rewarded_epoch, &stakes);
+        } = self.get_epoch_params_for_recalculation(
+            rewarded_epoch,
+            &stakes,
+            &stake_delegations_view,
+        );
         let reward_epoch_delegated_stakes = RewardEpochDelegatedStakes::get(self);
         let ag_epoch_type =
             AlpenglowEpochType::get(self, rewarded_epoch, reward_epoch_delegated_stakes.as_ref());
@@ -1142,6 +1152,7 @@ impl Bank {
                 null_tracer(),
                 &mut RewardsMetrics::default(), // This is required, but not reporting anything at the moment
             );
+        drop(stake_delegations_view);
         drop(stakes);
         let partition_indices = hash_rewards_into_partitions(
             &stake_rewards,
@@ -1634,11 +1645,16 @@ mod tests {
 
         let stakes = bank.stakes_cache.stakes();
         let rewarded_epoch = 0;
+        let stake_delegations_view = stakes.stake_delegations().view(&bank.ancestors);
         let EpochRewardCalculateParamInfo {
             stake_history,
             stake_delegations,
             cached_vote_accounts,
-        } = bank.get_epoch_params_for_recalculation(rewarded_epoch, &stakes);
+        } = bank.get_epoch_params_for_recalculation(
+            rewarded_epoch,
+            &stakes,
+            &stake_delegations_view,
+        );
         let reward_epoch_delegated_stakes = RewardEpochDelegatedStakes::get(&bank)
             .unwrap_or_else(|| reward_epoch_delegated_stakes_for_tests(rewarded_epoch));
         let calculated_rewards = bank.calculate_validator_rewards(
@@ -1695,11 +1711,16 @@ mod tests {
 
         let stakes: RwLockReadGuard<Stakes<StakeAccount<Delegation>>> = bank.stakes_cache.stakes();
         let rewarded_epoch = bank.epoch().saturating_sub(1);
+        let stake_delegations_view = stakes.stake_delegations().view(&bank.ancestors);
         let EpochRewardCalculateParamInfo {
             stake_history,
             stake_delegations,
             cached_vote_accounts,
-        } = bank.get_epoch_params_for_recalculation(rewarded_epoch, &stakes);
+        } = bank.get_epoch_params_for_recalculation(
+            rewarded_epoch,
+            &stakes,
+            &stake_delegations_view,
+        );
         let reward_epoch_delegated_stakes = RewardEpochDelegatedStakes::get(&bank);
         let ag_epoch_type = AlpenglowEpochType::get(
             &bank,
@@ -1736,11 +1757,16 @@ mod tests {
         let expected_rewards = 100_000_000_000;
         let stakes: RwLockReadGuard<Stakes<StakeAccount<Delegation>>> = bank.stakes_cache.stakes();
         let rewarded_epoch = bank.epoch().saturating_sub(1);
+        let stake_delegations_view = stakes.stake_delegations().view(&bank.ancestors);
         let EpochRewardCalculateParamInfo {
             stake_history,
             stake_delegations,
             cached_vote_accounts,
-        } = bank.get_epoch_params_for_recalculation(rewarded_epoch, &stakes);
+        } = bank.get_epoch_params_for_recalculation(
+            rewarded_epoch,
+            &stakes,
+            &stake_delegations_view,
+        );
 
         let point_value = bank.calculate_reward_points_partitioned(
             &stake_history,
@@ -1879,11 +1905,16 @@ mod tests {
         };
 
         let stakes = bank.stakes_cache.stakes();
+        let stake_delegations_view = stakes.stake_delegations().view(&bank.ancestors);
         let EpochRewardCalculateParamInfo {
             stake_history,
             stake_delegations,
             cached_vote_accounts,
-        } = bank.get_epoch_params_for_recalculation(rewarded_epoch, &stakes);
+        } = bank.get_epoch_params_for_recalculation(
+            rewarded_epoch,
+            &stakes,
+            &stake_delegations_view,
+        );
         let reward_epoch_delegated_stakes = RewardEpochDelegatedStakes::get(bank);
         let ag_epoch_type =
             AlpenglowEpochType::get(bank, rewarded_epoch, reward_epoch_delegated_stakes.as_ref());
@@ -2462,7 +2493,7 @@ mod tests {
             bank.stakes_cache
                 .stakes()
                 .stake_delegations()
-                .contains_key(&inert_stake_address)
+                .contains_key(&bank.ancestors, &inert_stake_address)
         );
 
         let bank = apply_epoch_operations(
@@ -2485,7 +2516,7 @@ mod tests {
                 .stakes_cache
                 .stakes()
                 .stake_delegations()
-                .contains_key(&inert_stake_address)
+                .contains_key(&bank.ancestors, &inert_stake_address)
         );
         let EpochRewardStatus::Active(EpochRewardPhase::Calculation(status)) =
             &bank.epoch_reward_status
@@ -2644,11 +2675,16 @@ mod tests {
         let reward_calc_tracer = Some(tracer);
         let rewarded_epoch = bank.epoch() - 1;
         let stakes: RwLockReadGuard<Stakes<StakeAccount<Delegation>>> = bank.stakes_cache.stakes();
+        let stake_delegations_view = stakes.stake_delegations().view(&bank.ancestors);
         let EpochRewardCalculateParamInfo {
             stake_history,
             stake_delegations,
             cached_vote_accounts,
-        } = bank.get_epoch_params_for_recalculation(rewarded_epoch, &stakes);
+        } = bank.get_epoch_params_for_recalculation(
+            rewarded_epoch,
+            &stakes,
+            &stake_delegations_view,
+        );
         let reward_epoch_delegated_stakes = RewardEpochDelegatedStakes::get(&bank);
         let ag_epoch_type = AlpenglowEpochType::get(
             &bank,
@@ -2667,6 +2703,7 @@ mod tests {
                 reward_calc_tracer,
                 &mut rewards_metrics,
             );
+        drop(stake_delegations_view);
         drop(stakes);
 
         let vote_account = bank.load(&bank.ancestors, vote_pubkey).unwrap().0;
@@ -2714,9 +2751,18 @@ mod tests {
         expected_stake_rewards: &[PartitionedStakeRewards],
         received_stake_rewards: &[PartitionedStakeRewards],
     ) {
+        // Order within a partition follows stake delegation iteration order, which is arbitrary
+        let sorted = |partition: &PartitionedStakeRewards| {
+            let mut rewards: Vec<_> = partition
+                .enumerated_rewards_iter()
+                .map(|(_, reward)| reward.clone())
+                .collect();
+            rewards.sort_unstable_by_key(|reward| reward.stake_pubkey);
+            rewards
+        };
         for (i, partition) in received_stake_rewards.iter().enumerate() {
             let expected_partition = &expected_stake_rewards[i];
-            assert_eq!(partition, expected_partition);
+            assert_eq!(sorted(partition), sorted(expected_partition));
         }
     }
 
@@ -2750,11 +2796,16 @@ mod tests {
         let thread_pool = ThreadPoolBuilder::new().num_threads(1).build().unwrap();
         let mut rewards_metrics = RewardsMetrics::default();
         let stakes = bank.stakes_cache.stakes();
+        let stake_delegations_view = stakes.stake_delegations().view(&bank.ancestors);
         let EpochRewardCalculateParamInfo {
             stake_history,
             stake_delegations,
             cached_vote_accounts,
-        } = bank.get_epoch_params_for_recalculation(rewarded_epoch, &stakes);
+        } = bank.get_epoch_params_for_recalculation(
+            rewarded_epoch,
+            &stakes,
+            &stake_delegations_view,
+        );
         let PartitionedRewardsCalculation {
             stake_rewards:
                 StakeRewardCalculation {
@@ -2772,6 +2823,7 @@ mod tests {
             &thread_pool,
             &mut rewards_metrics,
         );
+        drop(stake_delegations_view);
         drop(stakes);
 
         let epoch_rewards_sysvar = bank.get_epoch_rewards_sysvar();
@@ -2873,11 +2925,16 @@ mod tests {
         let thread_pool = ThreadPoolBuilder::new().num_threads(1).build().unwrap();
         let mut rewards_metrics = RewardsMetrics::default();
         let stakes = bank.stakes_cache.stakes();
+        let stake_delegations_view = stakes.stake_delegations().view(&bank.ancestors);
         let EpochRewardCalculateParamInfo {
             stake_history,
             stake_delegations,
             cached_vote_accounts,
-        } = bank.get_epoch_params_for_recalculation(rewarded_epoch, &stakes);
+        } = bank.get_epoch_params_for_recalculation(
+            rewarded_epoch,
+            &stakes,
+            &stake_delegations_view,
+        );
         let reward_epoch_delegated_stakes = RewardEpochDelegatedStakes::get(&bank)
             .unwrap_or_else(|| reward_epoch_delegated_stakes_for_tests(rewarded_epoch));
         let PartitionedRewardsCalculation {
@@ -2898,6 +2955,7 @@ mod tests {
             &thread_pool,
             &mut rewards_metrics,
         );
+        drop(stake_delegations_view);
         drop(stakes);
 
         bank.recalculate_partitioned_rewards_if_active(|| &thread_pool);

@@ -10253,6 +10253,7 @@ dependencies = [
  "solana-message",
  "solana-metrics",
  "solana-native-token",
+ "solana-nohash-hasher",
  "solana-nonce",
  "solana-nonce-account",
  "solana-packet",

@@ -65,7 +65,7 @@ impl From<Stakes<StakeAccount>> for SerdeStakesToStakeFormat {
 /// Simplified, intermediate representation of [`Stakes<T>`]
 ///
 /// Its bincode serializaiton format is identical as Stakes<T>, but allows faster
-/// deserialization without creating imbl::HashMap (such conversion is deferred until
+/// deserialization without creating the stake delegations map (such conversion is deferred until
 /// data is actually needed).
 #[cfg_attr(
     feature = "stable-abi",
@@ -105,6 +105,7 @@ mod tests {
         super::*,
         crate::{serde_snapshot::deserialize_wincode_from, stake_utils, stakes::StakesCache},
         rand::Rng,
+        solana_accounts_db::ancestors::Ancestors,
         solana_rent::Rent,
         solana_vote_interface::state::BLS_PUBLIC_KEY_COMPRESSED_SIZE,
         solana_vote_program::vote_state,
@@ -164,7 +165,7 @@ mod tests {
         }
         let stakes: Stakes<StakeAccount> = stakes_cache.stakes().clone();
         assert!(stakes.vote_accounts.as_ref().len() >= 5);
-        assert!(stakes.stake_delegations.len() >= 50);
+        assert!(stakes.stake_delegations.len(&Ancestors::default()) >= 50);
         let dummy = SerializableDummy {
             head: String::from("dummy-head"),
             stakes: stakes.clone(),

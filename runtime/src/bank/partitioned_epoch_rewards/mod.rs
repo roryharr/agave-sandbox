@@ -1703,7 +1703,7 @@ mod tests {
         {
             let stakes = bank.stakes_cache.stakes();
             assert!(stakes.vote_accounts().as_ref().is_empty());
-            assert!(stakes.stake_delegations().is_empty());
+            assert!(stakes.stake_delegations().is_empty(&bank.ancestors));
         }
 
         let ((non_vat_vote_address, non_vat_vote_account), (stake_address, stake_account)) =
@@ -1760,7 +1760,7 @@ mod tests {
         {
             let stakes = bank.stakes_cache.stakes();
             assert_eq!(stakes.vote_accounts().len(), 3);
-            assert_eq!(stakes.stake_delegations().len(), 3);
+            assert_eq!(stakes.stake_delegations().len(&bank.ancestors), 3);
         }
 
         // Mimic some of the early work in `Bank::new_from_parent`, on a fork that is dropped below

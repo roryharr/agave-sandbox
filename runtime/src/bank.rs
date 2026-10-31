@@ -834,8 +834,8 @@ pub struct Bank {
     /// Number of stake accounts to store in each block during partitioned rewards.
     partitioned_rewards_stake_account_stores_per_block: u64,
 
-    /// The set of parents including this bank
-    pub ancestors: Ancestors,
+    /// The set of parents including this bank, shared with `stakes_cache`
+    pub ancestors: Arc<Ancestors>,
 
     /// Hash of this Bank's state. Only meaningful after freezing.
     hash: RwLock<Hash>,
@@ -1224,7 +1224,7 @@ impl Bank {
             blockhash_queue: RwLock::<BlockhashQueue>::default(),
             max_processing_age: MAX_PROCESSING_AGE,
             partitioned_rewards_stake_account_stores_per_block,
-            ancestors: Ancestors::default(),
+            ancestors: Arc::default(),
             hash: RwLock::<Hash>::default(),
             parent_hash: Hash::default(),
             parent_slot: Slot::default(),
@@ -1289,6 +1289,7 @@ impl Bank {
             is_alpenglow: AtomicBool::new(false),
             transaction_execution_gate: CachePadded::new(TransactionExecutionGate::default()),
         };
+        bank.stakes_cache.set_ancestors(Arc::clone(&bank.ancestors));
 
         bank.transaction_processor =
             TransactionBatchProcessor::new_uninitialized(bank.slot, bank.epoch);
@@ -1323,7 +1324,7 @@ impl Bank {
             AccountsDb::new_with_config(paths, accounts_db_config, accounts_update_notifier, exit);
         let accounts = Accounts::new(Arc::new(accounts_db));
         let mut bank = Self::default_with_bank_rc(BankRc::new(accounts));
-        bank.ancestors = Ancestors::from(vec![(bank.slot(), bank.bank_id())]);
+        bank.set_ancestors(Ancestors::from(vec![(bank.slot(), bank.bank_id())]));
         bank.compute_budget = runtime_config.compute_budget;
         bank.store_transaction_signatures_in_status_cache =
             !runtime_config.skip_transaction_signatures_in_status_cache;
@@ -1512,7 +1513,7 @@ impl Bank {
             parent_hash: parent.hash(),
             parent_slot: parent.slot(),
             leader,
-            ancestors: Ancestors::default(),
+            ancestors: Arc::default(),
             hash: RwLock::new(Hash::default()),
             is_delta: AtomicBool::new(false),
             tick_height: AtomicU64::new(parent.tick_height.load(Relaxed)),
@@ -1563,7 +1564,7 @@ impl Bank {
                 new.parents_iter()
                     .map(|parent| (parent.slot(), parent.bank_id())),
             );
-            new.ancestors = Ancestors::from(ancestors);
+            new.set_ancestors(Ancestors::from(ancestors));
         });
 
         let prepare_timings = new.prepare_for_block_execution(
@@ -1802,7 +1803,8 @@ impl Bank {
         // update vote accounts with warmed up stakes before saving a
         // snapshot of stakes in epoch stakes
         let stakes = self.stakes_cache.stakes();
-        let stake_delegations = stakes.stake_delegations_vec();
+        let stake_delegations_view = stakes.stake_delegations().view(&self.ancestors);
+        let stake_delegations = stake_delegations_view.to_vec();
         let (
             EpochBoundaryStakes {
                 stake_history,
@@ -1954,6 +1956,12 @@ impl Bank {
 
     pub fn proper_ancestors_set(&self) -> HashSet<Slot> {
         HashSet::from_iter(self.proper_ancestors())
+    }
+
+    /// Sets the ancestors of this bank, which its stakes cache shares
+    fn set_ancestors(&mut self, ancestors: Ancestors) {
+        self.ancestors = Arc::new(ancestors);
+        self.stakes_cache.set_ancestors(Arc::clone(&self.ancestors));
     }
 
     /// Returns all ancestors excluding self.slot.
@@ -2209,7 +2217,7 @@ impl Bank {
             blockhash_queue: RwLock::new(fields.blockhash_queue),
             max_processing_age: MAX_PROCESSING_AGE,
             partitioned_rewards_stake_account_stores_per_block,
-            ancestors,
+            ancestors: Arc::new(ancestors),
             hash: RwLock::new(fields.hash),
             parent_hash: fields.parent_hash,
             parent_slot: fields.parent_slot,
@@ -2280,6 +2288,7 @@ impl Bank {
             is_alpenglow: AtomicBool::new(false),
             transaction_execution_gate: CachePadded::new(TransactionExecutionGate::default()),
         };
+        bank.stakes_cache.set_ancestors(Arc::clone(&bank.ancestors));
 
         if bank.get_alpenglow_genesis_certificate().is_some() {
             bank.set_is_alpenglow();
@@ -3265,6 +3274,9 @@ impl Bank {
         }
         squash_accounts_time.stop();
 
+        debug_assert!(Arc::ptr_eq(&self.ancestors, self.stakes_cache.ancestors()));
+        self.stakes_cache.squash();
+
         *self.rc.parent.write().unwrap() = None;
 
         let mut squash_cache_time = Measure::start("squash_cache_time");
@@ -3328,6 +3340,7 @@ impl Bank {
             self.new_warmup_cooldown_rate_epoch(),
             genesis_config.accounts.iter(),
         ));
+        self.stakes_cache.set_ancestors(Arc::clone(&self.ancestors));
 
         // After storing genesis accounts, the bank stakes cache will be warmed
         // up and can be used to set the leader id to the highest staked
@@ -4080,7 +4093,7 @@ impl Bank {
                 .map(|account| account.state().unwrap())
                 .unwrap_or_default();
             if slot_history.check(self.slot()) == Check::Found {
-                let mut ancestors = self.ancestors.clone();
+                let mut ancestors = Ancestors::clone(&self.ancestors);
                 let removed = ancestors.remove_max_slot();
                 debug_assert_eq!(removed, Some(self.slot()));
                 if let Some((account, _)) = self.load(&ancestors, &slot_history_id) {
@@ -6795,7 +6808,7 @@ impl Bank {
         let rent =
             Self::load_sysvar_for_snapshot_load(&bank.rc.accounts, &ancestors, &sysvar::rent::id());
         bank.blockhash_queue = RwLock::new(fields.blockhash_queue);
-        bank.ancestors = ancestors;
+        bank.ancestors = Arc::new(ancestors);
         bank.hash = RwLock::new(fields.hash);
         bank.parent_hash = fields.parent_hash;
         bank.parent_slot = fields.parent_slot;
@@ -6824,6 +6837,7 @@ impl Bank {
         bank.epoch_schedule = fields.epoch_schedule;
         bank.inflation = Arc::new(RwLock::new(fields.inflation));
         bank.stakes_cache = stakes_cache;
+        bank.stakes_cache.set_ancestors(Arc::clone(&bank.ancestors));
         bank.epoch_stakes = epoch_stakes;
         bank.is_delta = AtomicBool::new(fields.is_delta);
         bank.cluster_type = Some(ClusterType::Development);
@@ -7178,6 +7192,7 @@ impl Bank {
         self.stakes_cache
             .stakes()
             .stake_delegations()
+            .view(&self.ancestors)
             .iter()
             .for_each(|(pubkey, _)| {
                 minimized_account_set.insert(*pubkey);
@@ -7231,6 +7246,7 @@ fn calculate_data_size_delta(old_data_size: usize, new_data_size: usize) -> i64 
 impl Drop for Bank {
     fn drop(&mut self) {
         self.clear_accounts_lt_hash_async_progress_is_at_end();
+        self.stakes_cache.purge(self.bank_id());
         if let Some(drop_callback) = self.drop_callback.read().unwrap().0.as_ref() {
             drop_callback.callback(self);
         } else {

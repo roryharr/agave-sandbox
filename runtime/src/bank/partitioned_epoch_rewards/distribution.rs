@@ -10,6 +10,7 @@ use {
         },
         reward_info::RewardInfo,
         stake_account::StakeAccount,
+        stakes::StakeDelegationsView,
     },
     log::error,
     serde::{Deserialize, Serialize},
@@ -19,7 +20,6 @@ use {
     solana_accounts_db::stake_rewards::{StakeReward, StakeRewardInfo},
     solana_clock::Epoch,
     solana_measure::measure_us,
-    solana_pubkey::Pubkey,
     solana_rent::Rent,
     solana_reward_info::RewardType,
     solana_stake_history::StakeHistory,
@@ -258,7 +258,7 @@ impl Bank {
         distribution_epoch: u64,
         stake_history: &StakeHistory,
         new_warmup_cooldown_rate_epoch: Option<Epoch>,
-        stakes_cache_accounts: &imbl::HashMap<Pubkey, StakeAccount<Delegation>>,
+        stakes_cache_accounts: &StakeDelegationsView<'_, StakeAccount<Delegation>>,
         partitioned_stake_reward: &PartitionedStakeReward,
         rent: &Rent,
         adjust_delegations_for_rent: bool,
@@ -370,7 +370,7 @@ impl Bank {
             });
         let mut updated_stake_rewards = Vec::with_capacity(indices.len());
         let stakes_cache = self.stakes_cache.stakes();
-        let stakes_cache_accounts = stakes_cache.stake_delegations();
+        let stakes_cache_accounts = stakes_cache.stake_delegations().view(&self.ancestors);
         let stake_history = stakes_cache.history();
         let new_warmup_cooldown_rate_epoch = self.new_warmup_cooldown_rate_epoch();
         let rent = &self.rent_collector.rent;
@@ -396,7 +396,7 @@ impl Bank {
                 self.epoch,
                 stake_history,
                 new_warmup_cooldown_rate_epoch,
-                stakes_cache_accounts,
+                &stakes_cache_accounts,
                 partitioned_stake_reward,
                 rent,
                 adjust_delegations_for_rent,
@@ -416,6 +416,7 @@ impl Bank {
                 }
             }
         }
+        drop(stakes_cache_accounts);
         drop(stakes_cache);
         self.store_accounts(
             (self.slot(), &updated_stake_rewards[..]),
@@ -459,6 +460,7 @@ mod tests {
         solana_epoch_schedule::EpochSchedule,
         solana_hash::Hash,
         solana_native_token::LAMPORTS_PER_SOL,
+        solana_pubkey::Pubkey,
         solana_reward_info::RewardType,
         solana_stake_history::StakeHistoryEntry,
         solana_stake_interface::{
@@ -847,13 +849,13 @@ mod tests {
             block_reward,
         };
         let stakes_cache = bank.stakes_cache.stakes();
-        let stakes_cache_accounts = stakes_cache.stake_delegations();
+        let stakes_cache_accounts = stakes_cache.stake_delegations().view(&bank.ancestors);
         assert_eq!(
             Bank::build_updated_stake_reward(
                 distribution_epoch,
                 &stake_history,
                 new_warmup_cooldown_rate_epoch,
-                stakes_cache_accounts,
+                &stakes_cache_accounts,
                 &partitioned_stake_reward,
                 &rent,
                 adjust_delegations_for_rent,
@@ -861,6 +863,7 @@ mod tests {
             .unwrap_err(),
             DistributionError::AccountNotFound
         );
+        drop(stakes_cache_accounts);
         drop(stakes_cache);
 
         let overflowing_account = Pubkey::new_unique();
@@ -887,13 +890,13 @@ mod tests {
             block_reward,
         };
         let stakes_cache = bank.stakes_cache.stakes();
-        let stakes_cache_accounts = stakes_cache.stake_delegations();
+        let stakes_cache_accounts = stakes_cache.stake_delegations().view(&bank.ancestors);
         assert_eq!(
             Bank::build_updated_stake_reward(
                 distribution_epoch,
                 &stake_history,
                 new_warmup_cooldown_rate_epoch,
-                stakes_cache_accounts,
+                &stakes_cache_accounts,
                 &partitioned_stake_reward,
                 &rent,
                 adjust_delegations_for_rent,
@@ -901,6 +904,7 @@ mod tests {
             .unwrap_err(),
             DistributionError::ArithmeticOverflow
         );
+        drop(stakes_cache_accounts);
         drop(stakes_cache);
 
         let successful_account = Pubkey::new_unique();
@@ -937,7 +941,7 @@ mod tests {
             block_reward,
         };
         let stakes_cache = bank.stakes_cache.stakes();
-        let stakes_cache_accounts = stakes_cache.stake_delegations();
+        let stakes_cache_accounts = stakes_cache.stake_delegations().view(&bank.ancestors);
         let expected_lamports = starting_lamports + stake_reward + block_reward;
         let mut expected_stake_account = AccountSharedData::new(
             expected_lamports,
@@ -968,7 +972,7 @@ mod tests {
                 distribution_epoch,
                 &stake_history,
                 new_warmup_cooldown_rate_epoch,
-                stakes_cache_accounts,
+                &stakes_cache_accounts,
                 &partitioned_stake_reward,
                 &rent,
                 adjust_delegations_for_rent,
@@ -976,6 +980,7 @@ mod tests {
             .unwrap(),
             expected_stake_reward
         );
+        drop(stakes_cache_accounts);
         drop(stakes_cache);
 
         let deactivating_account = Pubkey::new_unique();
@@ -1022,7 +1027,7 @@ mod tests {
             block_reward: 0,
         };
         let stakes_cache = bank.stakes_cache.stakes();
-        let stakes_cache_accounts = stakes_cache.stake_delegations();
+        let stakes_cache_accounts = stakes_cache.stake_delegations().view(&bank.ancestors);
         let expected_lamports = starting_lamports + stake_reward;
         let mut expected_stake_account = AccountSharedData::new(
             expected_lamports,
@@ -1053,7 +1058,7 @@ mod tests {
                 distribution_epoch,
                 &stake_history,
                 new_warmup_cooldown_rate_epoch,
-                stakes_cache_accounts,
+                &stakes_cache_accounts,
                 &partitioned_stake_reward,
                 &rent,
                 adjust_delegations_for_rent,
@@ -1061,6 +1066,7 @@ mod tests {
             .unwrap(),
             expected_stake_reward
         );
+        drop(stakes_cache_accounts);
         drop(stakes_cache);
     }
 

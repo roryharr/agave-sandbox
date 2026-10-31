@@ -284,7 +284,7 @@ impl VersionedEpochStakes {
             SerdeStakesToStakeFormat::Account(crate::stakes::Stakes::new_for_tests(
                 0,
                 solana_vote::vote_account::VoteAccounts::from(Arc::new(vote_accounts_hash_map)),
-                imbl::HashMap::default(),
+                [],
             )),
             leader_schedule_epoch,
         )
@@ -511,6 +511,7 @@ pub(crate) mod tests {
             serde_snapshot::deserialize_wincode_from, stake_account::StakeAccount, stakes::Stakes,
         },
         solana_account::AccountSharedData,
+        solana_accounts_db::ancestors::Ancestors,
         solana_bls_signatures::keypair::Keypair as BLSKeypair,
         solana_rent::Rent,
         solana_vote::vote_account::VoteAccount,
@@ -949,14 +950,10 @@ pub(crate) mod tests {
             (delegated_amount, vote_account),
         )])));
         let stake_account = StakeAccount::try_from(stake_account).unwrap();
-        let stakes = Stakes::new_for_tests(
-            epoch,
-            vote_accounts,
-            imbl::HashMap::from_iter([(stake_pubkey, stake_account)]),
-        );
+        let stakes = Stakes::new_for_tests(epoch, vote_accounts, [(stake_pubkey, stake_account)]);
 
         // ensure stake delegations start off *not* empty
-        assert!(!stakes.stake_delegations().is_empty());
+        assert!(!stakes.stake_delegations().is_empty(&Ancestors::default()));
 
         let epoch_stakes = VersionedEpochStakes::new(SerdeStakesToStakeFormat::Account(stakes), 0);
 

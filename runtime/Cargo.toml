@@ -131,6 +131,7 @@ solana-measure = { workspace = true }
 solana-message = { workspace = true }
 solana-metrics = { workspace = true }
 solana-native-token = { workspace = true }
+solana-nohash-hasher = { workspace = true }
 solana-nonce = { workspace = true, features = ["wincode"] }
 solana-nonce-account = { workspace = true, features = ["wincode"] }
 solana-packet = { workspace = true }
