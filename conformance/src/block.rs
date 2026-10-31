@@ -354,7 +354,8 @@ pub fn execute_block_proto(context: &ProtoBlockContext) -> ProtoBlockEffects {
         Vec::new()
     } else {
         let stakes = bank.stakes();
-        let mut entries = stakes.stake_delegations_vec();
+        let stake_delegations_view = stakes.stake_delegations().view();
+        let mut entries = stake_delegations_view.to_vec();
         entries.sort_unstable_by_key(|(pubkey, _)| **pubkey);
         entries
             .into_iter()

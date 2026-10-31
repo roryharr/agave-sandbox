@@ -1445,8 +1445,13 @@ impl Bank {
         let (blockhash_queue, blockhash_queue_time_us) =
             measure_us!(RwLock::new(parent.blockhash_queue.read().unwrap().clone()));
 
-        let (stakes_cache, stakes_cache_time_us) =
-            measure_us!(StakesCache::new(parent.stakes_cache.stakes().clone()));
+        let (stakes_cache, stakes_cache_time_us) = measure_us!(StakesCache::new(
+            parent.stakes_cache.new_child(
+                parent
+                    .parents_iter()
+                    .map(|bank| bank.stakes_cache.stake_delegation_writes()),
+            )
+        ));
 
         let (epoch_stakes, epoch_stakes_time_us) = measure_us!(parent.epoch_stakes.clone());
 
@@ -1802,7 +1807,8 @@ impl Bank {
         // update vote accounts with warmed up stakes before saving a
         // snapshot of stakes in epoch stakes
         let stakes = self.stakes_cache.stakes();
-        let stake_delegations = stakes.stake_delegations_vec();
+        let stake_delegations_view = stakes.stake_delegations().view();
+        let stake_delegations = stake_delegations_view.to_vec();
         let (
             EpochBoundaryStakes {
                 stake_history,
@@ -3264,6 +3270,8 @@ impl Bank {
             total_cache_us += add_root_timing.cache_us;
         }
         squash_accounts_time.stop();
+
+        self.stakes_cache.squash();
 
         *self.rc.parent.write().unwrap() = None;
 
@@ -7178,6 +7186,7 @@ impl Bank {
         self.stakes_cache
             .stakes()
             .stake_delegations()
+            .view()
             .iter()
             .for_each(|(pubkey, _)| {
                 minimized_account_set.insert(*pubkey);

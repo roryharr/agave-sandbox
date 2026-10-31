@@ -65,7 +65,7 @@ impl From<Stakes<StakeAccount>> for SerdeStakesToStakeFormat {
 /// Simplified, intermediate representation of [`Stakes<T>`]
 ///
 /// Its bincode serializaiton format is identical as Stakes<T>, but allows faster
-/// deserialization without creating imbl::HashMap (such conversion is deferred until
+/// deserialization without creating the stake delegations map (such conversion is deferred until
 /// data is actually needed).
 #[cfg_attr(
     feature = "stable-abi",

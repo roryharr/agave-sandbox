@@ -658,7 +658,8 @@ impl Bank {
         reward_calc_tracer: Option<impl RewardCalcTracer>,
     ) -> StakeDelegationsMap {
         let stakes = self.stakes_cache.stakes();
-        let stake_delegations = stakes.stake_delegations_vec();
+        let stake_delegations_view = stakes.stake_delegations().view();
+        let stake_delegations = stake_delegations_view.to_vec();
         // Obtain all unique voter pubkeys from stake delegations.
         fn merge(mut acc: HashSet<Pubkey>, other: HashSet<Pubkey>) -> HashSet<Pubkey> {
             if acc.len() < other.len() {
@@ -5566,7 +5567,7 @@ fn pubkeys_by_owner(
     [
         (
             solana_sdk_ids::stake::id(),
-            stakes.stake_delegations().keys().copied().collect(),
+            stakes.stake_delegations().to_map().into_keys().collect(),
         ),
         (
             solana_sdk_ids::vote::id(),
