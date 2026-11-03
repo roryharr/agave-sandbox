@@ -7,7 +7,7 @@ mod utils;
 
 use {
     self::{
-        common::{DataLen, DataRef, ExternalDataOffset, FileOffset, LoadedData},
+        common::{DataRef, ExternalDataOffset, FileOffset, LoadedData},
         data::{
             calculate_data_entry_stored_size, create_data_file, parse_data_entry, read_data_entry,
             read_data_header, validate_data_entry_offset, write_data_entry,
@@ -22,6 +22,7 @@ use {
     },
     crate::{
         account_storage::stored_account_info::{StoredAccountInfo, StoredAccountInfoWithoutData},
+        accounts_file::{AccountDataRead, AccountFromPage},
         append_vec::AppendVec,
         storable_accounts::StorableAccounts,
     },
@@ -45,7 +46,11 @@ use {
         },
     },
 };
-pub use {common::LogicalOffset, error::Error as SplitFileError};
+pub(crate) use {
+    common::DataLen,
+    data::{DATA_ENTRY_FIXED_SIZE, parse_data_entry_fixed},
+};
+pub use {common::LogicalOffset, error::Error as SplitFileError, meta::META_ENTRY_MAX_SIZE};
 
 pub static SPLIT_FILE_STATS: SplitFileStats = SplitFileStats {
     num_open: AtomicU64::new(0),
@@ -429,13 +434,7 @@ impl SplitFile {
                 LoadedData::Inline(data) => data.to_vec(),
                 LoadedData::External(data) => data,
             };
-            AccountSharedData::from(Account {
-                lamports: meta_entry.lamports,
-                data,
-                owner: *meta_entry.owner,
-                executable: meta_entry.is_executable,
-                rent_epoch: meta_entry.rent_epoch,
-            })
+            account_shared_data_from(&meta_entry, data)
         })
     }
 
@@ -489,6 +488,51 @@ impl SplitFile {
                 }
             },
         )?
+    }
+
+    /// The first read for the account at `offset`: its meta entry, up to `META_ENTRY_MAX_SIZE`
+    /// and not past the meta file's end
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub(crate) fn account_page_read(&self, offset: LogicalOffset) -> Option<(FileOffset, usize)> {
+        let file_offset = file_offset_from_logical(offset);
+        let len = self
+            .meta_len()
+            .checked_sub(file_offset.0)?
+            .min(META_ENTRY_MAX_SIZE as FileSize);
+        (len > 0).then_some((file_offset, len as usize))
+    }
+
+    /// Parses the account from `page`, the bytes `account_page_read` asked for: the account, or
+    /// the read of its data entry and data from the data file
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub(crate) fn account_from_page(&self, page: &[u8]) -> Option<AccountFromPage> {
+        let meta_entry = parse_meta_entry_fixed(page).ok()?;
+        let data_ref = parse_meta_entry_data_ref(page, &meta_entry).ok()?;
+        Some(match data_ref {
+            DataRef::NoData => {
+                AccountFromPage::Complete(account_shared_data_from(&meta_entry, Vec::new()))
+            }
+            DataRef::Inline(data) => {
+                AccountFromPage::Complete(account_shared_data_from(&meta_entry, data.to_vec()))
+            }
+            DataRef::External(external_data_offset) => {
+                let offset = external_data_offset.0;
+                validate_data_entry_offset(self.data_len(), offset, meta_entry.data_len).ok()?;
+                let account = Account {
+                    lamports: meta_entry.lamports,
+                    data: Vec::new(),
+                    owner: *meta_entry.owner,
+                    executable: meta_entry.is_executable,
+                    rent_epoch: meta_entry.rent_epoch,
+                };
+                AccountFromPage::Partial(AccountDataRead::new_with_data_entry(
+                    account,
+                    offset.0,
+                    meta_entry.data_len.0 as usize,
+                    *meta_entry.address,
+                ))
+            }
+        })
     }
 
     /// Iterate over all accounts and call `callback` with each account.
@@ -633,6 +677,17 @@ impl SplitFile {
         }
         Ok(data_lens)
     }
+}
+
+/// Helper fn to return an AccountSharedData from a meta entry and its data.
+fn account_shared_data_from(meta_entry: &MetaEntryRef<'_>, data: Vec<u8>) -> AccountSharedData {
+    AccountSharedData::from(Account {
+        lamports: meta_entry.lamports,
+        data,
+        owner: *meta_entry.owner,
+        executable: meta_entry.is_executable,
+        rent_epoch: meta_entry.rent_epoch,
+    })
 }
 
 /// Helper fn to return a StoredAccountInfo from a meta entry.
@@ -871,6 +926,8 @@ mod tests {
     use {
         super::*,
         crate::accounts_file::new_scan_accounts_reader,
+        agave_fs::file_io,
+        data::DATA_ENTRY_OFFSET_ALIGNMENT,
         error::{ReadDataEntryError, ReadMetaEntryError},
         meta::META_ENTRY_INLINE_DATA_MAX_SIZE,
         solana_account::accounts_equal,
@@ -879,6 +936,177 @@ mod tests {
         tempfile::TempDir,
         test_case::test_case,
     };
+
+    /// Reads the meta entry at `logical_offset` as the prefetcher does: the bytes
+    /// `account_page_read` names
+    fn read_account_page(split: &SplitFile, logical_offset: LogicalOffset) -> Vec<u8> {
+        let (offset, len) = split.account_page_read(logical_offset).unwrap();
+        let mut page = vec![0; len];
+        let bytes_read =
+            file_io::read_into_buffer(split.meta_file(), split.meta_len(), offset.0, &mut page)
+                .unwrap();
+        assert_eq!(bytes_read, len);
+        page
+    }
+
+    #[test]
+    fn test_account_page_read() {
+        let temp_dir = TempDir::new().unwrap();
+        let split = SplitFile::new(temp_dir.path().join("base")).unwrap();
+        let owner = Pubkey::new_unique();
+        let accounts = [
+            (
+                Pubkey::new_unique(),
+                AccountSharedData::new(101, META_ENTRY_INLINE_DATA_MAX_SIZE, &owner),
+            ),
+            (Pubkey::new_unique(), AccountSharedData::new(102, 1, &owner)),
+        ];
+        let (logical_offsets, _) = split.write_accounts(&(0, accounts.as_slice())).unwrap();
+        // up to a meta entry's maximum size
+        let first = file_offset_from_logical(logical_offsets[0]);
+        assert_eq!(
+            split.account_page_read(logical_offsets[0]),
+            Some((first, META_ENTRY_MAX_SIZE))
+        );
+        // not past the meta file's end
+        let last = file_offset_from_logical(logical_offsets[1]);
+        let to_end = (split.meta_len() - last.0) as usize;
+        assert!(to_end < META_ENTRY_MAX_SIZE);
+        assert_eq!(
+            split.account_page_read(logical_offsets[1]),
+            Some((last, to_end))
+        );
+        // nothing at the end
+        let end = LogicalOffset(
+            split
+                .meta_len()
+                .div_ceil(META_ENTRY_OFFSET_ALIGNMENT as FileSize) as u32,
+        );
+        assert_eq!(split.account_page_read(end), None);
+    }
+
+    #[test]
+    fn test_account_from_page_complete() {
+        let temp_dir = TempDir::new().unwrap();
+        let split = SplitFile::new(temp_dir.path().join("base")).unwrap();
+        let owner = Pubkey::new_unique();
+        // no data, and data inline in the meta entry
+        let accounts = [
+            (Pubkey::new_unique(), AccountSharedData::new(101, 0, &owner)),
+            (
+                Pubkey::new_unique(),
+                AccountSharedData::new_with_data(
+                    102,
+                    (0..META_ENTRY_INLINE_DATA_MAX_SIZE)
+                        .map(|i| i as u8)
+                        .collect(),
+                    &owner,
+                ),
+            ),
+        ];
+        let (logical_offsets, _) = split.write_accounts(&(0, accounts.as_slice())).unwrap();
+        for ((_, account), logical_offset) in accounts.iter().zip(logical_offsets) {
+            let page = read_account_page(&split, logical_offset);
+            let Some(AccountFromPage::Complete(read)) = split.account_from_page(&page) else {
+                panic!("expected the page to hold the whole account");
+            };
+            assert_eq!(&read, account);
+        }
+    }
+
+    #[test]
+    fn test_account_from_page_partial() {
+        let temp_dir = TempDir::new().unwrap();
+        let split = SplitFile::new(temp_dir.path().join("base")).unwrap();
+        let data_len = META_ENTRY_INLINE_DATA_MAX_SIZE + 1;
+        let account = AccountSharedData::new_with_data(
+            100,
+            (0..data_len).map(|i| i as u8).collect(),
+            &Pubkey::new_unique(),
+        );
+        let (logical_offsets, _) = split
+            .write_accounts(&(0, &[(Pubkey::new_unique(), account.clone())][..]))
+            .unwrap();
+        let page = read_account_page(&split, logical_offsets[0]);
+        let Some(AccountFromPage::Partial(data_read)) = split.account_from_page(&page) else {
+            panic!("expected the account's data to be in the data file");
+        };
+        assert_eq!(data_read.data_len(), data_len);
+        let read = data_read
+            .read(split.data_file().unwrap(), split.data_len())
+            .unwrap();
+        assert_eq!(read, account);
+    }
+
+    #[test]
+    fn test_account_from_page_partial_wrong_entry() {
+        let temp_dir = TempDir::new().unwrap();
+        let split = SplitFile::new(temp_dir.path().join("base")).unwrap();
+        let account = AccountSharedData::new(
+            100,
+            META_ENTRY_INLINE_DATA_MAX_SIZE + 1,
+            &Pubkey::new_unique(),
+        );
+        let (logical_offsets, _) = split
+            .write_accounts(&(0, &[(Pubkey::new_unique(), account)][..]))
+            .unwrap();
+        let page = read_account_page(&split, logical_offsets[0]);
+        let Some(AccountFromPage::Partial(mut data_read)) = split.account_from_page(&page) else {
+            panic!("expected the account's data to be in the data file");
+        };
+        let data = vec![0; data_read.data_len()];
+        let offset = data_read.offset();
+        let bytes_read = file_io::read_into_buffer(
+            split.data_file().unwrap(),
+            split.data_len(),
+            offset,
+            data_read.data_entry_mut(),
+        )
+        .unwrap();
+        assert_eq!(bytes_read, DATA_ENTRY_FIXED_SIZE);
+        // the data entry names another account
+        data_read.data_entry_mut()[0] ^= 1;
+        assert!(data_read.account(data).is_none());
+    }
+
+    #[test]
+    fn test_account_from_page_partial_past_len() {
+        let temp_dir = TempDir::new().unwrap();
+        let split = SplitFile::new(temp_dir.path().join("base")).unwrap();
+        let account = AccountSharedData::new(
+            100,
+            META_ENTRY_INLINE_DATA_MAX_SIZE + 1,
+            &Pubkey::new_unique(),
+        );
+        let (logical_offsets, _) = split
+            .write_accounts(&(0, &[(Pubkey::new_unique(), account)][..]))
+            .unwrap();
+        let mut page = read_account_page(&split, logical_offsets[0]);
+        // the meta entry points past the data file's end
+        let past_end = split
+            .data_len()
+            .next_multiple_of(DATA_ENTRY_OFFSET_ALIGNMENT as FileSize);
+        page[META_ENTRY_FIXED_SIZE..][..size_of::<FileSize>()]
+            .copy_from_slice(&past_end.to_le_bytes());
+        assert!(split.account_from_page(&page).is_none());
+    }
+
+    #[test]
+    fn test_account_from_page_truncated_header() {
+        let temp_dir = TempDir::new().unwrap();
+        let split = SplitFile::new(temp_dir.path().join("base")).unwrap();
+        let account = AccountSharedData::new(100, 1, &Pubkey::new_unique());
+        let (logical_offsets, _) = split
+            .write_accounts(&(0, &[(Pubkey::new_unique(), account)][..]))
+            .unwrap();
+        let page = read_account_page(&split, logical_offsets[0]);
+        // the page ends inside the meta entry's fixed portion
+        assert!(
+            split
+                .account_from_page(&page[..META_ENTRY_FIXED_SIZE - 1])
+                .is_none()
+        );
+    }
 
     /// Ensure creating a new SplitFile works.
     #[test]

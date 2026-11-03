@@ -790,3 +790,187 @@ impl LoadAccountsStats {
         );
     }
 }
+
+#[derive(Debug, Default)]
+pub struct PrefetchAccountsStats {
+    /// batches dropped because the prefetch thread's queue was full
+    pub num_batches_dropped: AtomicU64,
+    /// the most batches the queue held as one was queued
+    pub max_queued_batches: AtomicU64,
+    /// batches dropped because there is no prefetch thread: none without io_uring, or it stopped
+    pub num_batches_disconnected: AtomicU64,
+    /// batches dispatched
+    pub num_batches: AtomicU64,
+    /// the most pubkeys in one of them
+    pub max_batch_len: AtomicU64,
+    /// pubkeys dropped because a cache already held them
+    pub num_skipped_cached: AtomicU64,
+    /// pubkeys dropped because an earlier prefetch was still loading them
+    pub num_skipped_outstanding: AtomicU64,
+    /// pubkeys with no rooted version in the index
+    pub num_not_in_index: AtomicU64,
+    /// reads issued to storage
+    pub num_issued: AtomicU64,
+    /// accounts stored in the read cache
+    pub num_stored: AtomicU64,
+    /// of them, ones the read cache already held: a load on the critical path got there first
+    pub num_stored_already_cached: AtomicU64,
+    /// first reads of accounts that completed during their own submission: their data was in
+    /// the page cache
+    pub num_page_cache_reads: AtomicU64,
+    /// first reads of accounts that completed later, nearly all from disk
+    pub num_disk_reads: AtomicU64,
+    /// reads continuing an account past its first page, each on a kernel worker
+    pub num_data_reads: AtomicU64,
+    /// accounts loaded on the prefetch thread instead: nothing to read at their offset
+    pub num_blocking_reads: AtomicU64,
+    /// time from pushing each read to its completion, summed
+    pub read_us: AtomicU64,
+    /// the slowest of them
+    pub max_read_us: AtomicU64,
+    /// the most reads in flight at once
+    pub max_in_flight: AtomicU64,
+}
+
+/// What one pass of the prefetch thread did, accumulated once per pass rather than per pubkey
+/// or per read
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[derive(Debug, Default)]
+pub struct PrefetchAccountsStatsSub {
+    pub num_batches: u64,
+    pub max_batch_len: usize,
+    pub num_skipped_cached: u64,
+    pub num_skipped_outstanding: u64,
+    pub num_not_in_index: u64,
+    pub num_issued: u64,
+    pub num_page_cache_reads: u64,
+    pub num_disk_reads: u64,
+    pub num_data_reads: u64,
+    pub num_blocking_reads: u64,
+    pub read_us: u64,
+    pub max_read_us: u64,
+    pub max_in_flight: u32,
+}
+
+impl PrefetchAccountsStats {
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub fn accumulate_sub_stats(&self, stats_sub: PrefetchAccountsStatsSub) {
+        self.num_batches
+            .fetch_add(stats_sub.num_batches, Ordering::Relaxed);
+        self.max_batch_len
+            .fetch_max(stats_sub.max_batch_len as u64, Ordering::Relaxed);
+        self.num_skipped_cached
+            .fetch_add(stats_sub.num_skipped_cached, Ordering::Relaxed);
+        self.num_skipped_outstanding
+            .fetch_add(stats_sub.num_skipped_outstanding, Ordering::Relaxed);
+        self.num_not_in_index
+            .fetch_add(stats_sub.num_not_in_index, Ordering::Relaxed);
+        self.num_issued
+            .fetch_add(stats_sub.num_issued, Ordering::Relaxed);
+        self.num_page_cache_reads
+            .fetch_add(stats_sub.num_page_cache_reads, Ordering::Relaxed);
+        self.num_disk_reads
+            .fetch_add(stats_sub.num_disk_reads, Ordering::Relaxed);
+        self.num_data_reads
+            .fetch_add(stats_sub.num_data_reads, Ordering::Relaxed);
+        self.num_blocking_reads
+            .fetch_add(stats_sub.num_blocking_reads, Ordering::Relaxed);
+        self.read_us.fetch_add(stats_sub.read_us, Ordering::Relaxed);
+        self.max_read_us
+            .fetch_max(stats_sub.max_read_us, Ordering::Relaxed);
+        self.max_in_flight
+            .fetch_max(stats_sub.max_in_flight as u64, Ordering::Relaxed);
+    }
+
+    pub fn report(&self) {
+        datapoint_info!(
+            "accounts_db_prefetch_accounts",
+            (
+                "num_batches_dropped",
+                self.num_batches_dropped.swap(0, Ordering::Relaxed),
+                i64
+            ),
+            (
+                "max_queued_batches",
+                self.max_queued_batches.swap(0, Ordering::Relaxed),
+                i64
+            ),
+            (
+                "num_batches_disconnected",
+                self.num_batches_disconnected.swap(0, Ordering::Relaxed),
+                i64
+            ),
+            (
+                "num_batches",
+                self.num_batches.swap(0, Ordering::Relaxed),
+                i64
+            ),
+            (
+                "max_batch_len",
+                self.max_batch_len.swap(0, Ordering::Relaxed),
+                i64
+            ),
+            (
+                "num_skipped_cached",
+                self.num_skipped_cached.swap(0, Ordering::Relaxed),
+                i64
+            ),
+            (
+                "num_skipped_outstanding",
+                self.num_skipped_outstanding.swap(0, Ordering::Relaxed),
+                i64
+            ),
+            (
+                "num_not_in_index",
+                self.num_not_in_index.swap(0, Ordering::Relaxed),
+                i64
+            ),
+            (
+                "num_issued",
+                self.num_issued.swap(0, Ordering::Relaxed),
+                i64
+            ),
+            (
+                "num_stored",
+                self.num_stored.swap(0, Ordering::Relaxed),
+                i64
+            ),
+            (
+                "num_stored_already_cached",
+                self.num_stored_already_cached.swap(0, Ordering::Relaxed),
+                i64
+            ),
+            (
+                "num_page_cache_reads",
+                self.num_page_cache_reads.swap(0, Ordering::Relaxed),
+                i64
+            ),
+            (
+                "num_disk_reads",
+                self.num_disk_reads.swap(0, Ordering::Relaxed),
+                i64
+            ),
+            (
+                "num_data_reads",
+                self.num_data_reads.swap(0, Ordering::Relaxed),
+                i64
+            ),
+            (
+                "num_blocking_reads",
+                self.num_blocking_reads.swap(0, Ordering::Relaxed),
+                i64
+            ),
+            ("read_us", self.read_us.swap(0, Ordering::Relaxed), i64),
+            (
+                "max_read_us",
+                self.max_read_us.swap(0, Ordering::Relaxed),
+                i64
+            ),
+            (
+                "max_in_flight",
+                self.max_in_flight.swap(0, Ordering::Relaxed),
+                i64
+            ),
+        );
+    }
+}

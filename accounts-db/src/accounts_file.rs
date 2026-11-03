@@ -3,7 +3,7 @@ use {
         account_info::Offset,
         account_storage::stored_account_info::{StoredAccountInfo, StoredAccountInfoWithoutData},
         accounts_db::AccountsFileId,
-        append_vec::{AppendVec, AppendVecError, MAXIMUM_APPEND_VEC_FILE_SIZE},
+        append_vec::{self, AppendVec, AppendVecError, MAXIMUM_APPEND_VEC_FILE_SIZE},
         split_file::{self, SplitFile, SplitFileError},
         storable_accounts::StorableAccounts,
     },
@@ -12,9 +12,9 @@ use {
         buffered_reader::{
             BufReaderWithOverflow, BufferedReader, FileBufRead, RequiredLenBufFileRead,
         },
-        file_io::open_for_reading,
+        file_io::{open_for_reading, read_into_buffer},
     },
-    solana_account::AccountSharedData,
+    solana_account::{Account, AccountSharedData},
     solana_clock::Slot,
     solana_pubkey::Pubkey,
     solana_system_interface::MAX_PERMITTED_DATA_LENGTH,
@@ -56,6 +56,114 @@ pub enum AccountsFileError {
     #[error("i/o error: {0}")]
     Io(#[from] io::Error),
 }
+
+/// What reading at an account's offset yields: the account, or the read that finishes it
+pub(crate) enum AccountFromPage {
+    /// the page held the whole account
+    Complete(AccountSharedData),
+    /// the account's data is past the page
+    Partial(AccountDataRead),
+}
+
+/// The read that finishes an account whose data is past its first page: one read at `offset()`
+/// of the data file, into `data_entry_mut()` and then `data_len()` bytes of data
+pub(crate) struct AccountDataRead {
+    /// the account, without its data
+    account: Account,
+    offset: u64,
+    data_len: usize,
+    /// a split file's data entry, which precedes the data, and the address it must hold
+    data_entry: Option<(Pubkey, [u8; split_file::DATA_ENTRY_FIXED_SIZE])>,
+}
+
+impl AccountDataRead {
+    /// Reads `data_len` bytes of data at `offset`
+    pub(crate) fn new(account: Account, offset: u64, data_len: usize) -> Self {
+        Self {
+            account,
+            offset,
+            data_len,
+            data_entry: None,
+        }
+    }
+
+    /// Reads `address`'s data entry at `offset`, and the `data_len` bytes of data after it
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub(crate) fn new_with_data_entry(
+        account: Account,
+        offset: u64,
+        data_len: usize,
+        address: Pubkey,
+    ) -> Self {
+        Self {
+            account,
+            offset,
+            data_len,
+            data_entry: Some((address, [0; split_file::DATA_ENTRY_FIXED_SIZE])),
+        }
+    }
+
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub(crate) fn offset(&self) -> u64 {
+        self.offset
+    }
+
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub(crate) fn data_len(&self) -> usize {
+        self.data_len
+    }
+
+    /// What the read fills ahead of the data: a split file's data entry, else nothing
+    pub(crate) fn data_entry_mut(&mut self) -> &mut [u8] {
+        match &mut self.data_entry {
+            Some((_, data_entry)) => data_entry,
+            None => &mut [],
+        }
+    }
+
+    /// Finishes the account with `data`, read after `data_entry_mut()`. `None` when the data
+    /// entry is not the account's.
+    pub(crate) fn account(mut self, data: Vec<u8>) -> Option<AccountSharedData> {
+        if let Some((address, data_entry)) = &self.data_entry {
+            let data_len = split_file::DataLen(self.data_len as u32);
+            split_file::parse_data_entry_fixed(data_entry, address, data_len).ok()?;
+        }
+        self.account.data = data;
+        Some(self.account.into())
+    }
+
+    /// Does the read from `file`, whose first `file_len` bytes are valid, on this thread: the data
+    /// entry, if any, then the data
+    pub(crate) fn read(mut self, file: &File, file_len: FileSize) -> Option<AccountSharedData> {
+        let offset = self.offset;
+        let data_len = self.data_len;
+        let data_entry = self.data_entry_mut();
+        let data_entry_len = data_entry.len();
+        if read_into_buffer(file, file_len, offset, data_entry).ok()? < data_entry_len {
+            // eof or otherwise couldn't read the data entry
+            return None;
+        }
+        let mut data = Vec::with_capacity(data_len);
+        // SAFETY: `read_into_buffer` will only write to uninitialized memory.
+        let data_bytes = unsafe {
+            slice::from_raw_parts_mut(
+                data.spare_capacity_mut().as_mut_ptr().cast::<u8>(),
+                data_len,
+            )
+        };
+        let data_offset = offset + data_entry_len as u64;
+        if read_into_buffer(file, file_len, data_offset, data_bytes).ok()? < data_len {
+            // eof or otherwise couldn't read all the data
+            return None;
+        }
+        // SAFETY: we've just checked that the read filled `data_len` bytes.
+        unsafe { data.set_len(data_len) };
+        self.account(data)
+    }
+}
+
+// a split file's meta entry fits the first read's page buffer
+const _: () = assert!(split_file::META_ENTRY_MAX_SIZE <= append_vec::PAGE_SIZE);
 
 #[derive(Debug)]
 /// An enum for accessing an accounts file which can be implemented
@@ -246,6 +354,37 @@ impl AccountsFile {
         })
     }
 
+    /// The file `account_page_read` reads
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub(crate) fn file(&self) -> &File {
+        match self {
+            Self::AppendVec(av) => av.file(),
+            Self::Split(split) => split.meta_file(),
+        }
+    }
+
+    /// The first read for the account at `offset`: up to `PAGE_SIZE` of `file()`, and not past
+    /// its end
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub(crate) fn account_page_read(&self, offset: Offset) -> Option<(u64, usize)> {
+        match self {
+            Self::AppendVec(av) => av.account_page_read(offset),
+            Self::Split(split) => split
+                .account_page_read(split_file::LogicalOffset(offset))
+                .map(|(file_offset, len)| (file_offset.0, len)),
+        }
+    }
+
+    /// Parses the account at file `offset` from `page`, the bytes `account_page_read` asked for:
+    /// the account, or the read that finishes it
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub(crate) fn account_from_page(&self, offset: u64, page: &[u8]) -> Option<AccountFromPage> {
+        match self {
+            Self::AppendVec(av) => av.account_from_page(offset, page),
+            Self::Split(split) => split.account_from_page(page),
+        }
+    }
+
     /// Return the path of the underlying account file.
     pub fn path(&self) -> &Path {
         match self {
@@ -398,7 +537,7 @@ impl AccountsFile {
     }
 
     /// Returns the file holding the account data and its length.
-    fn account_data_file(&self) -> Option<(&File, FileSize)> {
+    pub(crate) fn account_data_file(&self) -> Option<(&File, FileSize)> {
         match self {
             Self::AppendVec(av) => Some((av.file(), av.len() as FileSize)),
             Self::Split(split) => split

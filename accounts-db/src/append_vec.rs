@@ -13,7 +13,7 @@ use meta::StoredAccountMeta;
 use {
     crate::{
         account_storage::stored_account_info::{StoredAccountInfo, StoredAccountInfoWithoutData},
-        accounts_file::StoredAccountsInfo,
+        accounts_file::{AccountDataRead, AccountFromPage, StoredAccountsInfo},
         storable_accounts::StorableAccounts,
         u64_align,
         utils::create_account_shared_data,
@@ -185,7 +185,7 @@ pub struct AppendVec {
     is_dirty: AtomicBool,
 }
 
-const PAGE_SIZE: usize = 4 * 1024;
+pub(crate) const PAGE_SIZE: usize = 4 * 1024;
 
 pub struct AppendVecStat {
     pub files_open: AtomicU64,
@@ -575,21 +575,53 @@ impl AppendVec {
         })
         .ok()?;
         // SAFETY: we only read the initialized portion.
-        let valid_bytes =
-            ValidSlice(unsafe { slice::from_raw_parts(buf.as_ptr() as *const u8, bytes_read) });
+        let page = unsafe { slice::from_raw_parts(buf.as_ptr() as *const u8, bytes_read) };
+        let valid_bytes = ValidSlice(page);
+        let (meta, next) = Self::get_type::<StoredMeta>(valid_bytes, 0)?;
+        let (account_meta, _next) = Self::get_type::<AccountMeta>(valid_bytes, next)?;
+        if !load_filter(
+            account_meta.lamports,
+            &account_meta.owner,
+            meta.data_len as usize,
+        ) {
+            return Some(None);
+        }
+        let account = match self.account_from_page(offset, page)? {
+            AccountFromPage::Complete(account) => account,
+            AccountFromPage::Partial(data_read) => {
+                data_read.read(&self.file, self.len() as FileSize)?
+            }
+        };
+        Some(Some(account))
+    }
+
+    /// The first read for the account at `logical_offset`: up to a page, and not past `len()`
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub(crate) fn account_page_read(
+        &self,
+        logical_offset: LogicalOffset,
+    ) -> Option<(FileOffset, usize)> {
+        let offset = file_offset_from_logical(logical_offset);
+        let len = (self.len() as FileOffset)
+            .checked_sub(offset)?
+            .min(PAGE_SIZE as FileOffset);
+        (len > 0).then_some((offset, len as usize))
+    }
+
+    /// Parses the account at file `offset` from `page`, the bytes read there: up to a page, or
+    /// fewer at the end of the file
+    pub(crate) fn account_from_page(
+        &self,
+        offset: FileOffset,
+        page: &[u8],
+    ) -> Option<AccountFromPage> {
+        let valid_bytes = ValidSlice(page);
         let (meta, next) = Self::get_type::<StoredMeta>(valid_bytes, 0)?;
         let (account_meta, next) = Self::get_type::<AccountMeta>(valid_bytes, next)?;
         let (_hash, next) = Self::get_type::<ObsoleteAccountHash>(valid_bytes, next)?;
         let data_len = meta.data_len;
-        if !load_filter(
-            account_meta.lamports,
-            &account_meta.owner,
-            data_len as usize,
-        ) {
-            return Some(None);
-        }
-        let remaining_bytes_for_data = bytes_read - next;
-        Some(Some(if remaining_bytes_for_data >= data_len as usize {
+        let remaining_bytes_for_data = page.len() - next;
+        Some(if remaining_bytes_for_data >= data_len as usize {
             // we already read enough data to load this account
             let (data, next) = Self::get_slice(valid_bytes, next, meta.data_len as usize)?;
             let stored_size = next;
@@ -600,38 +632,30 @@ impl AppendVec {
                 offset,
                 stored_size,
             };
-            // data is within `buf`, so just allocate a new vec for data
-            create_account_shared_data(&account)
+            // data is within `page`, so just allocate a new vec for data
+            AccountFromPage::Complete(create_account_shared_data(&account))
         } else {
             // not enough was read from file to get `data`
             assert!(data_len <= MAX_PERMITTED_DATA_LENGTH, "{data_len}");
-            let mut data = Vec::with_capacity(data_len as usize);
-            let slice = data.spare_capacity_mut();
-            // Note here `next` is a 0-based offset from the beginning of this account.
-            // SAFETY: `read_into_buffer` will only write to uninitialized memory.
-            let bytes_read = read_into_buffer(
-                &self.file,
-                self.len() as FileSize,
-                offset + next as FileOffset,
-                unsafe {
-                    slice::from_raw_parts_mut(slice.as_mut_ptr() as *mut u8, data_len as usize)
-                },
-            )
-            .ok()?;
-            if bytes_read < data_len as usize {
-                // eof or otherwise couldn't read all the data
+            // `next` is a 0-based offset from the beginning of this account
+            let data_offset = offset + next as FileOffset;
+            // the record does not extend past the written portion of the file
+            if data_offset.checked_add(data_len)? > self.len() as FileOffset {
                 return None;
             }
-            // SAFETY: we've just checked that `bytes_read` is at least `data_len`.
-            unsafe { data.set_len(data_len as usize) };
-            AccountSharedData::from(Account {
+            let account = Account {
                 lamports: account_meta.lamports,
-                data,
+                data: Vec::new(),
                 owner: account_meta.owner,
                 executable: account_meta.executable,
                 rent_epoch: account_meta.rent_epoch,
-            })
-        }))
+            };
+            AccountFromPage::Partial(AccountDataRead::new(
+                account,
+                data_offset,
+                data_len as usize,
+            ))
+        })
     }
 
     /// Returns the path to the file where the data is stored
@@ -1150,6 +1174,7 @@ fn stored_account_from<'a>(stored_account_meta: StoredAccountMeta<'a>) -> Stored
 mod tests {
     use {
         super::*,
+        crate::utils::create_account_shared_data,
         rand::{prelude::*, rng},
         rand_chacha::ChaChaRng,
         solana_account::{AccountSharedData, WritableAccount, accounts_equal},
@@ -1930,6 +1955,113 @@ mod tests {
 
         let result = av.get_stored_account_without_data_callback(0, |_| true);
         assert!(result.is_none()); // Expect None to be returned.
+    }
+
+    /// Reads the page at `logical_offset` as the prefetcher does: the bytes `account_page_read` names
+    fn read_account_page(av: &AppendVec, logical_offset: LogicalOffset) -> (FileOffset, Vec<u8>) {
+        let (offset, len) = av.account_page_read(logical_offset).unwrap();
+        let mut page = vec![0; len];
+        let bytes_read =
+            read_into_buffer(av.file(), av.len() as FileSize, offset, &mut page).unwrap();
+        assert_eq!(bytes_read, len);
+        (offset, page)
+    }
+
+    #[test]
+    fn test_account_page_read() {
+        let temp_dir = TempDir::new().unwrap();
+        let path = temp_dir.path().join("append_vec");
+        let av = AppendVec::new(&path, 1024 * 1024);
+        av.append_account_test(&create_test_account(5)).unwrap();
+        let account = AccountSharedData::new(100, 2 * PAGE_SIZE, &Pubkey::default());
+        let index = av
+            .append_account_test(&(Pubkey::default(), account))
+            .unwrap();
+        let offset = file_offset_from_logical(index);
+        // up to a page
+        assert_eq!(av.account_page_read(index), Some((offset, PAGE_SIZE)));
+        // not past `len()`
+        av.current_len
+            .store(offset as usize + 100, Ordering::Relaxed);
+        assert_eq!(av.account_page_read(index), Some((offset, 100)));
+        av.current_len.store(offset as usize, Ordering::Relaxed);
+        assert_eq!(av.account_page_read(index), None);
+    }
+
+    #[test]
+    fn test_account_from_page_complete() {
+        let temp_dir = TempDir::new().unwrap();
+        let path = temp_dir.path().join("append_vec");
+        let av = AppendVec::new(&path, 1024 * 1024);
+        let (pubkey, account) = create_test_account(5);
+        let index = av.append_account_test(&(pubkey, account.clone())).unwrap();
+        let (offset, page) = read_account_page(&av, index);
+        let Some(AccountFromPage::Complete(read)) = av.account_from_page(offset, &page) else {
+            panic!("expected the page to hold the whole account");
+        };
+        assert!(accounts_equal(&read, &account));
+    }
+
+    #[test]
+    fn test_account_from_page_partial() {
+        let temp_dir = TempDir::new().unwrap();
+        let path = temp_dir.path().join("append_vec");
+        let av = AppendVec::new(&path, 1024 * 1024);
+        let data_len = 2 * PAGE_SIZE;
+        let account = AccountSharedData::new_with_data(
+            100,
+            (0..data_len).map(|i| i as u8).collect(),
+            &Pubkey::default(),
+        );
+        let index = av
+            .append_account_test(&(Pubkey::default(), account.clone()))
+            .unwrap();
+        let (offset, page) = read_account_page(&av, index);
+        let Some(AccountFromPage::Partial(data_read)) = av.account_from_page(offset, &page) else {
+            panic!("expected the account's data to continue past the page");
+        };
+        assert_eq!(data_read.data_len(), data_len);
+        assert_eq!(
+            data_read.offset(),
+            offset + STORE_META_OVERHEAD as FileOffset
+        );
+        let read = data_read.read(av.file(), av.len() as FileSize).unwrap();
+        assert!(accounts_equal(&read, &account));
+    }
+
+    #[test]
+    fn test_account_from_page_partial_past_len() {
+        let temp_dir = TempDir::new().unwrap();
+        let path = temp_dir.path().join("append_vec");
+        let av = AppendVec::new(&path, 1024 * 1024);
+        let data_len = 2 * PAGE_SIZE;
+        let account = AccountSharedData::new(100, data_len, &Pubkey::default());
+        let index = av
+            .append_account_test(&(Pubkey::default(), account))
+            .unwrap();
+        let (offset, page) = read_account_page(&av, index);
+        assert!(matches!(
+            av.account_from_page(offset, &page),
+            Some(AccountFromPage::Partial(_))
+        ));
+        // the data's last byte is past `len()`
+        av.current_len
+            .store(STORE_META_OVERHEAD + data_len - 1, Ordering::Relaxed);
+        assert!(av.account_from_page(offset, &page).is_none());
+    }
+
+    #[test]
+    fn test_account_from_page_truncated_header() {
+        let temp_dir = TempDir::new().unwrap();
+        let path = temp_dir.path().join("append_vec");
+        let av = AppendVec::new(&path, 1024 * 1024);
+        let index = av.append_account_test(&create_test_account(5)).unwrap();
+        // the page ends inside the header
+        av.current_len
+            .store(STORE_META_OVERHEAD - 1, Ordering::Relaxed);
+        let (offset, page) = read_account_page(&av, index);
+        assert_eq!(page.len(), STORE_META_OVERHEAD - 1);
+        assert!(av.account_from_page(offset, &page).is_none());
     }
 
     #[test]
