@@ -338,12 +338,23 @@ pub fn read_meta_entry_bytes<'a>(
     offset: FileOffset,
     buffer: &'a mut MetaEntryBuffer,
 ) -> Result<&'a [u8], ReadMetaEntryError> {
-    validate_meta_entry_offset(file_len, offset)?;
-
-    let read_size = cmp::min(META_ENTRY_MAX_SIZE, (file_len - offset.0) as usize);
+    let read_size = meta_entry_read_size(file_len, offset)?;
     let buffer_bytes = buffer.bytes_mut(read_size);
     let num_bytes_read = file_io::read_into_buffer(file, file_len, offset.0, buffer_bytes)?;
     Ok(&buffer_bytes[..num_bytes_read])
+}
+
+/// Returns how many bytes to read for the meta entry at `offset`: up to `META_ENTRY_MAX_SIZE`,
+/// and not past `file_len`
+pub fn meta_entry_read_size(
+    file_len: FileSize,
+    offset: FileOffset,
+) -> Result<usize, ReadMetaEntryError> {
+    validate_meta_entry_offset(file_len, offset)?;
+    Ok(cmp::min(
+        META_ENTRY_MAX_SIZE,
+        (file_len - offset.0) as usize,
+    ))
 }
 
 /// Parses the meta entry from `bytes`, as read by `read_meta_entry_bytes()`: its fixed portion,

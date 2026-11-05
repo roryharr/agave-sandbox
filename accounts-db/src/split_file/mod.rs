@@ -5,17 +5,19 @@ mod error;
 mod meta;
 mod utils;
 
+pub(crate) use data::DATA_ENTRY_FIXED_SIZE;
 use {
     self::{
         common::{DataLen, DataRef, ExternalDataOffset, FileOffset},
         data::{
-            calculate_data_entry_stored_size, create_data_file, parse_data_entry, read_data_entry,
-            read_data_header, validate_data_entry_offset, write_data_entry,
+            calculate_data_entry_stored_size, create_data_file, parse_data_entry,
+            parse_data_entry_fixed, read_data_entry, read_data_header, validate_data_entry_offset,
+            write_data_entry,
         },
         meta::{
             META_ENTRY_FIXED_SIZE, META_ENTRY_OFFSET_ALIGNMENT, META_HEADER_SIZE, MetaEntryRef,
-            calculate_meta_entry_stored_size, create_meta_file, parse_meta_entry,
-            parse_meta_entry_data_ref, parse_meta_entry_fixed, read_meta_entry,
+            calculate_meta_entry_stored_size, create_meta_file, meta_entry_read_size,
+            parse_meta_entry, parse_meta_entry_data_ref, parse_meta_entry_fixed, read_meta_entry,
             read_meta_entry_bytes, read_meta_header, should_store_account_data_in_meta_file,
             write_meta_entry,
         },
@@ -23,7 +25,9 @@ use {
     },
     crate::{
         account_storage::{
-            meta_entry_read::{AccountDataRead, AccountFromMetaEntry, MetaEntryBuffer},
+            meta_entry_read::{
+                AccountDataRead, AccountFromMetaEntry, MetaEntryBuffer, MetaEntryRead,
+            },
             stored_account_info::{StoredAccountInfo, StoredAccountInfoWithoutData},
         },
         append_vec::AppendVec,
@@ -515,6 +519,39 @@ impl SplitFile {
         let data_file = self.data_file().ok_or(SplitFileError::MissingDataFile)?;
         let data = read_data_entry(data_file, self.data_len(), offset, address, data_len)?;
         Ok(data)
+    }
+
+    /// Where to read the meta entry of the account at `offset`: in the meta file, up to
+    /// `META_ENTRY_MAX_SIZE`, and not past its end
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub(crate) fn construct_meta_entry_read(
+        &self,
+        offset: LogicalOffset,
+    ) -> Result<MetaEntryRead, SplitFileError> {
+        let offset = file_offset_from_logical(offset);
+        let size = meta_entry_read_size(self.meta_len(), offset)?;
+        Ok(MetaEntryRead {
+            offset: offset.0,
+            size,
+        })
+    }
+
+    /// The account, with `data`, read from the data file after `header`, its data entry's fixed
+    /// portion. An error when the header is not the account's.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub(crate) fn account_from_data_entry(
+        &self,
+        data_read: AccountDataRead,
+        header: &[u8],
+        data: Vec<u8>,
+    ) -> Result<AccountSharedData, SplitFileError> {
+        parse_data_entry_fixed(
+            header,
+            &data_read.address,
+            // the data length came from the meta entry's DataLen
+            DataLen(data_read.data_len as u32),
+        )?;
+        Ok(data_read.account_with_data(data))
     }
 
     /// Iterate over all accounts and call `callback` with each account.

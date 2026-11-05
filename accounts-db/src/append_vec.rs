@@ -15,6 +15,7 @@ use {
         account_storage::{
             meta_entry_read::{
                 AccountDataRead, AccountFromMetaEntry, META_ENTRY_BUFFER_SIZE, MetaEntryBuffer,
+                MetaEntryRead,
             },
             stored_account_info::{StoredAccountInfo, StoredAccountInfoWithoutData},
         },
@@ -681,6 +682,23 @@ impl AppendVec {
             read_into_buffer(&self.file, self.len() as FileSize, offset, buffer_bytes).ok()?;
         // we only return the initialized portion.
         Some(&buffer_bytes[..bytes_read])
+    }
+
+    /// Where to read the meta entry of the account at `logical_offset`: a page, not past `len()`.
+    /// `None` when `logical_offset` is at or past `len()`.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub(crate) fn construct_meta_entry_read(
+        &self,
+        logical_offset: LogicalOffset,
+    ) -> Option<MetaEntryRead> {
+        let offset = file_offset_from_logical(logical_offset);
+        let size = (self.len() as FileOffset)
+            .checked_sub(offset)?
+            .min(PAGE_SIZE as FileOffset);
+        (size > 0).then_some(MetaEntryRead {
+            offset,
+            size: size as usize,
+        })
     }
 
     /// Returns the path to the file where the data is stored

@@ -35,6 +35,15 @@ impl MetaEntryBuffer {
     }
 }
 
+/// Where to read an account's meta entry: `size` bytes at `offset` in the file holding it. The
+/// entry's size is unknown until it is parsed, so this is the most it can be, and not past the
+/// file's end.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) struct MetaEntryRead {
+    pub(crate) offset: u64,
+    pub(crate) size: usize,
+}
+
 /// An account parsed from its meta entry
 pub(crate) enum AccountFromMetaEntry<'a> {
     /// the meta entry held all the account's data: the account without its data, and the data
