@@ -228,32 +228,56 @@ impl<'a, CB: AccountLoadCallback> AccountLoader<'a, CB> {
         }
     }
 
-    // Load an account either from our own store or accounts-db, with a wrapper type
-    // that includes the effective size for loaded transaction data size accounting.
-    pub(crate) fn load_account(
+    /// Loads each of `account_keys` either from our own store or accounts-db, those from
+    /// accounts-db all at once so their reads from storage overlap, and stores them for future
+    /// loads. Hands `on_load` each one's index in `account_keys` and the account, with a wrapper
+    /// type that includes the effective size for loaded transaction data size accounting, or
+    /// `None` if it does not exist; in no particular order.
+    pub(crate) fn load_accounts<'b>(
         &mut self,
-        account_key: &Pubkey,
-    ) -> Option<LoadedTransactionAccount> {
-        let account = match self.do_load(account_key) {
-            // Exists, from AccountLoader.
-            (Some(account), false) => Some(account),
-            // Not allocated, but has an AccountLoader placeholder already.
-            (None, false) => None,
-            // Exists in accounts-db. Store it in AccountLoader for future loads.
-            (Some(account), true) => {
-                self.loaded_accounts.insert(*account_key, account.clone());
-                Some(account)
+        account_keys: impl IntoIterator<Item = &'b Pubkey>,
+        mut on_load: impl FnMut(usize, Option<LoadedTransactionAccount>),
+    ) {
+        // the index of each account to load from accounts-db
+        let mut to_load = AHashMap::new();
+        let mut repeated = Vec::new();
+        for (index, account_key) in account_keys.into_iter().enumerate() {
+            if let Some(account) = self.loaded_accounts.get(account_key) {
+                on_load(index, loaded_from_store(account));
+            } else if to_load.contains_key(account_key) {
+                // loaded with its first instance, then found in our own store
+                repeated.push((index, *account_key));
+            } else {
+                to_load.insert(*account_key, index);
             }
-            // Does not exist and has never been seen.
-            (None, true) => {
-                self.loaded_accounts
-                    .insert(*account_key, AccountSharedData::default());
-                None
-            }
-        };
-
-        account.map(LoadedTransactionAccount::new)
+        }
+        if !to_load.is_empty() {
+            let loaded_accounts = &mut self.loaded_accounts;
+            self.callbacks
+                .load_accounts(to_load.keys().copied(), |account_key, account| {
+                    // Store it for future loads, as a placeholder if it does not exist.
+                    loaded_accounts.insert(account_key, account.clone().unwrap_or_default());
+                    let index = *to_load
+                        .get(&account_key)
+                        .expect("loads the accounts to load");
+                    on_load(index, account.map(LoadedTransactionAccount::new));
+                });
+        }
+        for (index, account_key) in repeated {
+            let account = self
+                .loaded_accounts
+                .get(&account_key)
+                .expect("stored when its first instance loaded");
+            on_load(index, loaded_from_store(account));
+        }
     }
+}
+
+/// An account from the loader's own store, `None` if its lamports are 0: a previous transaction
+/// closed it, or it never existed, and it is returned as `None` so it can be created fresh. We
+/// *never* remove accounts, or else we would fetch stale state from accounts-db.
+fn loaded_from_store(account: &AccountSharedData) -> Option<LoadedTransactionAccount> {
+    (account.lamports() > 0).then(|| LoadedTransactionAccount::new(account.clone()))
 }
 
 impl<'a, CB: TransactionProcessingCallback> AccountLoader<'a, CB> {
@@ -557,6 +581,23 @@ fn load_transaction_accounts<CB: AccountLoadCallback>(
         error_metrics,
     )?;
 
+    // Load every account but the fee payer, which was loaded during validation, and the
+    // instructions sysvar, which is constructed.
+    let to_load: Vec<_> = account_keys
+        .iter()
+        .enumerate()
+        .skip(1)
+        .filter(|(_, account_key)| !solana_sdk_ids::sysvar::instructions::check_id(account_key))
+        .collect();
+    let mut loaded_accounts: Vec<_> = (0..account_keys.len()).map(|_| None).collect();
+    account_loader.load_accounts(
+        to_load.iter().map(|(_, account_key)| *account_key),
+        |load_index, loaded_account| {
+            let (account_index, _) = to_load[load_index];
+            loaded_accounts[account_index] = loaded_account;
+        },
+    );
+
     let loaderv3_programdata_size_floor =
         account_loader.feature_set.loaderv3_programdata_size_floor;
     let mut collect_loaded_account =
@@ -592,8 +633,10 @@ fn load_transaction_accounts<CB: AccountLoadCallback>(
                     // * Old behavior: If programdata exists, add base size plus data size.
                     // * New behavior: Unconditionally add base size plus the greater of
                     //   its data size or the minimum `size_of_programdata_metadata()`.
-                    let maybe_programdata_account =
-                        account_loader.load_account(&programdata_address);
+                    let mut maybe_programdata_account = None;
+                    account_loader.load_accounts([&programdata_address], |_, loaded_account| {
+                        maybe_programdata_account = loaded_account;
+                    });
 
                     let programdata_charged_size = if loaderv3_programdata_size_floor {
                         let data_size = maybe_programdata_account
@@ -628,18 +671,21 @@ fn load_transaction_accounts<CB: AccountLoadCallback>(
         loaded_fee_payer_account,
     )?;
 
-    // Attempt to load and collect remaining non-fee payer accounts.
-    for (account_index, account_key) in account_keys.iter().enumerate().skip(1) {
+    // Collect remaining non-fee payer accounts.
+    for ((account_index, account_key), loaded_account) in
+        account_keys.iter().enumerate().zip(loaded_accounts).skip(1)
+    {
         let loaded_account =
-            load_transaction_account(account_loader, message, account_key, account_index, rent)?;
+            prepare_transaction_account(message, account_key, account_index, loaded_account, rent)?;
         collect_loaded_account(account_loader, account_key, loaded_account)?;
     }
 
     for (program_id, _) in message.program_instructions_iter() {
-        let Some(program_account) = account_loader
-            .load_account(program_id)
-            .map(|loaded| loaded.account)
-        else {
+        let mut program_account = None;
+        account_loader.load_accounts([program_id], |_, loaded_account| {
+            program_account = loaded_account.map(|loaded| loaded.account);
+        });
+        let Some(program_account) = program_account else {
             error_metrics.account_not_found += 1;
             return Err(TransactionError::ProgramAccountNotFound);
         };
@@ -654,11 +700,12 @@ fn load_transaction_accounts<CB: AccountLoadCallback>(
     Ok(loaded_transaction_accounts)
 }
 
-fn load_transaction_account<CB: AccountLoadCallback>(
-    account_loader: &mut AccountLoader<CB>,
+/// The transaction's account at `account_index`, from `loaded_account`, what loading it found
+fn prepare_transaction_account(
     message: &impl SVMMessage,
     account_key: &Pubkey,
     account_index: usize,
+    loaded_account: Option<LoadedTransactionAccount>,
     rent: &Rent,
 ) -> Result<LoadedTransactionAccount> {
     let is_writable = message.is_writable(account_index);
@@ -669,7 +716,7 @@ fn load_transaction_account<CB: AccountLoadCallback>(
             loaded_size: 0,
             account: construct_instructions_account(message)?,
         })
-    } else if let Some(mut loaded_account) = account_loader.load_account(account_key) {
+    } else if let Some(mut loaded_account) = loaded_account {
         if is_writable {
             update_rent_exempt_status_for_account(rent, &mut loaded_account.account);
         }
@@ -2377,6 +2424,17 @@ mod tests {
         assert_eq!(account.lamports(), 1);
     }
 
+    fn load_one_account<CB: AccountLoadCallback>(
+        account_loader: &mut AccountLoader<CB>,
+        account_key: &Pubkey,
+    ) -> Option<LoadedTransactionAccount> {
+        let mut account = None;
+        account_loader.load_accounts([account_key], |_, loaded_account| {
+            account = loaded_account;
+        });
+        account
+    }
+
     #[test]
     fn test_account_loader_wrappers() {
         let fee_payer = Pubkey::new_unique();
@@ -2392,13 +2450,17 @@ mod tests {
         // test without stored account
         let mut account_loader: AccountLoader<_> = (&mock_bank).into();
         assert_eq!(
-            account_loader.load_account(&fee_payer).unwrap().account,
+            load_one_account(&mut account_loader, &fee_payer)
+                .unwrap()
+                .account,
             fee_payer_account
         );
 
         let mut account_loader: AccountLoader<_> = (&mock_bank).into();
         assert_eq!(
-            account_loader.load_account(&fee_payer).unwrap().account,
+            load_one_account(&mut account_loader, &fee_payer)
+                .unwrap()
+                .account,
             fee_payer_account
         );
 
@@ -2410,14 +2472,18 @@ mod tests {
 
         // test with stored account
         let mut account_loader: AccountLoader<_> = (&mock_bank).into();
-        account_loader.load_account(&fee_payer).unwrap();
+        load_one_account(&mut account_loader, &fee_payer).unwrap();
 
         assert_eq!(
-            account_loader.load_account(&fee_payer).unwrap().account,
+            load_one_account(&mut account_loader, &fee_payer)
+                .unwrap()
+                .account,
             fee_payer_account
         );
         assert_eq!(
-            account_loader.load_account(&fee_payer).unwrap().account,
+            load_one_account(&mut account_loader, &fee_payer)
+                .unwrap()
+                .account,
             fee_payer_account
         );
         assert_eq!(
@@ -2434,7 +2500,7 @@ mod tests {
             0,
         );
 
-        assert_eq!(account_loader.load_account(&fee_payer), None);
+        assert_eq!(load_one_account(&mut account_loader, &fee_payer), None);
         assert_eq!(account_loader.get_account_shared_data(&fee_payer), None);
     }
 
@@ -2663,7 +2729,7 @@ mod tests {
         let mut account_loader: AccountLoader<_> = (&mock_bank).into();
 
         // load hits accounts-db, same account is stored
-        account_loader.load_account(&hit_address);
+        load_one_account(&mut account_loader, &hit_address);
         let actual_hit_account = account_loader.loaded_accounts.get(&hit_address);
 
         assert_eq!(actual_hit_account.unwrap(), &expected_hit_account);
@@ -2673,7 +2739,7 @@ mod tests {
         ));
 
         // reload doesn't affect this
-        account_loader.load_account(&hit_address);
+        load_one_account(&mut account_loader, &hit_address);
         let actual_hit_account = account_loader.loaded_accounts.get(&hit_address);
 
         assert_eq!(actual_hit_account.unwrap(), &expected_hit_account);
@@ -2683,7 +2749,7 @@ mod tests {
         ));
 
         // load misses accounts-db, placeholder is inserted
-        account_loader.load_account(&miss_address);
+        load_one_account(&mut account_loader, &miss_address);
         let expected_miss_account = account_loader
             .loaded_accounts
             .get(&miss_address)
@@ -2696,7 +2762,7 @@ mod tests {
         ));
 
         // reload keeps the same placeholder
-        account_loader.load_account(&miss_address);
+        load_one_account(&mut account_loader, &miss_address);
         let actual_miss_account = account_loader.loaded_accounts.get(&miss_address);
 
         assert_eq!(actual_miss_account, Some(&expected_miss_account));
@@ -2704,5 +2770,47 @@ mod tests {
             &actual_miss_account.unwrap().data_clone(),
             &expected_miss_account.data_clone()
         ));
+    }
+
+    #[test]
+    fn test_load_accounts_by_index() {
+        let mut mock_bank = TestCallbacks::default();
+        let stored_address = Pubkey::new_unique();
+        let hit_address = Pubkey::new_unique();
+        let miss_address = Pubkey::new_unique();
+        let stored_account = AccountSharedData::new(1, 0, &Pubkey::new_unique());
+        let hit_account = AccountSharedData::new(2, 0, &Pubkey::new_unique());
+        mock_bank
+            .accounts_map
+            .insert(stored_address, stored_account.clone());
+        mock_bank
+            .accounts_map
+            .insert(hit_address, hit_account.clone());
+        let mut account_loader: AccountLoader<_> = (&mock_bank).into();
+        load_one_account(&mut account_loader, &stored_address);
+
+        // one from our own store, one from accounts-db twice, and one that does not exist
+        let account_keys = [stored_address, hit_address, miss_address, hit_address];
+        let mut loaded: Vec<_> = account_keys.iter().map(|_| None).collect();
+        account_loader.load_accounts(account_keys.iter(), |index, loaded_account| {
+            assert!(loaded[index].is_none());
+            loaded[index] = Some(loaded_account.map(|loaded| loaded.account));
+        });
+
+        assert_eq!(
+            loaded,
+            vec![
+                Some(Some(stored_account)),
+                Some(Some(hit_account.clone())),
+                Some(None),
+                Some(Some(hit_account)),
+            ]
+        );
+        // stored for future loads, the one that does not exist as a placeholder
+        assert!(account_loader.loaded_accounts.contains_key(&hit_address));
+        assert_eq!(
+            account_loader.loaded_accounts.get(&miss_address),
+            Some(&AccountSharedData::default())
+        );
     }
 }

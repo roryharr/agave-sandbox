@@ -6904,6 +6904,18 @@ impl AccountLoadCallback for Bank {
     fn get_account_shared_data(&self, pubkey: &Pubkey) -> Option<AccountSharedData> {
         self.get_account(pubkey)
     }
+
+    fn load_accounts(
+        &self,
+        pubkeys: impl IntoIterator<Item = Pubkey>,
+        mut on_load: impl FnMut(Pubkey, Option<AccountSharedData>),
+    ) {
+        self.rc
+            .accounts
+            .load_accounts(&self.ancestors, pubkeys, |pubkey, account| {
+                on_load(pubkey, account.map(|(account, _slot)| account))
+            })
+    }
 }
 
 impl TransactionProcessingCallback for Bank {

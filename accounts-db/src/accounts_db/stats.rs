@@ -791,6 +791,196 @@ impl LoadAccountsStats {
     }
 }
 
+/// What `load_accounts` did. Its loads also count in `LoadAccountsStats`, by where they load from.
+#[derive(Debug, Default)]
+pub struct LoadAccountsBatchStats {
+    pub num_calls: AtomicU64,
+    pub num_pubkeys: AtomicU64,
+    /// calls none of whose accounts were read from storage
+    pub num_calls_no_storage_reads: AtomicU64,
+    /// calls with one account read from storage: there is nothing to read in parallel
+    pub num_calls_one_storage_read: AtomicU64,
+    /// calls with more than one account read from storage
+    pub num_calls_many_storage_reads: AtomicU64,
+    /// accounts read from storage
+    pub num_stored: AtomicU64,
+    /// meta entry reads on the ring that completed during their own submission: the entry was in
+    /// the page cache
+    pub num_page_cache_reads: AtomicU64,
+    /// meta entry reads on the ring that completed later, nearly all from disk
+    pub num_disk_reads: AtomicU64,
+    /// data entry reads on the ring, of accounts whose meta entry did not hold all their data
+    pub num_data_reads: AtomicU64,
+    /// time from pushing each read on the ring to its completion, summed
+    pub read_us: AtomicU64,
+    /// the slowest of them
+    pub max_read_us: AtomicU64,
+    /// accounts read one at a time because the thread has no ring: no io_uring
+    pub num_no_ring_reads: AtomicU64,
+    /// accounts read one at a time because the thread's ring was in use: `on_load` loaded again
+    pub num_ring_busy_reads: AtomicU64,
+    /// accounts read again one at a time because their read on the ring did not produce one
+    pub num_failed_reads: AtomicU64,
+    /// accounts read one at a time because the index put them at or past their file's end
+    pub num_past_end: AtomicU64,
+    /// time spent loading accounts from storage, summed over calls
+    pub storage_us: AtomicU64,
+    /// the longest of them
+    pub max_storage_us: AtomicU64,
+    /// of `storage_us`, time blocked waiting for reads on the ring
+    pub ring_wait_us: AtomicU64,
+}
+
+/// What one call to `load_accounts` did, accumulated once per call rather than per pubkey or per
+/// read
+#[derive(Debug, Default)]
+pub struct LoadAccountsBatchStatsSub {
+    pub num_pubkeys: u64,
+    pub num_stored: u64,
+    pub num_page_cache_reads: u64,
+    pub num_disk_reads: u64,
+    pub num_data_reads: u64,
+    pub read_us: u64,
+    pub max_read_us: u64,
+    pub num_no_ring_reads: u64,
+    pub num_ring_busy_reads: u64,
+    pub num_failed_reads: u64,
+    pub num_past_end: u64,
+    pub storage_us: u64,
+    pub ring_wait_us: u64,
+}
+
+impl LoadAccountsBatchStats {
+    pub fn accumulate_sub_stats(&self, stats_sub: LoadAccountsBatchStatsSub) {
+        self.num_calls.fetch_add(1, Ordering::Relaxed);
+        self.num_pubkeys
+            .fetch_add(stats_sub.num_pubkeys, Ordering::Relaxed);
+        let num_calls_by_storage_reads = match stats_sub.num_stored {
+            0 => &self.num_calls_no_storage_reads,
+            1 => &self.num_calls_one_storage_read,
+            _ => &self.num_calls_many_storage_reads,
+        };
+        num_calls_by_storage_reads.fetch_add(1, Ordering::Relaxed);
+        if stats_sub.num_stored == 0 {
+            // the rest are all about reads from storage
+            return;
+        }
+        self.num_stored
+            .fetch_add(stats_sub.num_stored, Ordering::Relaxed);
+        self.num_page_cache_reads
+            .fetch_add(stats_sub.num_page_cache_reads, Ordering::Relaxed);
+        self.num_disk_reads
+            .fetch_add(stats_sub.num_disk_reads, Ordering::Relaxed);
+        self.num_data_reads
+            .fetch_add(stats_sub.num_data_reads, Ordering::Relaxed);
+        self.read_us.fetch_add(stats_sub.read_us, Ordering::Relaxed);
+        self.max_read_us
+            .fetch_max(stats_sub.max_read_us, Ordering::Relaxed);
+        self.num_no_ring_reads
+            .fetch_add(stats_sub.num_no_ring_reads, Ordering::Relaxed);
+        self.num_ring_busy_reads
+            .fetch_add(stats_sub.num_ring_busy_reads, Ordering::Relaxed);
+        self.num_failed_reads
+            .fetch_add(stats_sub.num_failed_reads, Ordering::Relaxed);
+        self.num_past_end
+            .fetch_add(stats_sub.num_past_end, Ordering::Relaxed);
+        self.storage_us
+            .fetch_add(stats_sub.storage_us, Ordering::Relaxed);
+        self.max_storage_us
+            .fetch_max(stats_sub.storage_us, Ordering::Relaxed);
+        self.ring_wait_us
+            .fetch_add(stats_sub.ring_wait_us, Ordering::Relaxed);
+    }
+
+    pub fn report(&self) {
+        datapoint_info!(
+            "accounts_db_load_accounts_batch",
+            ("num_calls", self.num_calls.swap(0, Ordering::Relaxed), i64),
+            (
+                "num_pubkeys",
+                self.num_pubkeys.swap(0, Ordering::Relaxed),
+                i64
+            ),
+            (
+                "num_calls_no_storage_reads",
+                self.num_calls_no_storage_reads.swap(0, Ordering::Relaxed),
+                i64
+            ),
+            (
+                "num_calls_one_storage_read",
+                self.num_calls_one_storage_read.swap(0, Ordering::Relaxed),
+                i64
+            ),
+            (
+                "num_calls_many_storage_reads",
+                self.num_calls_many_storage_reads.swap(0, Ordering::Relaxed),
+                i64
+            ),
+            (
+                "num_stored",
+                self.num_stored.swap(0, Ordering::Relaxed),
+                i64
+            ),
+            (
+                "num_page_cache_reads",
+                self.num_page_cache_reads.swap(0, Ordering::Relaxed),
+                i64
+            ),
+            (
+                "num_disk_reads",
+                self.num_disk_reads.swap(0, Ordering::Relaxed),
+                i64
+            ),
+            (
+                "num_data_reads",
+                self.num_data_reads.swap(0, Ordering::Relaxed),
+                i64
+            ),
+            ("read_us", self.read_us.swap(0, Ordering::Relaxed), i64),
+            (
+                "max_read_us",
+                self.max_read_us.swap(0, Ordering::Relaxed),
+                i64
+            ),
+            (
+                "num_no_ring_reads",
+                self.num_no_ring_reads.swap(0, Ordering::Relaxed),
+                i64
+            ),
+            (
+                "num_ring_busy_reads",
+                self.num_ring_busy_reads.swap(0, Ordering::Relaxed),
+                i64
+            ),
+            (
+                "num_failed_reads",
+                self.num_failed_reads.swap(0, Ordering::Relaxed),
+                i64
+            ),
+            (
+                "num_past_end",
+                self.num_past_end.swap(0, Ordering::Relaxed),
+                i64
+            ),
+            (
+                "storage_us",
+                self.storage_us.swap(0, Ordering::Relaxed),
+                i64
+            ),
+            (
+                "max_storage_us",
+                self.max_storage_us.swap(0, Ordering::Relaxed),
+                i64
+            ),
+            (
+                "ring_wait_us",
+                self.ring_wait_us.swap(0, Ordering::Relaxed),
+                i64
+            ),
+        );
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct PrefetchAccountsStats {
     /// pubkeys dropped because the prefetch thread's queue was full

@@ -205,6 +205,17 @@ impl Accounts {
         )
     }
 
+    /// Loads each of `pubkeys` as `load` does, handing it to `on_load` as soon as it is loaded,
+    /// in no particular order
+    pub fn load_accounts(
+        &self,
+        ancestors: &Ancestors,
+        pubkeys: impl IntoIterator<Item = Pubkey>,
+        on_load: impl FnMut(Pubkey, Option<(AccountSharedData, Slot)>),
+    ) {
+        self.accounts_db.load_accounts(ancestors, pubkeys, on_load)
+    }
+
     /// Loads accounts in the background for the passed in keys if they are not present in the
     /// read cache or write cache. Inserts them into the read cache
     pub fn prefetch_accounts(&self, pubkeys: &[Pubkey]) {

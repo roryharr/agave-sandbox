@@ -82,11 +82,15 @@ impl BalanceCollector {
 
         let has_token_program = transaction.account_keys().iter().any(is_known_spl_token_id);
 
-        for (index, key) in transaction.account_keys().iter().enumerate() {
-            let Some(account) = account_loader
-                .load_account(key)
-                .map(|loaded| loaded.account)
-            else {
+        let mut accounts: Vec<_> = (0..transaction.account_keys().len())
+            .map(|_| None)
+            .collect();
+        account_loader.load_accounts(transaction.account_keys().iter(), |index, loaded| {
+            accounts[index] = loaded.map(|loaded| loaded.account);
+        });
+
+        for ((index, key), account) in transaction.account_keys().iter().enumerate().zip(accounts) {
+            let Some(account) = account else {
                 native_balances.push(0);
                 continue;
             };
@@ -184,7 +188,11 @@ impl SvmTokenInfo {
             amount,
         } = generic_token::Account::unpack(account.data(), &program_id)?;
 
-        let mint_account = account_loader.load_account(&mint)?.account;
+        let mut mint_account = None;
+        account_loader.load_accounts([&mint], |_, loaded| {
+            mint_account = loaded.map(|loaded| loaded.account);
+        });
+        let mint_account = mint_account?;
         if *mint_account.owner() != program_id {
             return None;
         }

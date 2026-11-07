@@ -917,10 +917,11 @@ impl<FG: ForkGraph> TransactionBatchProcessor<FG> {
             return Err(TransactionError::BlockhashNotFound);
         }
 
-        let Some(mut nonce_account) = account_loader
-            .load_account(nonce_address)
-            .map(|loaded| loaded.account)
-        else {
+        let mut nonce_account = None;
+        account_loader.load_accounts([nonce_address], |_, loaded| {
+            nonce_account = loaded.map(|loaded| loaded.account);
+        });
+        let Some(mut nonce_account) = nonce_account else {
             error_counters.account_not_found += 1;
             return Err(TransactionError::AccountNotFound);
         };

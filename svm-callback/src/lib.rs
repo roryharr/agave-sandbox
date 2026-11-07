@@ -36,6 +36,18 @@ pub trait InvokeContextCallback {
 /// Account loading for SVM.
 pub trait AccountLoadCallback {
     fn get_account_shared_data(&self, pubkey: &Pubkey) -> Option<AccountSharedData>;
+
+    /// Loads each of `pubkeys` as `get_account_shared_data` does, handing it to `on_load` as
+    /// soon as it is loaded, in no particular order
+    fn load_accounts(
+        &self,
+        pubkeys: impl IntoIterator<Item = Pubkey>,
+        mut on_load: impl FnMut(Pubkey, Option<AccountSharedData>),
+    ) {
+        for pubkey in pubkeys {
+            on_load(pubkey, self.get_account_shared_data(&pubkey));
+        }
+    }
 }
 
 /// Runtime callbacks for transaction processing.
