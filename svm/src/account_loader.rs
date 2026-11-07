@@ -254,6 +254,27 @@ impl<'a, CB: AccountLoadCallback> AccountLoader<'a, CB> {
 
         account.map(LoadedTransactionAccount::new)
     }
+
+    /// Loads together those of `account_keys` not loaded yet, so their reads from storage
+    /// overlap, storing each as `load_account` would: its first `load_account` then finds it
+    fn preload_accounts<'b>(&mut self, account_keys: impl IntoIterator<Item = &'b Pubkey>) {
+        let account_keys: Vec<_> = account_keys
+            .into_iter()
+            .filter(|account_key| {
+                // the instructions sysvar is constructed, never loaded
+                !self.loaded_accounts.contains_key(*account_key)
+                    && !solana_sdk_ids::sysvar::instructions::check_id(account_key)
+            })
+            .copied()
+            .collect();
+        let loaded_accounts = &mut self.loaded_accounts;
+        self.callbacks
+            .load_accounts(account_keys, |account_key, account| {
+                loaded_accounts
+                    .entry(account_key)
+                    .or_insert_with(|| account.unwrap_or_default());
+            });
+    }
 }
 
 impl<'a, CB: TransactionProcessingCallback> AccountLoader<'a, CB> {
@@ -556,6 +577,8 @@ fn load_transaction_accounts<CB: AccountLoadCallback>(
             .saturating_mul(ADDRESS_LOOKUP_TABLE_BASE_SIZE),
         error_metrics,
     )?;
+
+    account_loader.preload_accounts(account_keys.iter());
 
     let loaderv3_programdata_size_floor =
         account_loader.feature_set.loaderv3_programdata_size_floor;

@@ -20,6 +20,7 @@
 
 mod accounts_db_config;
 mod geyser_plugin_utils;
+mod load_accounts;
 mod prefetch;
 #[cfg(target_os = "linux")]
 mod ring_account_read;
