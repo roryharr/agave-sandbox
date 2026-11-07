@@ -46,7 +46,8 @@ use {
         accounts_db::{
             prefetch::AccountsPrefetcher,
             stats::{
-                AccountsStats, CleanAccountsStats, FlushStats, LoadAccountsStats,
+                AccountsStats, CleanAccountsStats, FlushStats, LoadAccountsBatchStats,
+                LoadAccountsStats,
                 ObsoleteAccountsStats, PurgeStats, ShrinkAncientStats, ShrinkStats, ShrinkStatsSub,
                 StoreAccountsForFlushStats, StoreAccountsForShrinkStats,
                 StoreAccountsForSquashStats, StoreAccountsUnfrozenStats, WriteAccountsToCacheStats,
@@ -740,6 +741,9 @@ pub struct AccountsDb {
     /// Stats for loading accounts during transaction processing
     load_account_stats: LoadAccountsStats,
 
+    /// Stats for loading many accounts at once; see `load_accounts`
+    load_accounts_batch_stats: LoadAccountsBatchStats,
+
     /// Warms the read cache in the background; see `prefetch_accounts`
     prefetcher: AccountsPrefetcher,
 
@@ -929,6 +933,7 @@ impl AccountsDb {
             shrink_ancient_stats: ShrinkAncientStats::default(),
             stats: AccountsStats::default(),
             load_account_stats: LoadAccountsStats::default(),
+            load_accounts_batch_stats: LoadAccountsBatchStats::default(),
             prefetcher: AccountsPrefetcher::new(Weak::clone(accounts_db)),
             store_accounts_unfrozen_stats: StoreAccountsUnfrozenStats::default(),
             is_bank_drop_callback_enabled: AtomicBool::default(),
@@ -4416,6 +4421,7 @@ impl AccountsDb {
             );
 
             self.load_account_stats.report();
+            self.load_accounts_batch_stats.report();
             self.prefetcher.stats.report();
         }
     }

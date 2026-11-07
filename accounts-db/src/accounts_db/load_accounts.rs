@@ -11,15 +11,19 @@ use {
     agave_io_uring::{Ring, RingAccess},
     io_uring::IoUring,
     log::warn,
-    std::cell::{OnceCell, RefCell},
+    std::{
+        cell::{OnceCell, RefCell},
+        mem,
+        time::Duration,
+    },
 };
 use {
-    super::{AccountsDb, LoadedAccountAccessor},
+    super::{stats::LoadAccountsBatchStatsSub, AccountsDb, LoadedAccountAccessor},
     crate::{ancestors::Ancestors, is_zero_lamport::IsZeroLamport},
     solana_account::AccountSharedData,
     solana_clock::Slot,
     solana_pubkey::Pubkey,
-    std::sync::atomic::Ordering,
+    std::{sync::atomic::Ordering, time::Instant},
 };
 
 /// Accounts a thread reads at once, each with one read at a time: its meta entry, then its data
@@ -46,24 +50,44 @@ impl AccountsDb {
         pubkeys: impl IntoIterator<Item = Pubkey>,
         mut on_load: impl FnMut(Pubkey, Option<(AccountSharedData, Slot)>),
     ) {
+        let mut stats_sub = LoadAccountsBatchStatsSub::default();
         let mut stored = Vec::new();
         for pubkey in pubkeys {
+            stats_sub.num_pubkeys += 1;
             match self.load_cached_or_locate(ancestors, &pubkey) {
                 LoadOrLocate::Loaded(account) => on_load(pubkey, account),
                 LoadOrLocate::Stored(slot, accessor) => stored.push((pubkey, slot, accessor)),
             }
         }
-        if stored.is_empty() {
-            return;
+        if !stored.is_empty() {
+            stats_sub.num_stored = stored.len() as u64;
+            let start = Instant::now();
+            self.load_stored(stored, &mut stats_sub, &mut on_load);
+            stats_sub.storage_us = start.elapsed().as_micros() as u64;
         }
+        self.load_accounts_batch_stats
+            .accumulate_sub_stats(stats_sub);
+    }
+
+    /// Loads `stored` from storage: on this thread's ring if it can, else one at a time
+    fn load_stored(
+        &self,
+        stored: Vec<(Pubkey, Slot, LoadedAccountAccessor)>,
+        stats_sub: &mut LoadAccountsBatchStatsSub,
+        on_load: &mut impl FnMut(Pubkey, Option<(AccountSharedData, Slot)>),
+    ) {
         #[cfg(target_os = "linux")]
-        let stored = match self.load_on_ring(stored, &mut on_load) {
+        let stored = match self.load_on_ring(stored, stats_sub, on_load) {
             Ok(()) => return,
             Err(stored) => stored,
         };
+        #[cfg(not(target_os = "linux"))]
+        {
+            stats_sub.num_no_ring_reads += stored.len() as u64;
+        }
         for (pubkey, slot, mut accessor) in stored {
             let account = accessor.get_account_shared_data_if(None::<fn(_, &_, _) -> _>);
-            self.finish_load(pubkey, slot, account, &mut on_load);
+            self.finish_load(pubkey, slot, account, on_load);
         }
     }
 
@@ -115,22 +139,28 @@ impl AccountsDb {
     fn load_on_ring(
         &self,
         stored: Vec<(Pubkey, Slot, LoadedAccountAccessor)>,
+        stats_sub: &mut LoadAccountsBatchStatsSub,
         on_load: &mut impl FnMut(Pubkey, Option<(AccountSharedData, Slot)>),
     ) -> Result<(), Vec<(Pubkey, Slot, LoadedAccountAccessor)>> {
         LOAD_RING.with(|ring| {
-            // in use when `on_load` loads again
-            let Some(mut ring) = ring
-                .get_or_init(new_load_ring)
-                .as_ref()
-                .and_then(|ring| ring.try_borrow_mut().ok())
-            else {
+            let Some(ring) = ring.get_or_init(new_load_ring) else {
+                stats_sub.num_no_ring_reads += stored.len() as u64;
                 return Err(stored);
             };
+            // in use when `on_load` loads again
+            let Ok(mut ring) = ring.try_borrow_mut() else {
+                stats_sub.num_ring_busy_reads += stored.len() as u64;
+                return Err(stored);
+            };
+            // counted in the ring's state, which completions count reads in, for this call
+            ring.context_mut().stats_sub = mem::take(stats_sub);
+            let mut ring_wait = Duration::ZERO;
             let mut num_in_flight = 0;
             for (pubkey, slot, mut accessor) in stored {
                 let Some(meta_entry_read) = accessor.construct_meta_entry_read() else {
                     // the offset is at or past the file's end: the blocking read says what that
                     // means
+                    ring.context_mut().stats_sub.num_past_end += 1;
                     let account = accessor.get_account_shared_data_if(None::<fn(_, &_, _) -> _>);
                     self.finish_load(pubkey, slot, account, on_load);
                     continue;
@@ -153,18 +183,24 @@ impl AccountsDb {
                 // submit now, so the first accounts are handed over while the rest are pushed;
                 // those in the page cache complete during submission
                 ring.submit().expect("submit account reads");
+                ring.context_mut().handling_submitted = true;
                 ring.process_completions()
                     .expect("process account read completions");
+                ring.context_mut().handling_submitted = false;
                 num_in_flight -= self.finish_ring_loads(ring.context_mut(), on_load);
             }
             while num_in_flight > 0 {
+                let wait_start = Instant::now();
                 // also submits the data entry reads completions pushed
                 ring.submit_and_wait(1, None)
                     .expect("wait for account reads");
+                ring_wait += wait_start.elapsed();
                 ring.process_completions()
                     .expect("process account read completions");
                 num_in_flight -= self.finish_ring_loads(ring.context_mut(), on_load);
             }
+            *stats_sub = mem::take(&mut ring.context_mut().stats_sub);
+            stats_sub.ring_wait_us = ring_wait.as_micros() as u64;
             Ok(())
         })
     }
@@ -182,6 +218,7 @@ impl AccountsDb {
             self.finish_load(pubkey, slot, Some(account), on_load);
         }
         let num_failed = state.failed.len();
+        state.stats_sub.num_failed_reads += num_failed as u64;
         for (pubkey, slot, mut accessor) in state.failed.drain(..) {
             let account = accessor.get_account_shared_data_if(None::<fn(_, &_, _) -> _>);
             self.finish_load(pubkey, slot, account, on_load);
@@ -216,6 +253,8 @@ fn new_load_ring() -> Option<RefCell<Ring<LoadState, ReadOp>>> {
         warn!("load kernel workers are not capped: {err}");
     }
     let state = LoadState {
+        handling_submitted: false,
+        stats_sub: LoadAccountsBatchStatsSub::default(),
         meta_entry_buffers: Vec::new(),
         finished: Vec::new(),
         failed: Vec::new(),
@@ -226,6 +265,11 @@ fn new_load_ring() -> Option<RefCell<Ring<LoadState, ReadOp>>> {
 /// What completions need, held by the ring
 #[cfg(target_os = "linux")]
 struct LoadState {
+    /// Whether completions are handled right after their submission: the reads completed during
+    /// it, so their meta entry was in the page cache
+    handling_submitted: bool,
+    /// what the current call did so far
+    stats_sub: LoadAccountsBatchStatsSub,
     /// Buffers for meta entry reads, allocated as the reads in flight first need them
     meta_entry_buffers: Vec<Box<MetaEntryBuffer>>,
     /// Accounts read, to hand over
@@ -240,8 +284,18 @@ impl AccountReadContext for LoadState {
         &mut self.meta_entry_buffers
     }
 
-    /// Loads count where they load from, not their reads
-    fn count_read(&mut self, _is_data_read: bool, _read_us: u64) {}
+    fn count_read(&mut self, is_data_read: bool, read_us: u64) {
+        let stats_sub = &mut self.stats_sub;
+        if is_data_read {
+            stats_sub.num_data_reads += 1;
+        } else if self.handling_submitted {
+            stats_sub.num_page_cache_reads += 1;
+        } else {
+            stats_sub.num_disk_reads += 1;
+        }
+        stats_sub.read_us += read_us;
+        stats_sub.max_read_us = stats_sub.max_read_us.max(read_us);
+    }
 
     fn finish(&mut self, account: &AccountRead, loaded: Option<AccountSharedData>) {
         match loaded {
@@ -306,6 +360,15 @@ mod tests {
         assert!(db.read_only_accounts_cache.contains_key(&pubkeys[0]));
         assert!(db.read_only_accounts_cache.contains_key(&pubkeys[1]));
         assert!(!db.read_only_accounts_cache.contains_key(&pubkeys[2]));
+        // the three accounts at slot 0 are read from storage
+        let stats = &db.load_accounts_batch_stats;
+        assert_eq!(stats.num_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(stats.num_pubkeys.load(Ordering::Relaxed), 5);
+        assert_eq!(stats.num_stored.load(Ordering::Relaxed), 3);
+        assert_eq!(
+            stats.num_calls_many_storage_reads.load(Ordering::Relaxed),
+            1
+        );
     }
 
     #[test]
