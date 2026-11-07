@@ -21,6 +21,8 @@
 mod accounts_db_config;
 mod geyser_plugin_utils;
 mod prefetch;
+#[cfg(target_os = "linux")]
+mod ring_account_read;
 pub(crate) mod stats;
 pub(crate) mod tests;
 
