@@ -154,6 +154,9 @@ impl AccountsDb {
         else {
             outstanding.remove(&pubkey);
             stats_sub.num_not_in_index += 1;
+            if self.accounts_index.is_disk_index_enabled() {
+                self.store_in_read_cache_if_absent(&pubkey);
+            }
             return None;
         };
         stats_sub.num_issued += 1;
@@ -169,9 +172,9 @@ impl AccountsDb {
         account: Option<AccountSharedData>,
         outstanding: &mut Outstanding,
     ) {
-        // Skip zero lamport accounts, as `do_load` does
+        // Skip zero lamport accounts unless the index is on disk, as `do_load` does
         if let Some(account) = account
-            && !account.is_zero_lamport()
+            && (!account.is_zero_lamport() || self.accounts_index.is_disk_index_enabled())
         {
             // held already means a load on the critical path beat this read to it
             let already_cached = self.read_only_accounts_cache.contains_key(&pubkey);
@@ -197,7 +200,7 @@ mod tests {
     fn test_read_for_prefetch_skips_outstanding() {
         let db = AccountsDb::default_for_tests();
         let pubkey = Pubkey::new_unique();
-        let account = AccountSharedData::new(42, 1, &Pubkey::default());
+        let account = AccountSharedData::new_with_data(42, vec![0; 1], &Pubkey::default());
         db.store_for_tests((0, &[(&pubkey, &account)][..]));
         db.add_root_and_flush_write_cache(0);
         let mut outstanding = Outstanding::default();

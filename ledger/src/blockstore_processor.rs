@@ -61,7 +61,7 @@ use {
     solana_runtime_transaction::runtime_transaction::ReplayTransaction,
     solana_shred_version::compute_shred_version,
     solana_svm_timings::{ExecuteTimingType, ExecuteTimings, report_execute_timings},
-    solana_svm_transaction::svm_message::SVMMessage,
+    solana_svm_transaction::svm_message::{SVMMessage, SVMStaticMessage},
     solana_transaction::TransactionVerificationMode,
     solana_transaction_error::{TransactionError, TransactionResult as Result},
     solana_vote::vote_account::VoteAccountsHashMap,
@@ -1560,6 +1560,21 @@ fn confirm_slot_entries(
     if slot_full {
         bank.set_accounts_lt_hash_async_progress_is_at_end();
     }
+
+    // PREFETCH HARNESS, not for merge: a head start from the unsanitized views, before ticks,
+    // hashes and signatures are verified, so the reads get the most lead time. These keys are
+    // unverified.
+    let mut static_account_keys = Vec::with_capacity(
+        entries
+            .iter()
+            .flat_map(|entry| &entry.transactions)
+            .map(|transaction| transaction.static_account_keys().len())
+            .sum(),
+    );
+    for transaction in entries.iter().flat_map(|entry| &entry.transactions) {
+        static_account_keys.extend_from_slice(transaction.static_account_keys());
+    }
+    bank.prefetch_accounts(static_account_keys);
     let num_entries = entries.len();
     let mut entry_tx_starting_indexes = Vec::with_capacity(num_entries);
     let mut entry_tx_starting_index = progress.num_txs;
@@ -1647,6 +1662,24 @@ fn confirm_slot_entries(
             return Err(err.into());
         }
     };
+    // PREFETCH HARNESS, not for merge: the lookup table keys, which only resolving the
+    // transactions above finds
+    let mut lookup_table_keys = Vec::new();
+    for entry in &entries {
+        if let EntryType::Transactions(transactions) = entry {
+            for transaction in transactions {
+                lookup_table_keys.extend(
+                    transaction
+                        .account_keys()
+                        .iter()
+                        .skip(transaction.static_account_keys().len())
+                        .copied(),
+                );
+            }
+        }
+    }
+    bank.prefetch_accounts(lookup_table_keys);
+
     let mut replay_timer = Measure::start("replay_elapsed");
     let replay_entries =
         entries

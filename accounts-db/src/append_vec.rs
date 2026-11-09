@@ -1973,7 +1973,8 @@ mod tests {
         let path = temp_dir.path().join("append_vec");
         let av = AppendVec::new(&path, 1024 * 1024);
         av.append_account_test(&create_test_account(5)).unwrap();
-        let account = AccountSharedData::new(100, 2 * PAGE_SIZE, &Pubkey::default());
+        let account =
+            AccountSharedData::new_with_data(100, vec![0; 2 * PAGE_SIZE], &Pubkey::default());
         let index = av
             .append_account_test(&(Pubkey::default(), account))
             .unwrap();
@@ -2035,7 +2036,7 @@ mod tests {
         let path = temp_dir.path().join("append_vec");
         let av = AppendVec::new(&path, 1024 * 1024);
         let data_len = 2 * PAGE_SIZE;
-        let account = AccountSharedData::new(100, data_len, &Pubkey::default());
+        let account = AccountSharedData::new_with_data(100, vec![0; data_len], &Pubkey::default());
         let index = av
             .append_account_test(&(Pubkey::default(), account))
             .unwrap();

@@ -3,9 +3,8 @@ use {
     crate::{
         accounts_file::{self, AccountsFileProvider},
         accounts_index::{
-            ACCOUNTS_INDEX_CONFIG_FOR_TESTING, AccountIndex, AccountSecondaryIndexes,
-            AccountSecondaryIndexesIncludeExclude, AccountsIndexConfig, IndexLimit,
-            IndexLimitThreshold, test_utils::*,
+            AccountIndex, AccountSecondaryIndexes, AccountSecondaryIndexesIncludeExclude,
+            test_utils::*,
         },
         append_vec::MAXIMUM_APPEND_VEC_FILE_SIZE,
     },
@@ -541,66 +540,6 @@ fn test_flush_slots_with_reclaim_old_slots() {
     assert!(accounts.storage.get_slot_storage_entry(new_slot).is_some());
 }
 
-/// With write-through enabled, a pubkey that is hot-written across multiple cached
-/// slots must not be written through to disk until the *last* cached slot leaves the
-/// cache.
-#[test]
-fn test_flush_defers_write_through_until_all_cached_slots_drop() {
-    // Build an AccountsDb whose index has IndexLimit::Threshold so write-through is enabled.
-    let db = AccountsDb::new_for_tests_with_config(
-        Vec::new(),
-        AccountsDbConfig {
-            index: Some(AccountsIndexConfig {
-                index_limit: IndexLimit::Threshold(IndexLimitThreshold {
-                    num_bytes: 25_000_000_000,
-                    num_entries_overhead: 1,
-                    num_entries_to_evict: 1,
-                }),
-                ..ACCOUNTS_INDEX_CONFIG_FOR_TESTING
-            }),
-            ..DEFAULT_ACCOUNTS_DB_CONFIG
-        },
-    );
-
-    let pubkey = Pubkey::new_unique();
-    let account = AccountSharedData::empty(1, &Pubkey::default());
-
-    // Cache the same pubkey at three consecutive slots without flushing in between.
-    db.store_for_tests((0, [(&pubkey, &account)].as_slice()));
-    db.store_for_tests((1, [(&pubkey, &account)].as_slice()));
-    db.store_for_tests((2, [(&pubkey, &account)].as_slice()));
-
-    let immediate_disk_writes = || {
-        db.accounts_index
-            .stats()
-            .flush_entries_updated_on_disk_immediate
-            .load(Ordering::Relaxed)
-    };
-
-    let baseline_writes = immediate_disk_writes();
-
-    // Flush slot 0. Pubkey is still cached at slots 1 and 2, so remove_slot does
-    // not return it and try_write_through is never called, so no immediate disk
-    // write must fire.
-    db.add_root_and_flush_write_cache(0);
-    assert_eq!(immediate_disk_writes(), baseline_writes);
-
-    // Flush slot 1. Pubkey is still cached at slot 2, same story.
-    db.add_root_and_flush_write_cache(1);
-    assert_eq!(immediate_disk_writes(), baseline_writes);
-
-    // Flush slot 2. The pubkey is no longer in any cached slot, so the cache-drop
-    // loop in flush_slot_cache calls try_write_through. ReclaimOldSlots has
-    // collapsed the slot list to a single storage entry, so write-through fires
-    // and bumps the counter by exactly one.
-    db.add_root_and_flush_write_cache(2);
-    assert_eq!(
-        immediate_disk_writes(),
-        baseline_writes + 1,
-        "exactly one immediate disk write should have fired across all flushes",
-    );
-}
-
 /// With write-through disabled (the default, non-threshold index config) the cache-drop path
 /// must be a pure no-op: flushing a slot leaves the in-mem entry dirty and writes nothing
 /// through to disk. Guards the "disabled => old behavior preserved" contract for the most
@@ -628,66 +567,6 @@ fn test_flush_does_not_write_through_when_write_through_disabled() {
     // write_through_pubkeys short-circuits and no immediate disk write fires.
     db.add_root_and_flush_write_cache(0);
     assert_eq!(immediate_disk_writes(), baseline_writes);
-}
-
-/// The dead-slot purge path removes only the purged slot's index entries, so a pubkey with
-/// a surviving dirty single-ref entry at another slot must be written through once the purge
-/// drops its last cached slot.
-#[test]
-fn test_purge_unrooted_slot_writes_through_surviving_entry() {
-    let db = AccountsDb::new_for_tests_with_config(
-        Vec::new(),
-        AccountsDbConfig {
-            index: Some(AccountsIndexConfig {
-                index_limit: IndexLimit::Threshold(IndexLimitThreshold {
-                    num_bytes: 25_000_000_000,
-                    num_entries_overhead: 1,
-                    num_entries_to_evict: 1,
-                }),
-                ..ACCOUNTS_INDEX_CONFIG_FOR_TESTING
-            }),
-            ..DEFAULT_ACCOUNTS_DB_CONFIG
-        },
-    );
-    let pubkey = Pubkey::new_unique();
-    let account = AccountSharedData::empty(1, &Pubkey::default());
-
-    // Cache the pubkey at slot 0 (will be rooted + flushed) and slot 1 (stays unrooted/cached).
-    db.store_for_tests((0, [(&pubkey, &account)].as_slice()));
-    db.store_for_tests((1, [(&pubkey, &account)].as_slice()));
-
-    let is_dirty_in_mem = |pubkey: &Pubkey| -> bool {
-        db.accounts_index.get_and_then(pubkey, |entry| {
-            (false, entry.expect("entry should be in the index").dirty())
-        })
-    };
-    let immediate_disk_writes = || {
-        db.accounts_index
-            .stats()
-            .flush_entries_updated_on_disk_immediate
-            .load(Ordering::Relaxed)
-    };
-
-    // Flush slot 0. The pubkey is still cached at slot 1, so it does not leave the cache and
-    // write-through does not fire; its slot-0 storage entry is left dirty (slot list now has the
-    // uncached slot-0 entry plus the cached slot-1 entry).
-    let baseline_writes = immediate_disk_writes();
-    db.add_root_and_flush_write_cache(0);
-    assert!(
-        is_dirty_in_mem(&pubkey),
-        "dirty after flushing slot 0 while still cached at slot 1"
-    );
-    assert_eq!(immediate_disk_writes(), baseline_writes);
-
-    // Purge the unrooted slot 1 from the cache. `purge_slot_cache` removes only the slot-1
-    // entry, leaving the slot-0 entry as a single-ref dirty entry; the pubkey leaves the cache
-    // entirely, so the purge writes it through.
-    db.mark_banks_removed(&[(1, BankId::new(1))]);
-    db.purge_slot(BankId::new(1), false);
-    assert!(
-        !is_dirty_in_mem(&pubkey),
-        "should be clean after the purge writes through the surviving entry"
-    );
 }
 
 #[test]

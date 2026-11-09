@@ -779,7 +779,7 @@ mod tests {
     #[test_case::test_case(Some(false); "overlap_with_explicit_read")]
     #[test_case::test_case(Some(true); "overlap_with_explicit_write")]
     fn test_lock_accounts_implicit_programdata(explicit_writable_programdata: Option<bool>) {
-        let accounts = Accounts::new(Arc::new(AccountsDb::default_for_tests()));
+        let accounts = Accounts::new(AccountsDb::default_for_tests());
         let program = Pubkey::new_unique();
         let programdata = solana_loader_v3_interface::get_program_data_address(&program);
         let metas = match explicit_writable_programdata {

@@ -957,9 +957,16 @@ mod tests {
         let accounts = [
             (
                 Pubkey::new_unique(),
-                AccountSharedData::new(101, META_ENTRY_INLINE_DATA_MAX_SIZE, &owner),
+                AccountSharedData::new_with_data(
+                    101,
+                    vec![0; META_ENTRY_INLINE_DATA_MAX_SIZE],
+                    &owner,
+                ),
             ),
-            (Pubkey::new_unique(), AccountSharedData::new(102, 1, &owner)),
+            (
+                Pubkey::new_unique(),
+                AccountSharedData::new_with_data(102, vec![0; 1], &owner),
+            ),
         ];
         let (logical_offsets, _) = split.write_accounts(&(0, accounts.as_slice())).unwrap();
         // up to a meta entry's maximum size
@@ -992,7 +999,7 @@ mod tests {
         let owner = Pubkey::new_unique();
         // no data, and data inline in the meta entry
         let accounts = [
-            (Pubkey::new_unique(), AccountSharedData::new(101, 0, &owner)),
+            (Pubkey::new_unique(), AccountSharedData::empty(101, &owner)),
             (
                 Pubkey::new_unique(),
                 AccountSharedData::new_with_data(
@@ -1042,9 +1049,9 @@ mod tests {
     fn test_account_from_page_partial_wrong_entry() {
         let temp_dir = TempDir::new().unwrap();
         let split = SplitFile::new(temp_dir.path().join("base")).unwrap();
-        let account = AccountSharedData::new(
+        let account = AccountSharedData::new_with_data(
             100,
-            META_ENTRY_INLINE_DATA_MAX_SIZE + 1,
+            vec![0; META_ENTRY_INLINE_DATA_MAX_SIZE + 1],
             &Pubkey::new_unique(),
         );
         let (logical_offsets, _) = split
@@ -1073,9 +1080,9 @@ mod tests {
     fn test_account_from_page_partial_past_len() {
         let temp_dir = TempDir::new().unwrap();
         let split = SplitFile::new(temp_dir.path().join("base")).unwrap();
-        let account = AccountSharedData::new(
+        let account = AccountSharedData::new_with_data(
             100,
-            META_ENTRY_INLINE_DATA_MAX_SIZE + 1,
+            vec![0; META_ENTRY_INLINE_DATA_MAX_SIZE + 1],
             &Pubkey::new_unique(),
         );
         let (logical_offsets, _) = split
@@ -1095,7 +1102,7 @@ mod tests {
     fn test_account_from_page_truncated_header() {
         let temp_dir = TempDir::new().unwrap();
         let split = SplitFile::new(temp_dir.path().join("base")).unwrap();
-        let account = AccountSharedData::new(100, 1, &Pubkey::new_unique());
+        let account = AccountSharedData::new_with_data(100, vec![0; 1], &Pubkey::new_unique());
         let (logical_offsets, _) = split
             .write_accounts(&(0, &[(Pubkey::new_unique(), account)][..]))
             .unwrap();

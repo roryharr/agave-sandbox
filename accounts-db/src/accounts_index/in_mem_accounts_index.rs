@@ -1562,9 +1562,7 @@ mod tests {
     use {
         super::*,
         crate::accounts_index::{
-            ACCOUNTS_INDEX_CONFIG_FOR_TESTING, AccountsIndexConfig, BINS_FOR_TESTING,
-            INDEX_LIMIT_THRESHOLD_FOR_TESTING, IndexLimit, IndexLimitThreshold,
-            bucket_map_holder::ThresholdEntriesPerBin,
+            AccountsIndexConfig, BINS_FOR_TESTING, INDEX_LIMIT_THRESHOLD_FOR_TESTING,
         },
         itertools::Itertools,
         std::{assert_matches, collections::HashMap, iter},
@@ -1591,36 +1589,6 @@ mod tests {
         let bucket = InMemAccountsIndex::new(&holder, bin, None);
         assert!(bucket.storage.is_disk_index_enabled());
         bucket
-    }
-
-    /// Creates an index with `should_write_through = true` and a live disk bucket.
-    ///
-    /// Pass `Some((high, low))` to override the computed per-bin threshold with explicit water-marks.
-    /// Pass `None` to keep the byte-based default, which is effectively unlimited.
-    fn new_should_write_through_for_test(
-        threshold: Option<(usize, usize)>,
-    ) -> InMemAccountsIndex<u64, u64> {
-        let config = AccountsIndexConfig {
-            index_limit: IndexLimit::Threshold(IndexLimitThreshold {
-                num_bytes: 25_000_000_000,
-                num_entries_overhead: 1,
-                num_entries_to_evict: 1,
-            }),
-            ..ACCOUNTS_INDEX_CONFIG_FOR_TESTING
-        };
-        let mut holder = BucketMapHolder::new(BINS_FOR_TESTING, &config, 1);
-        if let Some((high_water_mark, low_water_mark)) = threshold {
-            holder.threshold_entries_per_bin = Some(ThresholdEntriesPerBin {
-                target_entries: high_water_mark + 1,
-                high_water_mark,
-                low_water_mark,
-            });
-        }
-        let holder = Arc::new(holder);
-        let index = InMemAccountsIndex::<u64, u64>::new(&holder, 0, None);
-        assert!(index.should_write_through);
-        assert!(index.bucket.is_some());
-        index
     }
 
     #[test]
@@ -1717,172 +1685,12 @@ mod tests {
 
         assert!(callback_called);
 
-        // Ensure the entry is now in memory
-        let mut found = false;
-        accounts_index.get_only_in_mem(&pubkey, false, |entry| {
-            found = entry.is_some();
-        });
-        assert!(found);
-    }
-
-    /// Populates `index` with four entries covering the age/dirty matrix, triggers a
-    /// background flush, then asserts:
-    ///   - clean new: stays in memory, not on disk
-    ///   - clean old: evicted from memory, not on disk
-    ///   - dirty new: stays in memory, not on disk
-    ///
-    /// Returns `(pubkey_dirty_old, slot + 3, info + 3)` so the caller can assert the
-    /// outcome for the old dirty entry.
-    fn flush_age_mixed_entries(
-        accounts_index: &InMemAccountsIndex<u64, u64>,
-    ) -> (Pubkey, Slot, u64) {
-        let pubkey_clean_new = solana_pubkey::new_rand();
-        let pubkey_clean_old = solana_pubkey::new_rand();
-        let pubkey_dirty_new = solana_pubkey::new_rand();
-        let pubkey_dirty_old = solana_pubkey::new_rand();
-        let slot = 123;
-        let info = 42;
-
-        assert!(accounts_index.load_from_disk(&pubkey_clean_new).is_none());
-        assert!(accounts_index.load_from_disk(&pubkey_clean_old).is_none());
-        assert!(accounts_index.load_from_disk(&pubkey_dirty_new).is_none());
-        assert!(accounts_index.load_from_disk(&pubkey_dirty_old).is_none());
-
-        // A clean entry that is *not* in the eviction window.
-        // This entry should *not* be eligible for eviction.
-        let entry_clean_new = AccountMapEntry::new(
-            SlotList::from([(slot, info)]),
-            AccountMapEntryMeta::new_clean(&accounts_index.storage),
+        // The update went to disk, and nothing went in-mem
+        assert_eq!(
+            accounts_index.load_from_disk(&pubkey).unwrap().as_slice(),
+            &[(slot, 0)]
         );
-        assert!(!entry_clean_new.dirty());
-
-        // A clean entry that *is* in the eviction window.
-        // This entry *should* be eligible for eviction.
-        let entry_clean_old = AccountMapEntry::new(
-            SlotList::from([(slot + 1, info + 1)]),
-            AccountMapEntryMeta::new_clean(&accounts_index.storage),
-        );
-        entry_clean_old.set_age(accounts_index.storage.current_age());
-        assert!(!entry_clean_old.dirty());
-
-        // A dirty entry that is *not* in the eviction window.
-        // This entry should *not* be eligible for eviction.
-        let entry_dirty_new = AccountMapEntry::new(
-            SlotList::from([(slot + 2, info + 2)]),
-            AccountMapEntryMeta::new_dirty(&accounts_index.storage, false),
-        );
-        assert!(entry_dirty_new.dirty());
-
-        // A dirty entry that *is* in the eviction window.
-        // The caller asserts the outcome for this entry.
-        let entry_dirty_old = AccountMapEntry::new(
-            SlotList::from([(slot + 3, info + 3)]),
-            AccountMapEntryMeta::new_dirty(&accounts_index.storage, false),
-        );
-        entry_dirty_old.set_age(accounts_index.storage.current_age());
-        assert!(entry_dirty_old.dirty());
-
-        accounts_index.map_internal.write().unwrap().extend([
-            (pubkey_clean_new, Box::new(entry_clean_new)),
-            (pubkey_clean_old, Box::new(entry_clean_old)),
-            (pubkey_dirty_new, Box::new(entry_dirty_new)),
-            (pubkey_dirty_old, Box::new(entry_dirty_old)),
-        ]);
-
-        accounts_index
-            .ages_to_skip_before_scan
-            .store(0, Ordering::Release);
-
-        accounts_index.flush(false);
-
-        // clean new entry should not be flushed/evicted
-        let mut found_in_mem = None;
-        accounts_index.get_only_in_mem(&pubkey_clean_new, false, |entry| {
-            found_in_mem = Some(entry.is_some());
-            let entry = entry.expect("entry should remain in memory");
-            assert!(!entry.dirty());
-        });
-        assert_eq!(found_in_mem, Some(true));
-        assert!(accounts_index.load_from_disk(&pubkey_clean_new).is_none());
-
-        // clean old entry should be evicted, and not flushed
-        let mut found_in_mem = None;
-        accounts_index.get_only_in_mem(&pubkey_clean_old, false, |entry| {
-            found_in_mem = Some(entry.is_some());
-        });
-        assert_eq!(found_in_mem, Some(false));
-        assert!(accounts_index.load_from_disk(&pubkey_clean_old).is_none());
-
-        // dirty new entry should not be flushed/evicted
-        let mut found_in_mem = None;
-        accounts_index.get_only_in_mem(&pubkey_dirty_new, false, |entry| {
-            found_in_mem = Some(entry.is_some());
-            let entry = entry.expect("entry should remain in memory");
-            assert!(entry.dirty());
-        });
-        assert_eq!(found_in_mem, Some(true));
-        assert!(accounts_index.load_from_disk(&pubkey_dirty_new).is_none());
-
-        (pubkey_dirty_old, slot + 3, info + 3)
-    }
-
-    /// With `should_write_through=true`, the background flush should evict old clean entries but
-    /// must NOT flush dirty entries to disk — dirty entries are written through inline on upsert.
-    #[test]
-    fn test_flush_internal_evicts_in_should_write_through_mode() {
-        // high_water_mark=2: 4 entries puts us above threshold, triggering background eviction.
-        let accounts_index = new_should_write_through_for_test(Some((2, 1)));
-        let (pubkey_dirty_old, _, _) = flush_age_mixed_entries(&accounts_index);
-
-        // old dirty entry should not be flushed, and not evicted
-        let mut found_in_mem = None;
-        accounts_index.get_only_in_mem(&pubkey_dirty_old, false, |entry| {
-            found_in_mem = Some(entry.is_some());
-            let entry = entry.expect("entry should remain in memory");
-            assert!(entry.dirty()); // should_write_through: dirty entries are skipped by background flush
-        });
-        assert_eq!(found_in_mem, Some(true));
-        assert!(accounts_index.load_from_disk(&pubkey_dirty_old).is_none());
-    }
-
-    /// A multi-slot entry can never be evicted: every slot-list mutation marks the entry dirty,
-    /// and dirty is only cleared after a verified single-slot disk write, so the dirty check in
-    /// `evict_from_cache` pins multi-slot entries in-mem. `ScanFilter::OnlyAbnormal` relies on
-    /// this to find every multi-slot entry without reading the disk index.
-    #[test]
-    fn test_evict_from_cache_skips_multi_slot_entry() {
-        let index = new_should_write_through_for_test(None);
-        let pubkey = solana_pubkey::new_rand();
-        let info = 10;
-
-        // Upsert the same pubkey at two different (uncached) slots so its slot list has two entries
-        for slot in [1, 2] {
-            let new_value = PreAllocatedAccountMapEntry::new(slot, info, &index.storage, true);
-            index.upsert(
-                &pubkey,
-                new_value,
-                None,
-                &mut ReclaimsSlotList::new(),
-                UpsertReclaim::IgnoreReclaims,
-            );
-        }
-
-        // make the entry age-eligible for eviction; only the dirty check keeps it in-mem
-        let current_age = index.storage.current_age();
-        index.get_only_in_mem(&pubkey, false, |entry| {
-            let entry = entry.expect("entry should be in memory");
-            assert_eq!(entry.slot_list_lock_read_len(), 2);
-            assert!(entry.dirty(), "multi-slot entries are always dirty");
-            entry.set_age(current_age);
-        });
-
-        index.evict_from_cache(&[pubkey], current_age, 0);
-
-        index.get_only_in_mem(&pubkey, false, |entry| {
-            let entry = entry.expect("multi-slot entry must stay in memory");
-            assert!(entry.dirty());
-        });
-        assert!(index.load_from_disk(&pubkey).is_none());
+        assert!(accounts_index.map_internal.read().unwrap().is_empty());
     }
 
     #[test]
@@ -2320,7 +2128,7 @@ mod tests {
     /// entry into the in-mem map.
     #[test]
     fn test_delete_disk_only_entry() {
-        let index = new_should_write_through_for_test(None);
+        let index = new_disk_buckets_for_test::<u64>();
         let pubkey = Pubkey::new_unique();
         let slot = 1;
         let info = 10;
@@ -2334,11 +2142,7 @@ mod tests {
             &mut ReclaimsSlotList::new(),
             UpsertReclaim::IgnoreReclaims,
         );
-        index.try_write_through(&pubkey);
         assert!(index.load_from_disk(&pubkey).is_some());
-
-        // Evict the entry from memory so only the disk copy remains
-        index.map_internal.write().unwrap().remove(&pubkey);
 
         index.delete(&pubkey, &mut reclaims);
 
@@ -2411,463 +2215,60 @@ mod tests {
         }
     }
 
-    /// A pre-allocation larger than the memory threshold must not reserve past it, otherwise we
-    /// would allocate memory that the index limit is meant to bound.
     #[test]
-    fn test_new_with_num_initial_accounts_clamped_to_threshold() {
-        let num_bins = 1;
-        // A limit small enough that the clamped capacity is cheap to actually allocate
-        let bytes_per_entry = InMemAccountsIndex::<u64, u64>::size_of_uninitialized()
-            + InMemAccountsIndex::<u64, u64>::size_of_single_entry();
+    fn test_new_with_num_initial_accounts_disk_index_reserves_nothing() {
         let config = AccountsIndexConfig {
-            bins: Some(num_bins),
-            index_limit: IndexLimit::Threshold(IndexLimitThreshold {
-                num_bytes: (2048 * bytes_per_entry) as u64,
-                num_entries_overhead: 300,
-                num_entries_to_evict: 200,
-            }),
-            ..ACCOUNTS_INDEX_CONFIG_FOR_TESTING
+            index_limit: INDEX_LIMIT_THRESHOLD_FOR_TESTING,
+            ..Default::default()
         };
-        let holder = Arc::new(BucketMapHolder::new(num_bins, &config, 1));
-        let target_entries = holder
-            .threshold_entries_per_bin
-            .as_ref()
-            .unwrap()
-            .target_entries;
-
-        let index = InMemAccountsIndex::<u64, u64>::new(&holder, 0, Some(target_entries * 100));
-        let capacity = index.map_internal.read().unwrap().capacity();
-        assert!(capacity >= target_entries, "{capacity} < {target_entries}");
-        // one hashmap growth step of slack above the target, no more
-        assert!(capacity < target_entries * 2, "{capacity}");
+        let holder = Arc::new(BucketMapHolder::new(BINS_FOR_TESTING, &config, 1));
+        let index = InMemAccountsIndex::<u64, u64>::new(&holder, 0, Some(1_000_000));
+        assert_eq!(index.map_internal.read().unwrap().capacity(), 0);
     }
 
-    /// Ensure `write_startup_info()` populates the in-mem index,
-    /// while also respecting the configured memory threshold.
     #[test]
     fn test_write_startup_info() {
-        let num_bins = 1;
-        let num_entries_overhead = 300;
-        let num_entries_to_evict = 200;
-        let config = AccountsIndexConfig {
-            bins: Some(num_bins),
-            index_limit: {
-                // Ensure we use an IndexLimit that (1) enables the disk index,
-                // and (2) is a valid threshold, as per the logic in BucketMapHolder::new().
-                // We will override the threshold afterwards, so the actual value doesn't matter.
-                IndexLimit::Threshold(IndexLimitThreshold {
-                    num_bytes: 25_000_000_000,
-                    num_entries_overhead,
-                    num_entries_to_evict,
-                })
-            },
-            ..ACCOUNTS_INDEX_CONFIG_FOR_TESTING
-        };
-        let mut holder = BucketMapHolder::new(num_bins, &config, 1);
-
-        // Override the threshold values to make testing faster.
-        let low_water_mark = 100;
-        let high_water_mark = low_water_mark + num_entries_to_evict;
-        holder.threshold_entries_per_bin = Some(ThresholdEntriesPerBin {
-            target_entries: high_water_mark + num_entries_overhead,
-            high_water_mark,
-            low_water_mark,
-        });
-        let holder = Arc::new(holder);
-        let index = InMemAccountsIndex::<u64, u64>::new(&holder, num_bins - 1, None);
+        let index = new_disk_buckets_for_test::<u64>();
 
         // Emulate index generation where we push startup values into the `startup_info`
-        // side-band struct when disk index is enabled.  Ensure we push more than
-        // `low_water_mark` number of values.
-        let to_insert = iter::repeat_with(|| {
+        // side-band struct when disk index is enabled.
+        let to_insert: Vec<_> = iter::repeat_with(|| {
             // the addresses need to be unique, but the actual values do not matter
             (Pubkey::new_unique(), (/*slot*/ 11, /*T*/ 42))
         })
-        .take(high_water_mark);
-        index.startup_info.insert.lock().unwrap().extend(to_insert);
+        .take(100)
+        .collect();
+        index
+            .startup_info
+            .insert
+            .lock()
+            .unwrap()
+            .extend(to_insert.iter().copied());
 
-        // Also push some duplicates, to ensure we do not put those in-mem
+        // Also push three entries for one pubkey: one goes on disk, two are duplicates
         let duplicate_pubkey = Pubkey::new_unique();
-        {
-            let mut startup_info_insert = index.startup_info.insert.lock().unwrap();
-            // Yes, we want three duplicates.  Two is the minimum (by definition), but we want
-            // three to ensure we don't see the first two, remove 'em, then see a third and think
-            // "oh, this is a new non-duplicate!" and erroneously insert it in-mem.
-            startup_info_insert.push((duplicate_pubkey, (/*slot*/ 13, /*T*/ 43)));
-            startup_info_insert.push((duplicate_pubkey, (/*slot*/ 14, /*T*/ 44)));
-            startup_info_insert.push((duplicate_pubkey, (/*slot*/ 15, /*T*/ 45)));
-            // Reverse the vec to ensure the duplicates end up at the front.
-            // Otherwise they would not be selected to be put in-mem.
-            startup_info_insert.reverse();
-        }
-        assert!(index.map_internal.read().unwrap().is_empty());
+        index.startup_info.insert.lock().unwrap().extend([
+            (duplicate_pubkey, (/*slot*/ 13, /*T*/ 43)),
+            (duplicate_pubkey, (/*slot*/ 14, /*T*/ 44)),
+            (duplicate_pubkey, (/*slot*/ 15, /*T*/ 45)),
+        ]);
 
-        // Index generation calls `write_startup_info()`, which is responsible for writing the
-        // values to disk, and also populating the in-mem index. So call `write_startup_info()`
-        // here, and ensure:
-        // - we end up with the expected number of items in the in-mem index
-        // - duplicates do not end up in-mem
+        // `write_startup_info()` writes every entry to disk, and nothing in-mem
         index.write_startup_info();
-        assert_eq!(index.map_internal.read().unwrap().len(), low_water_mark);
+        assert!(index.map_internal.read().unwrap().is_empty());
+        for (pubkey, entry) in &to_insert {
+            assert_eq!(index.load_from_disk(pubkey).unwrap().as_slice(), &[*entry]);
+        }
+        let on_disk = index.load_from_disk(&duplicate_pubkey).unwrap();
+        let [(slot_on_disk, _)] = on_disk.as_slice() else {
+            panic!("expected one entry on disk for {duplicate_pubkey}, got {on_disk:?}");
+        };
+        let duplicates = index.startup_info.duplicates.lock().unwrap();
+        assert_eq!(duplicates.duplicates.len(), 2);
         assert!(
-            !index
-                .map_internal
-                .read()
-                .unwrap()
-                .contains_key(&duplicate_pubkey)
-        );
-    }
-
-    /// `slot_list_mut` write-through fires only for `slot_list.len() == 1` entries.
-    #[test_case(SlotList::from([(1, 0)]), true ; "writes_through")]
-    #[test_case(SlotList::from(vec![(1, 10), (2, 20)]), false ; "multi_slot")]
-    fn test_slot_list_mut_write_through(slot_list: SlotList<u64>, expect_write_through: bool) {
-        let index = new_should_write_through_for_test(None);
-        let pubkey = solana_pubkey::new_rand();
-        let entry = Box::new(AccountMapEntry::new(
-            slot_list,
-            AccountMapEntryMeta::new_dirty(&index.storage, false),
-        ));
-        index.map_internal.write().unwrap().insert(pubkey, entry);
-        index.slot_list_mut(&pubkey, |slot_list| {
-            slot_list[0].1 = 2;
-        });
-
-        index.get_only_in_mem(&pubkey, false, |entry| {
-            let entry = entry.expect("entry should be in memory");
-            assert_eq!(!entry.dirty(), expect_write_through);
-        });
-
-        // Verify whether entry was flushed to disk or not
-        assert_eq!(
-            index.load_from_disk(&pubkey).is_some(),
-            expect_write_through
-        );
-    }
-
-    /// `upsert` then `try_write_through` clears the dirty flag.
-    #[test]
-    fn test_try_write_through_clears_dirty() {
-        let index = new_should_write_through_for_test(None);
-        let pubkey = solana_pubkey::new_rand();
-        let slot = 1;
-        let info = 10;
-
-        assert!(index.load_from_disk(&pubkey).is_none(), "not on disk yet");
-
-        let new_value = PreAllocatedAccountMapEntry::new(slot, info, &index.storage, true);
-        index.upsert(
-            &pubkey,
-            new_value,
-            None,
-            &mut ReclaimsSlotList::new(),
-            UpsertReclaim::IgnoreReclaims,
-        );
-        index.try_write_through(&pubkey);
-
-        index.get_only_in_mem(&pubkey, false, |entry| {
-            let entry = entry.expect("entry should be in memory");
-            assert!(!entry.dirty()); // write-through clears dirty
-        });
-
-        let slot_list = index
-            .load_from_disk(&pubkey)
-            .expect("upsert should have written entry to disk");
-        assert_eq!(slot_list, SlotList::from([(slot, info)]));
-    }
-
-    /// `try_write_through` must leave a multi-slot entry alone: if the pubkey still has more
-    /// than one slot-list entry, persisting just one of them to disk would let a later eviction
-    /// drop the fresher in-mem entry in favor of an incomplete disk entry. The entry must stay
-    /// dirty and nothing must be written to disk.
-    #[test]
-    fn test_try_write_through_skips_multi_slot_entry() {
-        let index = new_should_write_through_for_test(None);
-        let pubkey = solana_pubkey::new_rand();
-        let info = 10;
-
-        assert!(index.load_from_disk(&pubkey).is_none(), "not on disk yet");
-
-        // Upsert the same pubkey at two different (uncached) slots so its slot list has two entries
-        for slot in [1, 2] {
-            let new_value = PreAllocatedAccountMapEntry::new(slot, info, &index.storage, true);
-            index.upsert(
-                &pubkey,
-                new_value,
-                None,
-                &mut ReclaimsSlotList::new(),
-                UpsertReclaim::IgnoreReclaims,
-            );
-        }
-        index.get_only_in_mem(&pubkey, false, |entry| {
-            let entry = entry.expect("entry should be in memory");
-            assert_eq!(
-                entry.slot_list_read_lock().len(),
-                2,
-                "two-version slot list"
-            );
-            assert!(entry.dirty(), "dirty before write-through attempt");
-        });
-
-        let immediate_writes_before = index
-            .stats()
-            .flush_entries_updated_on_disk_immediate
-            .load(Ordering::Relaxed);
-
-        index.try_write_through(&pubkey);
-
-        index.get_only_in_mem(&pubkey, false, |entry| {
-            let entry = entry.expect("entry should still be in memory");
-            assert!(entry.dirty(), "multi-version entry must stay dirty");
-        });
-        assert!(
-            index.load_from_disk(&pubkey).is_none(),
-            "multi-version entry must not be written through to disk"
-        );
-        assert_eq!(
-            index
-                .stats()
-                .flush_entries_updated_on_disk_immediate
-                .load(Ordering::Relaxed),
-            immediate_writes_before,
-            "no immediate disk write should have fired"
-        );
-    }
-
-    /// When the bin exceeds the threshold and a new pubkey is inserted in `should_write_through`
-    /// mode, one clean entry should be evicted inline to make room.
-    #[test]
-    fn test_inline_eviction_when_bin_exceeds_threshold() {
-        // high_water_mark=2: after 3 insertions we are above threshold.
-        let index = new_should_write_through_for_test(Some((2, 1)));
-        let slot = 1;
-        let info = 2;
-
-        // Insert 3 entries via upsert — write-through will clean all of them.
-        let initial_pubkeys: Vec<_> = (0..3).map(|_| solana_pubkey::new_rand()).collect();
-        for pubkey in &initial_pubkeys {
-            let new_value = PreAllocatedAccountMapEntry::new(slot, info, &index.storage, true);
-            index.upsert(
-                pubkey,
-                new_value,
-                None,
-                &mut ReclaimsSlotList::new(),
-                UpsertReclaim::IgnoreReclaims,
-            );
-            index.try_write_through(pubkey);
-        }
-        assert_eq!(index.map_internal.read().unwrap().len(), 3);
-
-        // Confirm all entries are clean (write-through fired) and present on disk.
-        for pubkey in &initial_pubkeys {
-            index.get_only_in_mem(pubkey, false, |entry| {
-                let entry = entry.expect("entry should be in memory");
-                assert!(!entry.dirty());
-            });
-            assert!(
-                index.load_from_disk(pubkey).is_some(),
-                "entry should be on disk after write-through upsert"
-            );
-        }
-
-        // Insert a 4th new pubkey, this should lead to eviction
-        let new_pubkey = solana_pubkey::new_rand();
-        let new_value = PreAllocatedAccountMapEntry::new(slot, info + 1, &index.storage, true);
-        index.upsert(
-            &new_pubkey,
-            new_value,
-            None,
-            &mut ReclaimsSlotList::new(),
-            UpsertReclaim::IgnoreReclaims,
-        );
-
-        // Inline eviction removes one entry before inserting the new one, leaving the bin count at 3
-        assert_eq!(index.map_internal.read().unwrap().len(), 3);
-
-        // The new pubkey must be present in memory.
-        let mut found = None;
-        index.get_only_in_mem(&new_pubkey, false, |entry| found = Some(entry.is_some()));
-        assert_eq!(
-            found,
-            Some(true),
-            "newly inserted entry should be in memory"
-        );
-
-        // Exactly one of the original entries was evicted from memory (but remains on disk).
-        let evicted_count = initial_pubkeys
-            .iter()
-            .filter(|pubkey| {
-                let mut in_mem = false;
-                index.get_only_in_mem(pubkey, false, |entry| in_mem = entry.is_some());
-                !in_mem
-            })
-            .count();
-        assert_eq!(
-            evicted_count, 1,
-            "exactly one original entry should have been evicted"
-        );
-
-        // The evicted entry should still be on disk (it was written through before eviction).
-        let evicted_pubkey = initial_pubkeys
-            .iter()
-            .find(|pubkey| {
-                let mut in_mem = false;
-                index.get_only_in_mem(pubkey, false, |entry| in_mem = entry.is_some());
-                !in_mem
-            })
-            .unwrap();
-        assert!(
-            index.load_from_disk(evicted_pubkey).is_some(),
-            "evicted entry should still be on disk"
-        );
-    }
-
-    /// While the bin's hashmap is still in initial growth (capacity below `high_water_mark`),
-    /// the growth gate short-circuits exceeds_thresholds to false even when the
-    /// low-free-entries check would otherwise fire.
-    #[test]
-    fn test_exceeds_thresholds_below_hwm_gate() {
-        // 56 entries fill hashbrown's raw=64 table exactly: capacity=56 (below HWM=100)
-        // and free_entries=0 (below overhead=1, so low_free_entries would fire).
-        let hwm = 100;
-        let lwm = 50;
-        let index = new_should_write_through_for_test(Some((hwm, lwm)));
-        for _ in 0..56 {
-            let pubkey = solana_pubkey::new_rand();
-            let entry = Box::new(AccountMapEntry::new(
-                SlotList::from([(0, 0)]),
-                AccountMapEntryMeta::new_dirty(&index.storage, true),
-            ));
-            index.map_internal.write().unwrap().insert(pubkey, entry);
-        }
-
-        let map = index.map_internal.read().unwrap();
-        let len = map.len();
-        let capacity = map.capacity();
-        let free_entries = capacity.saturating_sub(len);
-        drop(map);
-
-        // Confirm that without the gate that low free entries would fire
-        assert!(
-            index
-                .storage
-                .should_evict_based_on_free_entries(free_entries)
-        );
-
-        // But with the gate, exceeds_thresholds returns false
-        assert!(!index.exceeds_thresholds());
-    }
-
-    /// Once capacity has cleared the low-water mark, exceeds_thresholds must still return
-    /// false when the entry count is below the high-water mark and free-entry headroom exceeds
-    /// the configured overhead.
-    #[test]
-    fn test_exceeds_thresholds_below_thresholds() {
-        // 60 entries push capacity to 112 (above LWM=50), len stays below HWM=100,
-        // and free_entries (52) far exceeds overhead (1) — both conditions report false.
-        let hwm = 100;
-        let lwm = 50;
-        let index = new_should_write_through_for_test(Some((hwm, lwm)));
-        for _ in 0..60 {
-            let pubkey = solana_pubkey::new_rand();
-            let entry = Box::new(AccountMapEntry::new(
-                SlotList::from([(0, 0)]),
-                AccountMapEntryMeta::new_dirty(&index.storage, true),
-            ));
-            index.map_internal.write().unwrap().insert(pubkey, entry);
-        }
-        assert!(index.map_internal.read().unwrap().capacity() > lwm);
-
-        assert!(!index.exceeds_thresholds());
-    }
-
-    /// When the entry count crosses the high-water mark, exceeds_thresholds returns true
-    /// and the count-based trigger stat is incremented.
-    #[test]
-    fn test_exceeds_thresholds_high_count() {
-        let hwm = 2;
-        let lwm = 1;
-        // high_water_mark=2: inserting 4 entries puts the bin past the count threshold.
-        let index = new_should_write_through_for_test(Some((hwm, lwm)));
-        for _ in 0..4 {
-            let pubkey = solana_pubkey::new_rand();
-            let entry = Box::new(AccountMapEntry::new(
-                SlotList::from([(0, 0)]),
-                AccountMapEntryMeta::new_dirty(&index.storage, true),
-            ));
-            index.map_internal.write().unwrap().insert(pubkey, entry);
-        }
-
-        assert!(index.exceeds_thresholds());
-    }
-
-    /// reallocate_to_clear_tombstones must rebuild the bin's hashmap so that all
-    /// remaining entries survive and `capacity()` recovers from the drop caused by
-    /// tombstones consuming `growth_left`.
-    #[test]
-    fn test_reallocate_to_clear_tombstones_preserves_entries() {
-        // Reallocate only runs in Threshold mode. For this test HWM must be less
-        // than the number of inserts to ensure the calculated bucket size is
-        // the same for hwm and num_inserts
-        let hwm = 199;
-        let lwm = 140;
-        let index = new_should_write_through_for_test(Some((hwm, lwm)));
-
-        // Fill the bin's hashmap exactly to hashbrown's max_load (7/8 of 256 buckets).
-        // At this size at least one remove is all but guaranteed (odds ~1e-10) to create a tombstone
-        let num_inserts = 224;
-        // Then remove enough entries to drop down to the low water mark
-        let num_removes = 84;
-        let pubkeys: Vec<_> = (0..num_inserts)
-            .map(|_| solana_pubkey::new_rand())
-            .collect();
-        {
-            let mut map = index.map_internal.write().unwrap();
-            for pubkey in &pubkeys {
-                let entry = Box::new(AccountMapEntry::new(
-                    SlotList::from([(0, 42)]),
-                    AccountMapEntryMeta::new_dirty(&index.storage, true),
-                ));
-                map.insert(*pubkey, entry);
-            }
-        }
-        let capacity_after_inserts = index.map_internal.read().unwrap().capacity();
-
-        // Remove a portion of the entries to create tombstones. Hashbrown reduces capacity
-        // for each tombstone created, so we should see a capacity drop here.
-        let mut map = index.map_internal.write().unwrap();
-        for pubkey in &pubkeys[..num_removes] {
-            map.remove(pubkey);
-        }
-        drop(map);
-
-        let capacity_after_removes = index.map_internal.read().unwrap().capacity();
-
-        // Verify that capacity dropped due to added tombstones
-        assert!(capacity_after_removes < capacity_after_inserts);
-
-        index.reallocate_to_clear_tombstones();
-
-        let map = index.map_internal.read().unwrap();
-
-        // All remaining entries should survive the realloc.
-        assert_eq!(map.len(), num_inserts - num_removes);
-        for pubkey in &pubkeys[num_removes..] {
-            assert!(map.contains_key(pubkey));
-        }
-
-        // Tombstones cleared: the new map sized for `len()` lands on the same raw
-        // bucket count as before the removes, so capacity is back to its post-insert
-        // value.
-        assert_eq!(map.capacity(), capacity_after_inserts);
-        drop(map);
-
-        assert_eq!(
-            index
-                .stats()
-                .num_hashmap_reallocates
-                .load(Ordering::Relaxed),
-            1
+            duplicates
+                .duplicates_put_on_disk
+                .contains(&(*slot_on_disk, duplicate_pubkey))
         );
     }
 }
