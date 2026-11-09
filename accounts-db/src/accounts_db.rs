@@ -2670,18 +2670,27 @@ impl AccountsDb {
             return should_load_account.then_some((account, slot));
         }
 
-        let (slot, mut account_accessor) =
-            self.get_account_accessor_from_index(pubkey, ancestors)?;
+        let Some((slot, mut account_accessor)) =
+            self.get_account_accessor_from_index(pubkey, ancestors)
+        else {
+            if populate_read_cache == PopulateReadCache::True
+                && self.accounts_index.is_disk_index_enabled()
+            {
+                self.store_in_read_cache_if_absent(pubkey);
+            }
+            return None;
+        };
         self.load_account_stats
             .num_loaded_from_index_storage
             .fetch_add(1, Ordering::Relaxed);
 
         let maybe_account = account_accessor.get_account_shared_data_if(load_filter.as_ref());
 
-        // Skip zero lamport accounts; a cached one would still be returned after clean removes it
+        // Skip zero lamport accounts; a cached one would still be returned after clean removes it.
+        // The disk index caches them anyway, since a read cache hit saves a disk index read.
         if let Some(ref account) = maybe_account
             && populate_read_cache == PopulateReadCache::True
-            && !account.is_zero_lamport()
+            && (!account.is_zero_lamport() || self.accounts_index.is_disk_index_enabled())
         {
             self.store_in_read_cache_if_newest(pubkey, slot, account);
         }
@@ -2730,6 +2739,21 @@ impl AccountsDb {
                 }
             }
             (false, stored)
+        })
+    }
+
+    /// Stores a zero lamport account at slot 0 in the read cache if `pubkey` is not in the index,
+    /// so later loads of `pubkey` find it absent without reading the index. Slot 0 is visible from
+    /// every ancestors.
+    fn store_in_read_cache_if_absent(&self, pubkey: &Pubkey) {
+        // Store only while `pubkey` is absent from the index, under the index lock; the read cache
+        // removal in `store_accounts_for_flush` relies on this.
+        self.accounts_index.get_and_then(pubkey, |entry| {
+            if entry.is_none() {
+                self.read_only_accounts_cache
+                    .store(*pubkey, 0, AccountSharedData::default());
+            }
+            (false, ())
         })
     }
 
@@ -4208,6 +4232,26 @@ impl AccountsDb {
             // Check the write cache first; a hit is the freshest version visible on this fork,
             // so return it
             Some(cached_account.account.lamports() == 0)
+        } else if self.accounts_index.is_disk_index_enabled() {
+            // The read cache holds the newest version in storage, or a zero lamport account at
+            // slot 0 if `pubkey` is absent; either answers this without reading the disk index.
+            if let Some((account, _slot)) = self
+                .read_only_accounts_cache
+                .load(pubkey, |slot| ancestors.is_ancestor(slot))
+            {
+                Some(account.is_zero_lamport())
+            } else {
+                let is_zero_lamport = self.accounts_index.get_with_and_then(
+                    pubkey,
+                    ancestors,
+                    true,
+                    |slot_list_item| slot_list_item.info().is_zero_lamport(),
+                );
+                if is_zero_lamport.is_none() {
+                    self.store_in_read_cache_if_absent(pubkey);
+                }
+                is_zero_lamport
+            }
         } else {
             self.accounts_index
                 .get_with_and_then(pubkey, ancestors, true, |slot_list_item| {

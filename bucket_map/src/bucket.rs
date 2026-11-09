@@ -866,12 +866,16 @@ impl<'b, T: Clone + Copy + PartialEq + std::fmt::Debug + 'static> Bucket<T> {
         }
     }
 
-    pub fn update<F>(&mut self, key: &Pubkey, mut updatefn: F)
+    pub fn update<F>(&mut self, key: &Pubkey, updatefn: F)
     where
-        F: FnMut(Option<&[T]>) -> Option<Vec<T>>,
+        F: FnOnce(Option<&[T]>) -> Option<Vec<T>>,
     {
         let current = self.read_value(key);
         let new = updatefn(current);
+        if current == new.as_deref() {
+            // unchanged, so skip the write
+            return;
+        }
         if new.is_none() {
             self.delete_key(key);
             return;

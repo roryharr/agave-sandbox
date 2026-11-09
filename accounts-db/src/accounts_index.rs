@@ -510,6 +510,19 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> AccountsIndex<T, U> {
                 }
                 ScanFilter::OnlyAbnormal
                 | ScanFilter::OnlyAbnormalWithVerify
+                | ScanFilter::OnlyAbnormalTest
+                    if self.is_disk_index_enabled() =>
+                {
+                    // The disk index has no in-mem layer to scan, so read every entry and
+                    // report normal ones as not found.
+                    lock.as_ref().unwrap().get_internal_inner(pubkey, |entry| {
+                        internal_callback(
+                            entry.filter(|entry| entry.slot_list_lock_read_len() != 1),
+                        )
+                    });
+                }
+                ScanFilter::OnlyAbnormal
+                | ScanFilter::OnlyAbnormalWithVerify
                 | ScanFilter::OnlyAbnormalTest => {
                     let found =
                         lock.as_ref()
