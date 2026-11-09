@@ -325,12 +325,8 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> BucketMapHolder<T, U>
             }
         };
 
-        // Write through is currently only used with a memory threshold, to ensure
-        // the memory threshold is not exceeded
-        let should_write_through = match config.index_limit {
-            IndexLimit::InMemOnly => false,
-            IndexLimit::Threshold(_) => true,
-        };
+        // The disk index has no in-mem layer to write through from
+        let should_write_through = false;
 
         // The age interval, `age_ms`, varies depending on `config.index_limit`
         let age_ms = match config.index_limit {

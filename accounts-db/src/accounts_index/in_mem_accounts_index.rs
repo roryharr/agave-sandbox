@@ -48,6 +48,7 @@ pub struct InMemAccountsIndex<T: IndexValue, U: DiskIndexValue + From<T> + Into<
     storage: Arc<BucketMapHolder<T, U>>,
     _bin: usize,
 
+    /// When set, the disk bucket is the whole index for this bin and `map_internal` stays empty
     bucket: Option<Arc<BucketApi<(Slot, U)>>>,
 
     // set to true while this bin is being actively flushed
@@ -125,17 +126,11 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
     ) -> Self {
         let num_ages_to_distribute_scans = Age::MAX - storage.ages_to_stay_in_cache;
 
-        let map_internal = if let Some(num_initial_accounts) = num_initial_accounts {
-            // Never reserve past the memory threshold: entries above it get evicted to disk, so the
-            // extra capacity would be memory the index limit is meant to bound.
-            let capacity_per_bin = (num_initial_accounts / storage.bins).min(
-                storage
-                    .threshold_entries_per_bin
-                    .as_ref()
-                    .map_or(usize::MAX, |thresholds| thresholds.target_entries),
-            );
+        let map_internal = if let Some(num_initial_accounts) = num_initial_accounts
+            && storage.disk.is_none()
+        {
             RwLock::new(HashMap::with_capacity_and_hasher_in(
-                capacity_per_bin,
+                num_initial_accounts / storage.bins,
                 ahash::RandomState::default(),
                 BIN_MAP_ALLOC,
             ))
@@ -228,9 +223,57 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
     /// Cache entries from this function will always not be dirty.
     fn load_account_entry_from_disk(&self, pubkey: &Pubkey) -> Option<AccountMapEntry<T>> {
         let entry_disk = self.load_from_disk(pubkey)?; // returns None if not on disk
-        let entry_cache = self.disk_to_cache_entry(entry_disk);
+        let entry_cache = self.disk_to_cache_entry(&entry_disk);
         debug_assert!(!entry_cache.dirty());
         Some(entry_cache)
+    }
+
+    /// Calls `callback` with `pubkey`'s entry from `disk`, holding the bucket read lock until
+    /// `callback` returns so no write to `pubkey` can land in between
+    fn get_from_disk<RT>(
+        &self,
+        disk: &BucketApi<(Slot, U)>,
+        pubkey: &Pubkey,
+        callback: impl FnOnce(Option<&AccountMapEntry<T>>) -> RT,
+    ) -> RT {
+        let m = Measure::start("load_disk_found_count");
+        disk.read_value_and_then(pubkey, |slot_list| {
+            let entry = slot_list.map(|slot_list| self.disk_to_cache_entry(slot_list));
+            let stats = self.stats();
+            let (count, time) = if entry.is_some() {
+                (&stats.load_disk_found_count, &stats.load_disk_found_us)
+            } else {
+                (&stats.load_disk_missing_count, &stats.load_disk_missing_us)
+            };
+            Self::update_time_stat(time, m);
+            Self::update_stat(count, 1);
+            callback(entry.as_ref())
+        })
+    }
+
+    /// Read-modify-write of `pubkey`'s entry on `disk`, holding the bucket write lock throughout.
+    ///
+    /// `callback` gets `None` if `pubkey` is not in the index. The entry `callback` leaves behind
+    /// is written back to disk, and leaving `None` removes `pubkey` from the index.
+    fn update_on_disk<RT>(
+        &self,
+        disk: &BucketApi<(Slot, U)>,
+        pubkey: &Pubkey,
+        callback: impl FnOnce(&mut Option<AccountMapEntry<T>>) -> RT,
+    ) -> RT {
+        let mut result = None;
+        disk.update(pubkey, |slot_list| {
+            let mut entry = slot_list.map(|slot_list| self.disk_to_cache_entry(slot_list));
+            result = Some(callback(&mut entry));
+            entry.map(|entry| {
+                entry
+                    .slot_list_read_lock()
+                    .iter()
+                    .map(|(slot, info)| (*slot, (*info).into()))
+                    .collect()
+            })
+        });
+        result.expect("update calls the update fn exactly once")
     }
 
     /// lookup 'pubkey' by only looking in memory. Does not look on disk.
@@ -286,6 +329,9 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
         // return true if item should be added to in_mem cache
         callback: impl FnOnce(Option<&AccountMapEntry<T>>) -> (bool, RT),
     ) -> RT {
+        if let Some(disk) = self.bucket.as_deref() {
+            return self.get_from_disk(disk, pubkey, |entry| callback(entry).1);
+        }
         self.get_only_in_mem(pubkey, true, |entry| {
             if let Some(entry) = entry {
                 callback(Some(entry)).1
@@ -382,6 +428,15 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
     /// Drain the slot list for `pubkey` into `reclaims` and remove the pubkey from the index.
     /// Does nothing if `pubkey` was never indexed.
     pub fn delete(&self, pubkey: &Pubkey, reclaims: &mut ReclaimsSlotList<T>) {
+        if let Some(disk) = self.bucket.as_deref() {
+            self.update_on_disk(disk, pubkey, |entry| {
+                if let Some(entry) = entry.take() {
+                    reclaims.extend(entry.slot_list_read_lock().iter().copied());
+                    self.stats().inc_delete();
+                }
+            });
+            return;
+        }
         let mut map = self.map_internal.write().unwrap();
         match map.entry(*pubkey) {
             Entry::Occupied(occupied) => {
@@ -412,6 +467,17 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
     // If the slot list for pubkey exists in the index and is empty, remove the index entry for pubkey and return true.
     // Return false otherwise.
     pub fn remove_if_slot_list_empty(&self, pubkey: Pubkey) -> bool {
+        if let Some(disk) = self.bucket.as_deref() {
+            return self.update_on_disk(disk, &pubkey, |entry| {
+                let is_empty = entry
+                    .as_ref()
+                    .is_none_or(|entry| entry.slot_list_lock_read_len() == 0);
+                if is_empty && entry.take().is_some() {
+                    self.stats().inc_delete();
+                }
+                is_empty
+            });
+        }
         let mut m = Measure::start("entry");
         let mut map = self.map_internal.write().unwrap();
         let capacity_pre = map.capacity();
@@ -437,6 +503,13 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
         pubkey: &Pubkey,
         user_fn: impl FnOnce(&mut SlotListWriteGuard<T>) -> RT,
     ) -> Option<RT> {
+        if let Some(disk) = self.bucket.as_deref() {
+            return self.update_on_disk(disk, pubkey, |entry| {
+                entry
+                    .as_ref()
+                    .map(|entry| user_fn(&mut entry.slot_list_write_lock()))
+            });
+        }
         let mut write_through_args: Option<(Slot, T)> = None;
         let result = self.get_internal_inner(pubkey, |entry| {
             (
@@ -624,6 +697,19 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
         pubkey: &Pubkey,
         callback: impl FnOnce(&AccountMapEntry<T>),
     ) {
+        if let Some(disk) = self.bucket.as_deref() {
+            self.update_on_disk(disk, pubkey, |entry| {
+                let entry = entry.get_or_insert_with(|| {
+                    self.stats().inc_insert();
+                    AccountMapEntry::new(
+                        SlotList::new(),
+                        AccountMapEntryMeta::new_dirty(&self.storage, true),
+                    )
+                });
+                callback(entry);
+            });
+            return;
+        }
         let mut updated_in_mem = true;
         // try to get it just from memory first using only a read lock
         self.get_only_in_mem(pubkey, false, |entry| {
@@ -809,11 +895,11 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
     }
 
     // convert from raw data on disk to AccountMapEntry, set to age in future
-    fn disk_to_cache_entry(&self, slot_list: SlotList<U>) -> AccountMapEntry<T> {
+    fn disk_to_cache_entry(&self, slot_list: &[(Slot, U)]) -> AccountMapEntry<T> {
         AccountMapEntry::new(
             slot_list
-                .into_iter()
-                .map(|(slot, info)| (slot, info.into()))
+                .iter()
+                .map(|(slot, info)| (*slot, (*info).into()))
                 .collect(),
             AccountMapEntryMeta::new_clean(&self.storage),
         )
@@ -859,6 +945,33 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
         pubkey: Pubkey,
         new_entry: PreAllocatedAccountMapEntry<T>,
     ) -> InsertNewEntryResults {
+        if let Some(disk) = self.bucket.as_deref() {
+            let (slot, account_info) = new_entry.into();
+            return self.update_on_disk(disk, &pubkey, |entry| {
+                let Some(existing) = entry.as_ref() else {
+                    *entry = Some(AccountMapEntry::new(
+                        SlotList::from([(slot, account_info)]),
+                        AccountMapEntryMeta::new_dirty(&self.storage, false),
+                    ));
+                    return InsertNewEntryResults::DidNotExist;
+                };
+                let other_slot = match &existing.slot_list_read_lock()[..] {
+                    [(other_slot, _)] => Some(*other_slot),
+                    _ => None,
+                };
+                Self::lock_and_update_slot_list(
+                    existing,
+                    (slot, account_info),
+                    None,
+                    &mut ReclaimsSlotList::new(),
+                    UpsertReclaim::IgnoreReclaims,
+                );
+                InsertNewEntryResults::Existed {
+                    other_slot,
+                    location: ExistedLocation::OnDisk,
+                }
+            });
+        }
         let mut map = self.map_internal.write().unwrap();
         let entry = map.entry(pubkey);
         let mut other_slot = None;
@@ -1050,10 +1163,6 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
         // merge all items into the disk index now
         let disk = self.bucket.as_ref().unwrap();
         let duplicate_entries_and_indices = disk.batch_insert_non_duplicates(&insert);
-        let duplicate_addresses: HashSet<_> = duplicate_entries_and_indices
-            .iter()
-            .map(|(index, _entry)| &insert[*index].0)
-            .collect();
         let mut count = insert.len() as u64;
         for (i, duplicate_entry) in duplicate_entries_and_indices {
             let (k, entry) = &insert[i];
@@ -1067,63 +1176,15 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
             count -= 1;
         }
 
-        if let Some(threshold_entries_per_bin) = self.storage.threshold_entries_per_bin.as_ref() {
-            // If a memory threshold is set, then insert into the in-mem index here,
-            // up to that limit.  This way we pre-populate the in-mem index, and can
-            // avoid having to load some entries from disk on first access.
-            let mut map = self.map_internal.write().unwrap();
-            // Insert up to the low water mark.  Purposely do not insert all the way up  to the
-            // high water mark, as that then causes the flush loop condition to immediately trigger
-            // and evict down to the low water mark anyway.
-            let num_available = threshold_entries_per_bin
-                .low_water_mark
-                .saturating_sub(map.len());
-            for (address, (slot, disk_index_value)) in insert
-                .iter()
-                .filter(|(address, _entry)| !duplicate_addresses.contains(address)) // <- skip known duplicates
-                .take(num_available)
-            {
-                match map.entry(*address) {
-                    Entry::Vacant(vacant) => {
-                        let index_value = (*disk_index_value).into();
-                        let slot_list = SlotList::from([(*slot, index_value)]);
-                        let meta = AccountMapEntryMeta::new_clean(&self.storage);
-                        let account_map_entry = AccountMapEntry::new(slot_list, meta);
-                        vacant.insert(Box::new(account_map_entry));
-                    }
-                    Entry::Occupied(_occupied) => {
-                        // If the account already has an entry in the in-mem index, then that means
-                        // it is a duplicate.  We could merge them here, however duplicates
-                        // handling happens later during startup/index generation, in
-                        // populate_and_retrieve_duplicate_keys_from_startup(), which will insert
-                        // them back into the in-mem index.  Thus we should *not* insert any
-                        // accounts with duplicate entries here.
-                        // Additionally, once marking obsolete accounts is always on, we then
-                        // should no longer have any duplicates to worry about.
-                    }
-                }
-            }
-
-            // Related to the comment in the Entry::Occupied match arm above, if inserting
-            // into disk (batch_insert_non_duplicates()) returned duplicates, we need to check
-            // and make sure they are not in the in-mem index.  (Since the first time we encounter
-            // a duplicate we do not know it is a duplicate, so it will have been inserted
-            // in mem.)  We must remove them here.
-            for duplicate_address in duplicate_addresses {
-                map.remove(duplicate_address);
-            }
-            drop(map);
-        } else {
-            // Else, we should not have anything in the in-mem index at all.
-            let map_internal = self.map_internal.read().unwrap();
-            assert!(
-                map_internal.is_empty(),
-                "len: {}, first: {:?}",
-                map_internal.len(),
-                map_internal.iter().take(1).collect::<Vec<_>>()
-            );
-            drop(map_internal);
-        }
+        // The disk bucket is the whole index, so nothing goes in-mem.
+        let map_internal = self.map_internal.read().unwrap();
+        assert!(
+            map_internal.is_empty(),
+            "len: {}, first: {:?}",
+            map_internal.len(),
+            map_internal.iter().take(1).collect::<Vec<_>>()
+        );
+        drop(map_internal);
 
         self.stats().inc_insert_count(count);
     }
@@ -1175,7 +1236,6 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
 
         // stats for inserted entries that previously did *not* exist
         stats.inc_insert_count(num_did_not_exist);
-        stats.add_mem_count(num_did_not_exist as usize);
 
         // stats for inserted entries that previous did exist *in-mem*
         stats
@@ -1186,7 +1246,6 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
             .fetch_add(num_existed_in_mem, Ordering::Relaxed);
 
         // stats for inserted entries that previously did exist *on-disk*
-        stats.add_mem_count(num_existed_on_disk as usize);
         stats
             .entries_missing
             .fetch_add(num_existed_on_disk, Ordering::Relaxed);

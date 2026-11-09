@@ -76,6 +76,17 @@ impl<T: Clone + Copy + PartialEq + std::fmt::Debug> BucketApi<T> {
             .and_then(|bucket| bucket.read_value(key).map(|value| C::from(value)))
     }
 
+    /// Calls `callback` with the values for Pubkey `key`, holding the bucket read lock until
+    /// `callback` returns
+    pub fn read_value_and_then<R>(
+        &self,
+        key: &Pubkey,
+        callback: impl FnOnce(Option<&[T]>) -> R,
+    ) -> R {
+        let bucket = self.bucket.read().unwrap();
+        callback(bucket.as_ref().and_then(|bucket| bucket.read_value(key)))
+    }
+
     pub fn bucket_len(&self) -> u64 {
         self.count.load(Ordering::Relaxed)
     }
@@ -139,7 +150,7 @@ impl<T: Clone + Copy + PartialEq + std::fmt::Debug> BucketApi<T> {
 
     pub fn update<F>(&self, key: &Pubkey, updatefn: F)
     where
-        F: FnMut(Option<&[T]>) -> Option<Vec<T>>,
+        F: FnOnce(Option<&[T]>) -> Option<Vec<T>>,
     {
         let mut bucket = self.get_write_bucket();
         bucket.as_mut().unwrap().update(key, updatefn)
