@@ -161,8 +161,7 @@ impl RingPrefetcher {
         let Some((offset, len)) = storage.accounts.account_page_read(*offset) else {
             // nothing to read at the offset: a load on this thread settles it
             state.stats_sub.num_blocking_reads += 1;
-            let account =
-                accessor.check_and_get_loaded_account_shared_data(None::<fn(_, &_, _) -> _>);
+            let account = accessor.get_account_shared_data_if(None::<fn(_, &_, _) -> _>);
             self.ring.context_mut().finish(pubkey, slot, account);
             return Ok(());
         };
