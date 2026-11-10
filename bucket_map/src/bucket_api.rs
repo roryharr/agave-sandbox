@@ -173,6 +173,13 @@ impl<T: Clone + Copy + PartialEq + std::fmt::Debug> BucketApi<T> {
         bucket.as_mut().unwrap().update(key, updatefn)
     }
 
+    /// Calls `updatefn` with `key`'s slot list to modify in place, keeping its length.
+    /// Returns false, without calling `updatefn`, if `key` is not in the index.
+    pub fn update_in_place(&self, key: &Pubkey, updatefn: impl FnOnce(&mut [T])) -> bool {
+        let mut bucket = self.get_write_bucket();
+        bucket.as_mut().unwrap().update_in_place(key, updatefn)
+    }
+
     pub fn try_write(&self, pubkey: &Pubkey, value: &[T]) -> Result<(), BucketMapError> {
         let mut bucket = self.get_write_bucket();
         bucket

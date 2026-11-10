@@ -365,6 +365,16 @@ impl<'b, T: Clone + Copy + PartialEq + std::fmt::Debug + 'static> Bucket<T> {
         Some(elem.read_value(&self.index, &self.data))
     }
 
+    /// Calls `updatefn` with `key`'s slot list to modify in place, keeping its length.
+    /// Returns false, without calling `updatefn`, if `key` is not in the index.
+    pub(crate) fn update_in_place(&mut self, key: &Pubkey, updatefn: impl FnOnce(&mut [T])) -> bool {
+        let Some((elem, _)) = self.find_index_entry(key) else {
+            return false;
+        };
+        updatefn(elem.read_value_mut(&mut self.index, &mut self.data));
+        true
+    }
+
     /// for each item in `items`, get the hash value when hashed with `random`.
     /// Return a vec of tuples:
     /// (hash_value, index in `items`)

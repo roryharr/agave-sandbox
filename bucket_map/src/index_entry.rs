@@ -420,6 +420,36 @@ impl<T: Copy + PartialEq + 'static> IndexEntryPlaceInBucket<T> {
         }
     }
 
+    /// Mutable version of `read_value`, for updates that keep the slot list length
+    pub(crate) fn read_value_mut<'a>(
+        &self,
+        index_bucket: &'a mut BucketStorage<IndexBucket<T>>,
+        data_buckets: &'a mut [BucketStorage<DataBucket>],
+    ) -> &'a mut [T] {
+        let enum_tag = index_bucket.contents.get_enum_tag(self.ix);
+        let index_entry = index_bucket.get_mut::<IndexEntry<T>>(self.ix);
+        match enum_tag {
+            OccupiedEnumTag::ZeroSlots => &mut [],
+            OccupiedEnumTag::OneSlotInIndex => unsafe {
+                std::slice::from_mut(&mut index_entry.contents.single_element)
+            },
+            OccupiedEnumTag::MultipleSlots => {
+                let multiple_slots = unsafe { &index_entry.contents.multiple_slots };
+                let data_bucket_ix =
+                    MultipleSlots::data_bucket_from_num_slots(multiple_slots.num_slots);
+                let data_bucket = &mut data_buckets[data_bucket_ix as usize];
+                let loc = multiple_slots.data_loc(data_bucket);
+                assert!(!data_bucket.is_free(loc));
+                data_bucket.get_slice_mut::<T>(
+                    loc,
+                    multiple_slots.num_slots,
+                    IncludeHeader::NoHeader,
+                )
+            }
+            OccupiedEnumTag::Free => panic!("trying to read data from a free entry"),
+        }
+    }
+
     pub fn new(ix: u64) -> Self {
         Self {
             ix,
