@@ -315,6 +315,21 @@ impl<O: BucketOccupied> BucketStorage<O> {
         self.count.fetch_sub(1, Ordering::Relaxed);
     }
 
+    /// Starts reading cells `ix..ix + num_cells` into the page cache without waiting for them
+    pub(crate) fn will_need(&self, ix: u64, num_cells: u64) {
+        #[cfg(unix)]
+        {
+            let start = self.get_start_offset_with_header(ix);
+            let len = ((num_cells * self.cell_size) as usize).min(self.mmap.len() - start);
+            // only a hint: on failure, the cells are read when they are touched
+            _ = self
+                .mmap
+                .advise_range(memmap2::Advice::WillNeed, start, len);
+        }
+        #[cfg(not(unix))]
+        let _ = (ix, num_cells);
+    }
+
     fn get_start_offset_with_header(&self, ix: u64) -> usize {
         debug_assert!(ix < self.capacity(), "bad index size");
         (self.cell_size * ix) as usize

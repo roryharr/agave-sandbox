@@ -173,6 +173,14 @@ impl<T: Clone + Copy + PartialEq + std::fmt::Debug> BucketApi<T> {
         bucket.as_mut().unwrap().update(key, updatefn)
     }
 
+    /// Starts reading the part of the index `key` can be in into the page cache, without waiting
+    /// for it, so a later lookup of `key` does not fault while holding the bucket's lock
+    pub fn prefetch_index(&self, key: &Pubkey) {
+        if let Some(bucket) = self.bucket.read().unwrap().as_ref() {
+            bucket.prefetch_index(key);
+        }
+    }
+
     /// Calls `updatefn` with `key`'s slot list to modify in place, keeping its length.
     /// Returns false, without calling `updatefn`, if `key` is not in the index.
     pub fn update_in_place(&self, key: &Pubkey, updatefn: impl FnOnce(&mut [T])) -> bool {

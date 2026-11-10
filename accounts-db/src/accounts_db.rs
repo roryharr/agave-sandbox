@@ -1966,6 +1966,12 @@ impl AccountsDb {
             shrink_collect.written_bytes,
         );
 
+        // start the index reads `update_index_for_shrink` needs, so it does not fault while
+        // holding a bin's write lock
+        for account in shrink_collect.alive_accounts.alive_accounts() {
+            self.accounts_index.prefetch_index(account.pubkey());
+        }
+
         let mut stats_sub = ShrinkStatsSub::default();
         let mut rewrite_elapsed = Measure::start("rewrite_elapsed");
         let (shrink_in_progress, time_us) = measure_us!(self.get_store_for_shrink(

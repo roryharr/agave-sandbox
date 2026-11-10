@@ -365,6 +365,19 @@ impl<'b, T: Clone + Copy + PartialEq + std::fmt::Debug + 'static> Bucket<T> {
         Some(elem.read_value(&self.index, &self.data))
     }
 
+    /// Starts reading the index cells `key` can be in into the page cache, without waiting for them
+    pub(crate) fn prefetch_index(&self, key: &Pubkey) {
+        let capacity = self.index.capacity();
+        let home = Self::home_ix(key, self.random, capacity);
+        let num_cells = self.index.max_search().min(capacity);
+        let before_wrap = num_cells.min(capacity - home);
+        self.index.will_need(home, before_wrap);
+        if before_wrap < num_cells {
+            // the cells wrap around to the start of the index
+            self.index.will_need(0, num_cells - before_wrap);
+        }
+    }
+
     /// Calls `updatefn` with `key`'s slot list to modify in place, keeping its length.
     /// Returns false, without calling `updatefn`, if `key` is not in the index.
     pub(crate) fn update_in_place(&mut self, key: &Pubkey, updatefn: impl FnOnce(&mut [T])) -> bool {

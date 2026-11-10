@@ -128,6 +128,10 @@ impl RingPrefetcher {
         let accounts_db = Arc::clone(state.db());
         // a full ring makes `push` reap completions until there is room
         for pubkeys in pubkeys.chunks(DISPATCH_REAP_INTERVAL) {
+            // start the chunk's index reads together, so the lookups below find them resident
+            for pubkey in pubkeys {
+                accounts_db.accounts_index.prefetch_index(pubkey);
+            }
             for pubkey in pubkeys {
                 let state = self.ring.context_mut();
                 if let Some((slot, accessor)) = accounts_db.read_for_prefetch(

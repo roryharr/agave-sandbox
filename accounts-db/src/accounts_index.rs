@@ -832,6 +832,12 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> AccountsIndex<T, U> {
     /// (no reclaims are returned — the caller manages the source storage's alive-bytes accounting).
     ///
     /// Panics if `old_slot` is not present in the slot list.
+    /// Starts reading `pubkey`'s on-disk index entry into the page cache, without waiting for it,
+    /// so a later lookup of `pubkey` does not fault while holding the bin's lock
+    pub(crate) fn prefetch_index(&self, pubkey: &Pubkey) {
+        self.get_bin(pubkey).prefetch_index(pubkey);
+    }
+
     pub fn replace(&self, new_slot: Slot, old_slot: Slot, pubkey: &Pubkey, account_info: T) {
         let map = self.get_bin(pubkey);
         map.replace(pubkey, (new_slot, account_info), old_slot);

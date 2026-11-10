@@ -662,6 +662,13 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
     ///
     /// Panics if `old_slot` is not present in the slot list, or if more than one entry at
     /// `old_slot` is found (which would indicate prior corruption).
+    /// Starts reading `pubkey`'s on-disk index entry into the page cache, without waiting for it
+    pub fn prefetch_index(&self, pubkey: &Pubkey) {
+        if let Some(disk) = self.bucket.as_deref() {
+            disk.prefetch_index(pubkey);
+        }
+    }
+
     pub fn replace(&self, pubkey: &Pubkey, new_item: SlotListItem<T>, old_slot: Slot) {
         if let Some(disk) = self.bucket.as_deref() {
             // the slot list length is unchanged, so overwrite the entry where it is on disk
