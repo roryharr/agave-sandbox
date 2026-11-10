@@ -930,6 +930,12 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
             .fetch_add(m.end_as_us(), Ordering::Relaxed);
         if should_write {
             self.write_startup_info();
+            // The kernel may not write these pages back on its own, e.g. under a memory cgroup,
+            // which stalls every writer on the dirty limit. Writing them here keeps this bin's
+            // dirty pages bounded by the same back-pressure as its queue.
+            if let Err(err) = self.bucket.as_ref().unwrap().sync_index_data() {
+                log::warn!("failed to write back bin {} index: {err}", self._bin);
+            }
         }
     }
 

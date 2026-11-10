@@ -148,6 +148,23 @@ impl<T: Clone + Copy + PartialEq + std::fmt::Debug> BucketApi<T> {
         bucket.as_mut().unwrap().batch_insert_non_duplicates(items)
     }
 
+    /// Writes the index file's dirty pages to disk, returning once they are written.
+    ///
+    /// Nothing else in the bucket map writes its files back; the kernel does, on its own schedule.
+    /// The bucket lock is not held while writing, so the write does not block readers.
+    pub fn sync_index_data(&self) -> std::io::Result<()> {
+        let path = self
+            .bucket
+            .read()
+            .unwrap()
+            .as_ref()
+            .map(|bucket| bucket.index.path().to_path_buf());
+        let Some(path) = path else {
+            return Ok(());
+        };
+        std::fs::File::open(path)?.sync_data()
+    }
+
     pub fn update<F>(&self, key: &Pubkey, updatefn: F)
     where
         F: FnOnce(Option<&[T]>) -> Option<Vec<T>>,

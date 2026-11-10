@@ -189,6 +189,11 @@ impl<O: BucketOccupied> BucketStorage<O> {
         _ = remove_file(&self.path);
     }
 
+    /// Path of the file backing this storage
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
+    }
+
     pub fn max_search(&self) -> u64 {
         self.max_search as u64
     }
