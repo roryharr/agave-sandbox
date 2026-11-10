@@ -663,6 +663,26 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
     /// Panics if `old_slot` is not present in the slot list, or if more than one entry at
     /// `old_slot` is found (which would indicate prior corruption).
     pub fn replace(&self, pubkey: &Pubkey, new_item: SlotListItem<T>, old_slot: Slot) {
+        if let Some(disk) = self.bucket.as_deref() {
+            // the slot list length is unchanged, so overwrite the entry where it is on disk
+            let found = disk.update_in_place(pubkey, |slot_list| {
+                let mut found_slot = false;
+                for cur_item in slot_list.iter_mut().filter(|item| item.0 == old_slot) {
+                    assert!(
+                        !found_slot,
+                        "duplicate entry at slot {old_slot} in slot_list"
+                    );
+                    found_slot = true;
+                    *cur_item = (new_item.0, new_item.1.into());
+                }
+                assert!(
+                    found_slot,
+                    "Expected to find a slot to replace in the slot list"
+                );
+            });
+            assert!(found, "Expected to find a slot to replace in the slot list");
+            return;
+        }
         let mut should_write_through = false;
 
         self.get_or_create_index_entry_for_pubkey(pubkey, |entry| {

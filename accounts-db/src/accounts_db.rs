@@ -1750,6 +1750,13 @@ impl AccountsDb {
         stats: &ShrinkStats,
         slot_to_shrink: Slot,
     ) {
+        if self.accounts_index.is_disk_index_enabled()
+            && self.scan_filter_for_shrinking == ScanFilter::OnlyAbnormal
+        {
+            // OnlyAbnormal checks only in-mem entries; with no in-mem layer, it would read every
+            // account from disk just to check it
+            return;
+        }
         let mut index_scan_returned_some_count = 0;
         let mut index_scan_returned_none_count = 0;
         self.accounts_index.scan(
