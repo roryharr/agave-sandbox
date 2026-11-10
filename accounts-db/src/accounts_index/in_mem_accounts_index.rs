@@ -39,6 +39,10 @@ type BinEntry<'a, T> =
 const BIN_MAP_ALLOC: PageAllocator =
     PageAllocator::new(AllocOptions::new().huge_pages(HugePages::Transparent(HugePageAlign::End)));
 
+/// Entries a bin queues at startup before the inserting thread writes them to disk itself, which
+/// bounds startup's heap when the flush threads fall behind (8192 bins * 10_000 * 48B = ~4GB)
+const MAX_STARTUP_INSERTS_PER_BIN: usize = 10_000;
+
 // one instance of this represents one bin of the accounts index.
 pub struct InMemAccountsIndex<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> {
     last_age_flushed: AtomicAge,
@@ -906,7 +910,8 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
     }
 
     /// Queue up these insertions for when the flush thread is dealing with this bin.
-    /// This is very fast and requires no lookups or disk access.
+    /// This requires no lookups or disk access, unless the queue reaches
+    /// `MAX_STARTUP_INSERTS_PER_BIN`, in which case this thread writes it to disk.
     pub fn startup_insert_only(
         &self,
         slot: Slot,
@@ -918,9 +923,14 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
         let mut insert = self.startup_info.insert.lock().unwrap();
         let m = Measure::start("copy");
         insert.extend(items.map(|(k, v)| (k, (slot, v.into()))));
+        let should_write = insert.len() >= MAX_STARTUP_INSERTS_PER_BIN;
+        drop(insert);
         self.startup_stats
             .copy_data_us
             .fetch_add(m.end_as_us(), Ordering::Relaxed);
+        if should_write {
+            self.write_startup_info();
+        }
     }
 
     pub fn startup_update_duplicates_from_in_memory_only(
@@ -1157,7 +1167,7 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> InMemAccountsIndex<T,
             return;
         }
 
-        // this fn should only be called from a single thread, so holding the lock is fine
+        // writers of this bin's startup info serialize on this lock
         let mut duplicates = self.startup_info.duplicates.lock().unwrap();
 
         // merge all items into the disk index now
@@ -2270,5 +2280,43 @@ mod tests {
                 .duplicates_put_on_disk
                 .contains(&(*slot_on_disk, duplicate_pubkey))
         );
+    }
+
+    #[test]
+    fn test_startup_insert_only_writes_full_queue_to_disk() {
+        let index = new_disk_buckets_for_test::<u64>();
+        index.storage.set_startup(true);
+        let slot = 11;
+        let pubkeys: Vec<_> = iter::repeat_with(Pubkey::new_unique)
+            .take(MAX_STARTUP_INSERTS_PER_BIN + 1)
+            .collect();
+
+        // one short of the cap stays queued
+        index.startup_insert_only(
+            slot,
+            pubkeys[..MAX_STARTUP_INSERTS_PER_BIN - 1]
+                .iter()
+                .map(|pubkey| (*pubkey, 42)),
+        );
+        assert_eq!(
+            index.startup_info.insert.lock().unwrap().len(),
+            MAX_STARTUP_INSERTS_PER_BIN - 1
+        );
+        assert!(index.load_from_disk(&pubkeys[0]).is_none());
+
+        // reaching the cap writes the whole queue to disk
+        index.startup_insert_only(
+            slot,
+            pubkeys[MAX_STARTUP_INSERTS_PER_BIN - 1..]
+                .iter()
+                .map(|pubkey| (*pubkey, 42)),
+        );
+        assert!(index.startup_info.insert.lock().unwrap().is_empty());
+        for pubkey in &pubkeys {
+            assert_eq!(
+                index.load_from_disk(pubkey).unwrap().as_slice(),
+                &[(slot, 42)]
+            );
+        }
     }
 }

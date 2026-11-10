@@ -1256,6 +1256,15 @@ impl Validator {
             };
             let json_rpc_service =
                 JsonRpcService::new_with_config(rpc_svc_config).map_err(ValidatorError::Other)?;
+            // Only PubSubService reads the notification queue, and it only runs with the full api
+            let subscriptions_pubsub_config = PubSubConfig {
+                queue_capacity_items: if config.rpc_config.full_api {
+                    config.pubsub_config.queue_capacity_items
+                } else {
+                    1
+                },
+                ..config.pubsub_config.clone()
+            };
             let rpc_subscriptions = Arc::new(RpcSubscriptions::new_with_config(
                 exit.clone(),
                 max_complete_transaction_status_slot,
@@ -1264,7 +1273,7 @@ impl Validator {
                 bank_forks.clone(),
                 block_commitment_cache.clone(),
                 optimistically_confirmed_bank.clone(),
-                &config.pubsub_config,
+                &subscriptions_pubsub_config,
                 RpcNotificationConfig {
                     channel: rpc_notification_channel,
                     ..RpcNotificationConfig::default()

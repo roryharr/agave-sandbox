@@ -85,6 +85,8 @@ pub struct IndexBucketUsingBitVecBits<T: PartialEq + 'static> {
     pub enum_tag_first_bit: BitVec,
     /// second will be empty in all healthy cases because in real use, we only use enum values 0 and 2 (and we use the high bit for first)
     pub enum_tag_second_bit: BitVec,
+    /// number of bits set in `enum_tag_second_bit`, which is freed when this returns to 0
+    num_second_bits_set: u64,
     /// number of elements allocated
     capacity: u64,
     _phantom: PhantomData<&'static T>,
@@ -101,6 +103,16 @@ impl<T: Copy + PartialEq + 'static> IndexBucketUsingBitVecBits<T> {
                 return;
             }
             self.enum_tag_second_bit = BitVec::new_fill(false, self.capacity);
+        }
+        match (self.enum_tag_second_bit.get(ix), second) {
+            (false, true) => self.num_second_bits_set += 1,
+            (true, false) => self.num_second_bits_set -= 1,
+            _ => {}
+        }
+        if self.num_second_bits_set == 0 {
+            // every second bit is clear again, e.g. once startup duplicates are cleaned
+            self.enum_tag_second_bit = BitVec::new();
+            return;
         }
         self.enum_tag_second_bit.set(ix, second);
     }
@@ -149,6 +161,7 @@ impl<T: Copy + PartialEq + 'static> BucketOccupied for IndexBucketUsingBitVecBit
             // 1 bit per element in the ideal case, so don't allocate the 2nd bits until necessary
             enum_tag_first_bit: BitVec::new_fill(false, capacity.capacity()),
             enum_tag_second_bit: BitVec::new(),
+            num_second_bits_set: 0,
             capacity: capacity.capacity(),
             _phantom: PhantomData,
         }
@@ -529,5 +542,30 @@ mod tests {
             MultipleSlots::data_bucket_from_num_slots(u32::MAX as u64 + 2),
             33
         );
+    }
+
+    #[test]
+    fn test_second_bits_freed_when_all_clear() {
+        let mut bits = IndexBucketUsingBitVecBits::<u64>::new(Capacity::Pow2(4));
+        assert!(bits.enum_tag_second_bit.is_empty());
+
+        // tags with the second bit set allocate the second bits
+        bits.set_enum_tag(1, OccupiedEnumTag::MultipleSlots);
+        bits.set_enum_tag(2, OccupiedEnumTag::ZeroSlots);
+        assert!(!bits.enum_tag_second_bit.is_empty());
+        assert_eq!(bits.get_enum_tag(1), OccupiedEnumTag::MultipleSlots);
+        assert_eq!(bits.get_enum_tag(2), OccupiedEnumTag::ZeroSlots);
+
+        // they stay allocated while any second bit is set
+        bits.set_enum_tag(1, OccupiedEnumTag::OneSlotInIndex);
+        assert!(!bits.enum_tag_second_bit.is_empty());
+        assert_eq!(bits.get_enum_tag(1), OccupiedEnumTag::OneSlotInIndex);
+        assert_eq!(bits.get_enum_tag(2), OccupiedEnumTag::ZeroSlots);
+
+        // and are freed once every second bit is clear
+        bits.set_enum_tag(2, OccupiedEnumTag::Free);
+        assert!(bits.enum_tag_second_bit.is_empty());
+        assert_eq!(bits.get_enum_tag(1), OccupiedEnumTag::OneSlotInIndex);
+        assert_eq!(bits.get_enum_tag(2), OccupiedEnumTag::Free);
     }
 }
