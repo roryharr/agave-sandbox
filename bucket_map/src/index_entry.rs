@@ -35,16 +35,6 @@ struct DataBucketOccupiedHeader {
     packed_header: PackedHeader,
 }
 
-#[derive(Debug, PartialEq)]
-pub enum OccupyIfMatches {
-    /// this entry is occupied and contains the same pubkey but with a different value, so this entry could not be updated
-    FoundDuplicate,
-    /// this entry was free and contains this pubkey and either value matched or the value was written to match
-    SuccessfulInit,
-    /// this entry had a different pubkey
-    PubkeyMismatch,
-}
-
 /// allocated in `contents` in a BucketStorage
 #[derive(Copy, Clone)]
 #[repr(C)]
@@ -137,6 +127,12 @@ impl<T: Copy + PartialEq + 'static> IndexBucketUsingBitVecBits<T> {
         let (first, second) = self.get_bits(ix);
         let tag = (first as u8 * 2) + second as u8;
         num_enum::FromPrimitive::from_primitive(tag)
+    }
+    /// move the enum tag at `from` to `to`, leaving `from` free
+    pub(crate) fn move_enum_tag(&mut self, from: u64, to: u64) {
+        let tag = self.get_enum_tag(from);
+        self.set_enum_tag(to, tag);
+        self.set_enum_tag(from, OccupiedEnumTag::Free);
     }
 }
 
@@ -392,39 +388,6 @@ impl<T: Copy + PartialEq + 'static> IndexEntryPlaceInBucket<T> {
     pub fn init(&self, index_bucket: &mut BucketStorage<IndexBucket<T>>, pubkey: &Pubkey) {
         let index_entry = index_bucket.get_mut::<IndexEntry<T>>(self.ix);
         index_entry.key = *pubkey;
-    }
-
-    /// If the entry matches the pubkey and is unoccupied, then store `data` here and occupy the entry.
-    pub(crate) fn occupy_if_matches(
-        &self,
-        index_bucket: &mut BucketStorage<IndexBucket<T>>,
-        data: &T,
-        k: &Pubkey,
-    ) -> OccupyIfMatches {
-        let index_entry = index_bucket.get::<IndexEntry<T>>(self.ix);
-        if &index_entry.key == k {
-            let enum_tag = index_bucket.contents.get_enum_tag(self.ix);
-            if unsafe { &index_entry.contents.single_element } == data {
-                assert_eq!(
-                    enum_tag,
-                    OccupiedEnumTag::Free,
-                    "index asked to insert the same data twice"
-                );
-                index_bucket
-                    .contents
-                    .set_enum_tag(self.ix, OccupiedEnumTag::OneSlotInIndex);
-                OccupyIfMatches::SuccessfulInit
-            } else if enum_tag == OccupiedEnumTag::Free {
-                // pubkey is same, but value is different, so update value
-                self.set_slot_count_enum_value(index_bucket, OccupiedEnum::OneSlotInIndex(data));
-                OccupyIfMatches::SuccessfulInit
-            } else {
-                // found occupied duplicate of this pubkey
-                OccupyIfMatches::FoundDuplicate
-            }
-        } else {
-            OccupyIfMatches::PubkeyMismatch
-        }
     }
 
     pub(crate) fn read_value<'a>(

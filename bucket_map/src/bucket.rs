@@ -11,7 +11,7 @@ use {
         },
         index_entry::{
             DataBucket, IndexBucket, IndexEntry, IndexEntryPlaceInBucket, MultipleSlots,
-            OccupiedEnum, OccupyIfMatches,
+            OccupiedEnum,
         },
         restart::RestartableBucket,
     },
@@ -104,15 +104,24 @@ pub struct Bucket<T: Copy + PartialEq + 'static> {
     pub reallocated: Reallocated<IndexBucket<T>, DataBucket>,
 
     /// set to true once any entries have been deleted from the index.
-    /// Deletes indicate that there can be free slots and that the full search range must be searched for an entry.
     at_least_one_entry_deleted: bool,
 
     /// keep track of which index file this bucket is using so on restart we can try to reuse it
     restartable_bucket: RestartableBucket,
+}
 
-    /// true if this bucket was loaded (as opposed to created blank).
-    /// When populating, we want to prioritize looking for data on disk that already matches as opposed to writing new data.
-    reused_file_at_startup: bool,
+/// Where a key is, or would go, in the index.
+///
+/// The index uses Robin Hood placement: each run of occupied entries is kept in order of the
+/// entries' home slots, so no entry is farther from its home than an entry that hashes after it.
+/// A probe for a key can then stop at the first free entry, or at the first entry that is closer to
+/// its home than the probe is to the key's.
+#[derive(Clone, Copy)]
+enum IndexSlot {
+    /// the key is at this index
+    Occupied(u64),
+    /// the key is absent, and goes at `at` once the entries in `at..free` move forward one
+    Vacant { at: u64, free: u64 },
 }
 
 impl<'b, T: Clone + Copy + PartialEq + std::fmt::Debug + 'static> Bucket<T> {
@@ -125,7 +134,7 @@ impl<'b, T: Clone + Copy + PartialEq + std::fmt::Debug + 'static> Bucket<T> {
     ) -> Self {
         let reuse_path = std::mem::take(&mut restartable_bucket.path);
         let elem_size = NonZeroU64::new(std::mem::size_of::<IndexEntry<T>>() as u64).unwrap();
-        let (index, random, reused_file_at_startup) = reuse_path
+        let (index, random) = reuse_path
             .and_then(|path| {
                 // try to reuse the file this bucket was using last time we were running
                 restartable_bucket.get().and_then(|(_file_name, random)| {
@@ -136,7 +145,7 @@ impl<'b, T: Clone + Copy + PartialEq + std::fmt::Debug + 'static> Bucket<T> {
                         Arc::clone(&stats.index),
                         count.clone(),
                     )
-                    .map(|index| (index, random, true /* true = reused file */));
+                    .map(|index| (index, random));
                     if result.is_none() {
                         // we couldn't reuse it, so delete it
                         _ = fs::remove_file(path);
@@ -156,7 +165,7 @@ impl<'b, T: Clone + Copy + PartialEq + std::fmt::Debug + 'static> Bucket<T> {
                 );
                 let random = rng().random();
                 restartable_bucket.set_file(file_name, random);
-                (index, random, false /* true = reused file */)
+                (index, random)
             });
 
         stats.index.resize_grow(0, index.capacity_bytes());
@@ -171,7 +180,6 @@ impl<'b, T: Clone + Copy + PartialEq + std::fmt::Debug + 'static> Bucket<T> {
             anticipated_size: 0,
             at_least_one_entry_deleted: false,
             restartable_bucket,
-            reused_file_at_startup,
         }
     }
 
@@ -210,47 +218,75 @@ impl<'b, T: Clone + Copy + PartialEq + std::fmt::Debug + 'static> Bucket<T> {
         Self::bucket_find_index_entry(&self.index, key, self.random)
     }
 
-    /// find an entry for `key`
-    /// if entry exists, return the entry along with the index of the existing entry
-    /// if entry does not exist, return just the index of an empty entry appropriate for this key
-    /// returns (existing entry, index of the found or empty entry)
-    fn find_index_entry_mut(
+    /// slot `key` hashes to in an index of `capacity` entries
+    fn home_ix(key: &Pubkey, random: u64, capacity: u64) -> u64 {
+        Self::bucket_index_ix(key, random) % capacity
+    }
+
+    /// how many slots past `home` `ix` is, wrapping at `capacity`
+    fn distance_from_home(home: u64, ix: u64, capacity: u64) -> u64 {
+        (ix + capacity - home) % capacity
+    }
+
+    /// Find where `key` is in `index`, or where it would be inserted.
+    /// Returns an error if inserting `key` would leave an entry more than `max_search` from home.
+    fn find_index_slot(
         index: &BucketStorage<IndexBucket<T>>,
         key: &Pubkey,
         random: u64,
-    ) -> Result<(Option<IndexEntryPlaceInBucket<T>>, u64), BucketMapError> {
-        let ix = Self::bucket_index_ix(key, random) % index.capacity();
-        let mut first_free = None;
+    ) -> Result<IndexSlot, BucketMapError> {
         let mut m = Measure::start("bucket_find_index_entry_mut");
-        let capacity = index.capacity();
-        for i in ix..ix + index.max_search() {
-            let ii = i % capacity;
-            if index.is_free(ii) {
-                if first_free.is_none() {
-                    first_free = Some(ii);
-                }
-                continue;
-            }
-            let elem = IndexEntryPlaceInBucket::new(ii);
-            if elem.key(index) == key {
-                m.stop();
-
-                index
-                    .stats
-                    .find_index_entry_mut_us
-                    .fetch_add(m.as_us(), Ordering::Relaxed);
-                return Ok((Some(elem), ii));
-            }
-        }
+        let result = Self::find_index_slot_internal(index, key, random);
         m.stop();
         index
             .stats
             .find_index_entry_mut_us
             .fetch_add(m.as_us(), Ordering::Relaxed);
-        match first_free {
-            Some(ii) => Ok((None, ii)),
-            None => Err(BucketMapError::IndexNoSpace(index.contents.capacity())),
+        result
+    }
+
+    fn find_index_slot_internal(
+        index: &BucketStorage<IndexBucket<T>>,
+        key: &Pubkey,
+        random: u64,
+    ) -> Result<IndexSlot, BucketMapError> {
+        let capacity = index.capacity();
+        let max_search = index.max_search().min(capacity);
+        let no_space = || BucketMapError::IndexNoSpace(index.contents.capacity());
+        let home = Self::home_ix(key, random, capacity);
+        for distance in 0..max_search {
+            let ix = (home + distance) % capacity;
+            if index.is_free(ix) {
+                return Ok(IndexSlot::Vacant { at: ix, free: ix });
+            }
+            let occupant = IndexEntryPlaceInBucket::<T>::new(ix).key(index);
+            if occupant == key {
+                return Ok(IndexSlot::Occupied(ix));
+            }
+            let occupant_home = Self::home_ix(occupant, random, capacity);
+            if Self::distance_from_home(occupant_home, ix, capacity) < distance {
+                // `key` goes before this entry, which moves forward one along with the rest of the run
+                let mut free = ix;
+                loop {
+                    free = (free + 1) % capacity;
+                    if free == ix {
+                        return Err(no_space());
+                    }
+                    if index.is_free(free) {
+                        return Ok(IndexSlot::Vacant { at: ix, free });
+                    }
+                    let moved_home = Self::home_ix(
+                        IndexEntryPlaceInBucket::<T>::new(free).key(index),
+                        random,
+                        capacity,
+                    );
+                    if Self::distance_from_home(moved_home, free, capacity) + 1 >= max_search {
+                        return Err(no_space());
+                    }
+                }
+            }
         }
+        Err(no_space())
     }
 
     fn bucket_find_index_entry(
@@ -258,18 +294,55 @@ impl<'b, T: Clone + Copy + PartialEq + std::fmt::Debug + 'static> Bucket<T> {
         key: &Pubkey,
         random: u64,
     ) -> Option<(IndexEntryPlaceInBucket<T>, u64)> {
-        let ix = Self::bucket_index_ix(key, random) % index.capacity();
-        for i in ix..ix + index.max_search() {
-            let ii = i % index.capacity();
-            if index.is_free(ii) {
-                continue;
+        let capacity = index.capacity();
+        let home = Self::home_ix(key, random, capacity);
+        for distance in 0..index.max_search().min(capacity) {
+            let ix = (home + distance) % capacity;
+            if index.is_free(ix) {
+                return None;
             }
-            let elem = IndexEntryPlaceInBucket::new(ii);
-            if elem.key(index) == key {
-                return Some((elem, ii));
+            let elem = IndexEntryPlaceInBucket::new(ix);
+            let occupant = elem.key(index);
+            if occupant == key {
+                return Some((elem, ix));
+            }
+            let occupant_home = Self::home_ix(occupant, random, capacity);
+            if Self::distance_from_home(occupant_home, ix, capacity) < distance {
+                // `key` would have been placed before this entry
+                return None;
             }
         }
         None
+    }
+
+    /// Moves the entries in `at..free` forward one, then occupies `at` with `key` and returns `at`.
+    /// The caller must set the new entry's value.
+    fn insert_index_entry(
+        index: &mut BucketStorage<IndexBucket<T>>,
+        key: &Pubkey,
+        at: u64,
+        free: u64,
+        is_resizing: bool,
+    ) -> u64 {
+        let capacity = index.capacity();
+        let mut to = free;
+        while to != at {
+            let from = (to + capacity - 1) % capacity;
+            Self::move_index_entry(index, from, to);
+            to = from;
+        }
+        index.occupy(at, is_resizing).unwrap();
+        // These fields will be overwritten after allocation by callers.
+        // Since this part of the mmapped file could have previously been used by someone else, there can be garbage here.
+        IndexEntryPlaceInBucket::new(at).init(index, key);
+        at
+    }
+
+    /// Moves the entry at `from` to the free entry at `to`, leaving `from` free.
+    fn move_index_entry(index: &mut BucketStorage<IndexBucket<T>>, from: u64, to: u64) {
+        let entry: IndexEntry<T> = *index.get(from);
+        *index.get_mut::<IndexEntry<T>>(to) = entry;
+        index.contents.move_enum_tag(from, to);
     }
 
     fn bucket_create_key(
@@ -278,19 +351,12 @@ impl<'b, T: Clone + Copy + PartialEq + std::fmt::Debug + 'static> Bucket<T> {
         random: u64,
         is_resizing: bool,
     ) -> Result<u64, BucketMapError> {
-        let ix = Self::bucket_index_ix(key, random) % index.capacity();
-        for i in ix..ix + index.max_search() {
-            let ii = i % index.capacity();
-            if !index.is_free(ii) {
-                continue;
+        match Self::find_index_slot(index, key, random)? {
+            IndexSlot::Occupied(ix) => panic!("{key} is already in the index at {ix}"),
+            IndexSlot::Vacant { at, free } => {
+                Ok(Self::insert_index_entry(index, key, at, free, is_resizing))
             }
-            index.occupy(ii, is_resizing).unwrap();
-            // These fields will be overwritten after allocation by callers.
-            // Since this part of the mmapped file could have previously been used by someone else, there can be garbage here.
-            IndexEntryPlaceInBucket::new(ii).init(index, key);
-            return Ok(ii);
         }
-        Err(BucketMapError::IndexNoSpace(index.contents.capacity()))
     }
 
     pub(crate) fn read_value(&self, key: &Pubkey) -> Option<&[T]> {
@@ -339,7 +405,7 @@ impl<'b, T: Clone + Copy + PartialEq + std::fmt::Debug + 'static> Bucket<T> {
                 &mut entries,
                 &mut entries_created_on_disk,
                 &mut duplicates,
-                self.reused_file_at_startup,
+                self.random,
             );
             match result {
                 Ok(_result) => {
@@ -372,55 +438,6 @@ impl<'b, T: Clone + Copy + PartialEq + std::fmt::Debug + 'static> Bucket<T> {
         }
     }
 
-    /// insert every entry in `reverse_sorted_entries` into the index as long as we can find a location where the data in the index
-    /// file already matches the data we want to insert for the pubkey.
-    /// for every entry that already exists in `index`, add it (and the value already in the index) to `duplicates`
-    /// `reverse_sorted_entries` is (raw index (range = U64::MAX) in hash map, index in `items`)
-    /// Any entries where the disk couldn't be updated are returned in `reverse_sorted_entries` or `duplicates`.
-    /// The remaining items in `reverse_sorted_entries` can be inserted by over-writing non-matchingnew data to the index file.
-    pub fn batch_insert_non_duplicates_reusing_file(
-        index: &mut BucketStorage<IndexBucket<T>>,
-        data_buckets: &[BucketStorage<DataBucket>],
-        items: &[(Pubkey, T)],
-        reverse_sorted_entries: &mut Vec<(u64, usize)>,
-        duplicates: &mut Vec<(usize, T)>,
-    ) {
-        let max_search = index.max_search();
-        let cap = index.capacity();
-        let search_end = max_search.min(cap);
-        let mut not_found = Vec::default();
-        // pop one entry at a time to insert
-        'outer: while let Some((ix_entry_raw, ix)) = reverse_sorted_entries.pop() {
-            let (k, v) = &items[ix];
-            // search for an empty spot starting at `ix_entry`
-            for search in 0..search_end {
-                let ix_index = (ix_entry_raw + search) % cap;
-                let elem = IndexEntryPlaceInBucket::new(ix_index);
-                match elem.occupy_if_matches(index, v, k) {
-                    OccupyIfMatches::SuccessfulInit => {}
-                    OccupyIfMatches::FoundDuplicate => {
-                        // pubkey is same, and it is occupied, so we found a duplicate
-                        let v_existing = elem.read_value(index, data_buckets);
-                        // someone is already allocated with this pubkey, so we found a duplicate
-                        duplicates.push((ix, *v_existing.first().unwrap()));
-                    }
-                    OccupyIfMatches::PubkeyMismatch => {
-                        // fall through and look at next search value
-                        continue;
-                    }
-                }
-                continue 'outer; // this 'insertion' is completed - either because we found a duplicate or we occupied an entry in the file
-            }
-            // this pubkey did not exist in the file already and we exhausted the search space, so have to try the old way
-            not_found.push((ix_entry_raw, ix));
-        }
-        // now add all entries that were not found
-        // they were pushed in order since we popped off input
-        // So, to keep them 'reversed', we need to reverse them here.
-        // This isn't required for correctness, but fits the optimal iteration order.
-        *reverse_sorted_entries = not_found.into_iter().rev().collect();
-    }
-
     /// insert as much of `entries` as possible into `index`.
     /// return an error if the index needs to resize.
     /// for every entry that already exists in `index`, add it (and the value already in the index) to `duplicates`
@@ -432,60 +449,39 @@ impl<'b, T: Clone + Copy + PartialEq + std::fmt::Debug + 'static> Bucket<T> {
         reverse_sorted_entries: &mut Vec<(u64, usize)>,
         entries_created_on_disk: &mut usize,
         duplicates: &mut Vec<(usize, T)>,
-        try_to_reuse_disk_data: bool,
+        random: u64,
     ) -> Result<(), BucketMapError> {
-        if try_to_reuse_disk_data {
-            // First, insert everything we can into disk contents that already have the right pubkey and hopefully the right data.
-            // Ideally this results in no disk updates to insert these entries.
-            // Any entries that were unable to be inserted would remain in `reverse_sorted_entries` so that we fall through and insert those
-            // in any free slot we find.
-            Self::batch_insert_non_duplicates_reusing_file(
-                index,
-                data_buckets,
-                items,
-                reverse_sorted_entries,
-                duplicates,
-            );
-        }
-        let max_search = index.max_search();
-        let cap = index.capacity();
-        let search_end = max_search.min(cap);
-
-        // pop one entry at a time to insert in the first free location we find
-        'outer: while let Some((ix_entry_raw, i)) = reverse_sorted_entries.pop() {
+        // pop one entry at a time to insert
+        while let Some((ix_entry_raw, i)) = reverse_sorted_entries.pop() {
             let (k, v) = &items[i];
-            // search for an empty spot starting at `ix_entry`
-            for search in 0..search_end {
-                let ix_index = (ix_entry_raw + search) % cap;
-                let elem = IndexEntryPlaceInBucket::new(ix_index);
-                if index.try_lock(ix_index) {
-                    *entries_created_on_disk += 1;
-                    // found free element and occupied it.
-                    // Note that since we are in the startup phase where we only add and do not remove, it is NOT possible to find this same pubkey AFTER
-                    //  the index we started searching at, or we would have found it as occupied BEFORE we were able to lock it here.
-                    //  This precondition is not true once we are able to delete entries.
-
-                    // These fields will be overwritten after allocation by callers.
-                    // Since this part of the mmapped file could have previously been used by someone else, there can be garbage here.
-                    elem.init(index, k);
-
+            match Self::find_index_slot(index, k, random) {
+                Ok(IndexSlot::Occupied(ix)) => {
+                    // found a duplicate entry
+                    let v_existing =
+                        IndexEntryPlaceInBucket::new(ix).read_value(index, data_buckets);
+                    duplicates.push((i, *v_existing.first().unwrap()));
+                }
+                Ok(IndexSlot::Vacant { at, free }) => {
+                    // the caller adds the inserted entries to the count, so don't count them here
+                    let is_resizing = true;
+                    let elem = IndexEntryPlaceInBucket::new(Self::insert_index_entry(
+                        index,
+                        k,
+                        at,
+                        free,
+                        is_resizing,
+                    ));
                     // new data stored should be stored in IndexEntry and NOT in data file
                     // new data len is 1
                     elem.set_slot_count_enum_value(index, OccupiedEnum::OneSlotInIndex(v));
-                    continue 'outer; // this 'insertion' is completed: inserted successfully
-                } else {
-                    // occupied, see if the key already exists here
-                    if elem.key(index) == k {
-                        let v_existing = elem.read_value(index, data_buckets);
-                        duplicates.push((i, *v_existing.first().unwrap()));
-                        continue 'outer; // this 'insertion' is completed: found a duplicate entry
-                    }
+                    *entries_created_on_disk += 1;
+                }
+                Err(err) => {
+                    // remember the item we were trying to insert for next time after resizing
+                    reverse_sorted_entries.push((ix_entry_raw, i));
+                    return Err(err);
                 }
             }
-            // search loop ended without finding a spot to insert this key
-            // so, remember the item we were trying to insert for next time after resizing
-            reverse_sorted_entries.push((ix_entry_raw, i));
-            return Err(BucketMapError::IndexNoSpace(cap));
         }
 
         Ok(())
@@ -507,19 +503,27 @@ impl<'b, T: Clone + Copy + PartialEq + std::fmt::Debug + 'static> Bucket<T> {
         }
 
         let max_search = self.index.max_search();
-        let (elem, elem_ix) = Self::find_index_entry_mut(&self.index, key, self.random)?;
-        if !requires_data_bucket {
-            let elem = if let Some(elem) = elem {
-                elem
-            } else {
+        let slot = Self::find_index_slot(&self.index, key, self.random)?;
+        let elem = match slot {
+            IndexSlot::Occupied(ix) => Some(IndexEntryPlaceInBucket::new(ix)),
+            IndexSlot::Vacant { .. } => None,
+        };
+        // inserts `key` when it is not in the index yet
+        let insert_key = |index: &mut BucketStorage<IndexBucket<T>>| match slot {
+            IndexSlot::Occupied(ix) => unreachable!("{key} is already in the index at {ix}"),
+            IndexSlot::Vacant { at, free } => {
                 let is_resizing = false;
-                self.index.occupy(elem_ix, is_resizing).unwrap();
-                let elem_allocate = IndexEntryPlaceInBucket::new(elem_ix);
-                // These fields will be overwritten after allocation by callers.
-                // Since this part of the mmapped file could have previously been used by someone else, there can be garbage here.
-                elem_allocate.init(&mut self.index, key);
-                elem_allocate
-            };
+                IndexEntryPlaceInBucket::new(Self::insert_index_entry(
+                    index,
+                    key,
+                    at,
+                    free,
+                    is_resizing,
+                ))
+            }
+        };
+        if !requires_data_bucket {
+            let elem = elem.unwrap_or_else(|| insert_key(&mut self.index));
             // new data stored should be stored in IndexEntry and NOT in data file
             // new data len is 0 or 1
             if let OccupiedEnum::MultipleSlots(multiple_slots) =
@@ -615,19 +619,11 @@ impl<'b, T: Clone + Copy + PartialEq + std::fmt::Debug + 'static> Bucket<T> {
                 }
 
                 // update index bucket after data bucket has been updated.
-                elem.unwrap_or_else(|| {
-                    let is_resizing = false;
-                    self.index.occupy(elem_ix, is_resizing).unwrap();
-                    let elem_allocate = IndexEntryPlaceInBucket::new(elem_ix);
-                    // These fields will be overwritten after allocation by callers.
-                    // Since this part of the mmapped file could have previously been used by someone else, there can be garbage here.
-                    elem_allocate.init(&mut self.index, key);
-                    elem_allocate
-                })
-                .set_slot_count_enum_value(
-                    &mut self.index,
-                    OccupiedEnum::MultipleSlots(&multiple_slots),
-                );
+                elem.unwrap_or_else(|| insert_key(&mut self.index))
+                    .set_slot_count_enum_value(
+                        &mut self.index,
+                        OccupiedEnum::MultipleSlots(&multiple_slots),
+                    );
                 self.stats
                     .index
                     .index_uses_uncommon_slot_list_len
@@ -665,6 +661,25 @@ impl<'b, T: Clone + Copy + PartialEq + std::fmt::Debug + 'static> Bucket<T> {
             }
             //debug!("INDEX FREE {:?} {}", key, elem_uid);
             self.index.free(elem_ix);
+            // move the rest of the run back one, so it stays contiguous and in order of home slots
+            let capacity = self.index.capacity();
+            let mut free = elem_ix;
+            loop {
+                let next = (free + 1) % capacity;
+                if next == elem_ix || self.index.is_free(next) {
+                    break;
+                }
+                let next_home = Self::home_ix(
+                    IndexEntryPlaceInBucket::<T>::new(next).key(&self.index),
+                    self.random,
+                    capacity,
+                );
+                if next_home == next {
+                    break;
+                }
+                Self::move_index_entry(&mut self.index, next, free);
+                free = next;
+            }
         }
     }
 
@@ -887,360 +902,7 @@ impl<'b, T: Clone + Copy + PartialEq + std::fmt::Debug + 'static> Bucket<T> {
 
 #[cfg(test)]
 mod tests {
-    use {super::*, crate::index_entry::OccupyIfMatches, tempfile::tempdir};
-
-    #[test]
-    fn test_batch_insert_non_duplicates_reusing_file_many_entries() {
-        // 3 variations of reuse
-        for reuse_type in 0..3 {
-            let data_buckets = Vec::default();
-            let v = 12u64;
-            let random = 2;
-            // with random=2, 6 entries is the most that don't collide on a single hash % cap value.
-            for len in 0..7 {
-                // cannot use pubkey [0,0,...] because that matches a zeroed out default file contents.
-                let raw = (0..len)
-                    .map(|l| (Pubkey::from([(l + 1) as u8; 32]), v + (l as u64)))
-                    .collect::<Vec<_>>();
-
-                let mut hashed = Bucket::index_entries(&raw, random);
-                let hashed_raw = hashed.clone();
-
-                let tmpdir = tempdir().unwrap();
-                let paths: Arc<Vec<PathBuf>> = Arc::new(vec![tmpdir.path().to_path_buf()]);
-                assert!(!paths.is_empty());
-                let max_search = 2;
-                let (mut index, file_name) = BucketStorage::<IndexBucket<u64>>::new(
-                    paths.clone(),
-                    1,
-                    std::mem::size_of::<crate::index_entry::IndexEntry<u64>>() as u64,
-                    max_search,
-                    Arc::default(),
-                    Arc::default(),
-                );
-                index.delete_file_on_drop = false;
-                let cap = index.capacity();
-
-                hashed.sort_unstable_by(|a, b| (a.0 % cap).cmp(&(b.0 % cap)).reverse());
-                hashed.windows(2).for_each(|two| {
-                    assert_ne!(two[0].0 % cap, two[1].0 % cap, "{two:?}, cap: {cap}");
-                });
-
-                // file is blank, so nothing matches, so everything returned in `hashed` to retry.
-                let mut duplicates = Vec::default();
-                let mut entries_created = 0;
-                // insert normally
-                Bucket::<u64>::batch_insert_non_duplicates_internal(
-                    &mut index,
-                    &data_buckets,
-                    &raw,
-                    &mut hashed,
-                    &mut entries_created,
-                    &mut duplicates,
-                    false,
-                )
-                .unwrap();
-                assert!(hashed.is_empty());
-                assert!(duplicates.is_empty());
-
-                hashed_raw.iter().for_each(|(hash, i)| {
-                    let (k, v) = raw[*i];
-                    let ix = *hash % cap;
-                    let entry = IndexEntryPlaceInBucket::new(ix);
-                    assert_eq!(entry.key(&index), &k);
-                    assert_eq!(
-                        entry.get_slot_count_enum(&index),
-                        OccupiedEnum::OneSlotInIndex(&v)
-                    );
-                });
-
-                drop(index);
-                let path = paths.first().unwrap().join(file_name.to_string());
-                let mut index = BucketStorage::<IndexBucket<u64>>::load_on_restart(
-                    path,
-                    NonZeroU64::new(
-                        std::mem::size_of::<crate::index_entry::IndexEntry<u64>>() as u64
-                    )
-                    .unwrap(),
-                    max_search,
-                    Arc::default(),
-                    Arc::default(),
-                )
-                .unwrap();
-
-                // verify index file is unoccupied, but that contents match
-                hashed_raw.iter().for_each(|(hash, i)| {
-                    let (k, _v) = raw[*i];
-                    let ix = *hash % cap;
-                    let entry = IndexEntryPlaceInBucket::new(ix);
-                    assert_eq!(entry.key(&index), &k);
-                    assert_eq!(entry.get_slot_count_enum(&index), OccupiedEnum::Free);
-                });
-
-                // this was wiped out by the last call to batch_insert..., so recreate it.
-                hashed.clone_from(&hashed_raw);
-                let mut duplicates = Vec::default();
-                if reuse_type == 0 {
-                    Bucket::<u64>::batch_insert_non_duplicates_reusing_file(
-                        &mut index,
-                        &data_buckets,
-                        &raw,
-                        &mut hashed,
-                        &mut duplicates,
-                    );
-                } else if reuse_type == 1 {
-                    // just overwrite all data instead of trying to reuse it
-                    let mut entries_created = 0;
-                    _ = Bucket::<u64>::batch_insert_non_duplicates_internal(
-                        &mut index,
-                        &data_buckets,
-                        &raw,
-                        &mut hashed,
-                        &mut entries_created,
-                        &mut duplicates,
-                        false,
-                    );
-                    assert_eq!(entries_created, hashed_raw.len());
-                } else if reuse_type == 2 {
-                    // call the higher level fn
-                    // That fn will call batch_insert_non_duplicates_reusing_file.
-                    // The inner fn should insert everything, reusing data, so there should be no entries created.
-                    let mut entries_created = 0;
-                    _ = Bucket::<u64>::batch_insert_non_duplicates_internal(
-                        &mut index,
-                        &data_buckets,
-                        &raw,
-                        &mut hashed,
-                        &mut entries_created,
-                        &mut duplicates,
-                        // call reuse code first
-                        true,
-                    );
-                    assert_eq!(entries_created, 0);
-                }
-                assert!(hashed.is_empty());
-                assert!(duplicates.is_empty());
-
-                hashed_raw.iter().for_each(|(hash, i)| {
-                    let (k, v) = raw[*i];
-                    let ix = *hash % cap;
-                    let entry = IndexEntryPlaceInBucket::new(ix);
-                    assert_eq!(entry.key(&index), &k);
-                    assert_eq!(
-                        entry.get_slot_count_enum(&index),
-                        OccupiedEnum::OneSlotInIndex(&v),
-                        "i: {i}"
-                    );
-                });
-            }
-        }
-    }
-
-    #[test]
-    fn test_batch_insert_non_duplicates_reusing_file_blank_file() {
-        let data_buckets = Vec::default();
-        let v = 12u64;
-        let random = 1;
-        for len in 1..4 {
-            // cannot use pubkey [0,0,...] because that matches a zeroed out default file contents.
-            let raw = (0..len)
-                .map(|l| (Pubkey::from([(l + 1) as u8; 32]), v + (l as u64)))
-                .collect::<Vec<_>>();
-
-            let mut hashed = Bucket::index_entries(&raw, random);
-            let hashed_raw = hashed.clone();
-
-            let mut index = create_test_index(None);
-
-            let cap = index.capacity();
-            let ix = hashed[0].0 % cap;
-
-            let entry = IndexEntryPlaceInBucket::new(ix);
-
-            // file is blank, so nothing matches, so everything returned in `hashed` to retry.
-            let mut duplicates = Vec::default();
-            Bucket::<u64>::batch_insert_non_duplicates_reusing_file(
-                &mut index,
-                &data_buckets,
-                &raw,
-                &mut hashed,
-                &mut duplicates,
-            );
-
-            assert_eq!(entry.get_slot_count_enum(&index), OccupiedEnum::Free);
-            assert_eq!(entry.key(&index), &Pubkey::default());
-            assert_eq!(hashed, hashed_raw, "len: {len}");
-            assert!(duplicates.is_empty());
-        }
-    }
-
-    #[should_panic(expected = "index asked to insert the same data twice")]
-    #[test]
-    fn test_batch_insert_non_duplicates_reusing_file_insert_twice() {
-        let data_buckets = Vec::default();
-        let v = 12u64;
-        let random = 1;
-        // cannot use pubkey [0,0,...] because that matches a zeroed out default file contents.
-        let len = 1;
-        let raw = (0..len)
-            .map(|l| (Pubkey::from([(l + 1) as u8; 32]), v + (l as u64)))
-            .collect::<Vec<_>>();
-
-        let mut hashed = Bucket::index_entries(&raw, random);
-
-        let mut index = create_test_index(None);
-        let cap = index.capacity();
-        let ix = hashed[0].0 % cap;
-        let entry = IndexEntryPlaceInBucket::new(ix);
-        entry.init(&mut index, &raw[0].0);
-        entry.set_slot_count_enum_value(&mut index, OccupiedEnum::OneSlotInIndex(&raw[0].1));
-
-        let mut duplicates = Vec::default();
-        // this will assert because the same k,v pair are already occupied in the index.
-        Bucket::<u64>::batch_insert_non_duplicates_reusing_file(
-            &mut index,
-            &data_buckets,
-            &raw,
-            &mut hashed,
-            &mut duplicates,
-        );
-    }
-
-    #[test]
-    fn test_batch_insert_non_duplicates_reusing_file_insert_duplicate() {
-        let data_buckets = Vec::default();
-        let v = 12u64;
-        let random = 1;
-        // cannot use pubkey [0,0,...] because that matches a zeroed out default file contents.
-        let len = 1;
-        let raw = (0..len)
-            .map(|l| (Pubkey::from([(l + 1) as u8; 32]), v + (l as u64)))
-            .collect::<Vec<_>>();
-
-        let mut hashed = Bucket::index_entries(&raw, random);
-
-        let mut index = create_test_index(None);
-        let cap = index.capacity();
-        let ix = hashed[0].0 % cap;
-
-        // occupy the index data entry with same pubkey, different value.
-        // This causes it to be treated as a duplicate.
-        let entry = IndexEntryPlaceInBucket::new(ix);
-        entry.init(&mut index, &(raw[0].0));
-        let non_matching_v = raw[0].1 + 1;
-        entry.set_slot_count_enum_value(&mut index, OccupiedEnum::OneSlotInIndex(&non_matching_v));
-
-        // since the same key is already in use with a different value, it is a duplicate
-        let mut duplicates = Vec::default();
-        Bucket::<u64>::batch_insert_non_duplicates_reusing_file(
-            &mut index,
-            &data_buckets,
-            &raw,
-            &mut hashed,
-            &mut duplicates,
-        );
-        assert_eq!(
-            entry.get_slot_count_enum(&index),
-            OccupiedEnum::OneSlotInIndex(&non_matching_v)
-        );
-
-        assert!(hashed.is_empty());
-        assert_eq!(duplicates, vec![(0, non_matching_v)], "len: {len}");
-    }
-
-    #[test]
-    fn test_batch_insert_non_duplicates_reusing_file_skip_one() {
-        let data_buckets = Vec::default();
-        let v = 12u64;
-        let random = 1;
-        // cannot use pubkey [0,0,...] because that matches a zeroed out default file contents.
-        let len = 1;
-        let mut raw = (0..len + 1)
-            .map(|l| (Pubkey::from([(l + 1) as u8; 32]), v + (l as u64)))
-            .collect::<Vec<_>>();
-
-        let other = raw.pop().unwrap();
-        let mut hashed = Bucket::index_entries(&raw, random);
-
-        let mut index = create_test_index(None);
-        let cap = index.capacity();
-        let ix = hashed[0].0 % cap;
-
-        // occupy the index data entry with a different pubkey
-        // This causes it to be skipped.
-        let entry = IndexEntryPlaceInBucket::new(ix);
-        entry.init(&mut index, &(other.0));
-        let entry = IndexEntryPlaceInBucket::new(ix + 1);
-        // sets pubkey value and enum value of ZeroSlots. Leaving it at zero causes issues.
-        entry.init(&mut index, &(raw[0].0));
-        // marks as free but does not clear out pubkey data in the file. This simulates finding the correct pubkey in the data file in a free entry and occupying it.
-        entry.set_slot_count_enum_value(&mut index, OccupiedEnum::Free);
-
-        // since the same key is already in use with a different value, it is a duplicate
-        let mut duplicates = Vec::default();
-        Bucket::<u64>::batch_insert_non_duplicates_reusing_file(
-            &mut index,
-            &data_buckets,
-            &raw,
-            &mut hashed,
-            &mut duplicates,
-        );
-
-        assert_eq!(
-            entry.get_slot_count_enum(&index),
-            OccupiedEnum::OneSlotInIndex(&raw[0].1)
-        );
-
-        assert!(hashed.is_empty());
-        assert!(duplicates.is_empty());
-
-        let entry = IndexEntryPlaceInBucket::new(ix);
-        assert_eq!(entry.key(&index), &other.0);
-        let entry = IndexEntryPlaceInBucket::new(ix + 1);
-        assert_eq!(entry.key(&index), &raw[0].0);
-    }
-
-    #[should_panic(expected = "called `Option::unwrap()` on a `None` value")]
-    #[test]
-    fn test_batch_insert_non_duplicates_reusing_file_existing_zero() {
-        let data_buckets = Vec::default();
-        let v = 12u64;
-        let random = 1;
-        // cannot use pubkey [0,0,...] because that matches a zeroed out default file contents.
-        let len = 1;
-        let mut raw = (0..len + 1)
-            .map(|l| (Pubkey::from([(l + 1) as u8; 32]), v + (l as u64)))
-            .collect::<Vec<_>>();
-
-        let other = raw.pop().unwrap();
-        let mut hashed = Bucket::index_entries(&raw, random);
-
-        let mut index = create_test_index(None);
-        let cap = index.capacity();
-        let ix = hashed[0].0 % cap;
-
-        // occupy the index data entry with a different pubkey
-        // This causes it to be skipped.
-        let entry = IndexEntryPlaceInBucket::new(ix);
-        entry.init(&mut index, &(other.0));
-        entry.set_slot_count_enum_value(&mut index, OccupiedEnum::ZeroSlots);
-        let entry = IndexEntryPlaceInBucket::new(ix + 1);
-        // sets pubkey value and enum value of ZeroSlots. Leaving it at zero is illegal at startup, so we'll assert when we find this duplicate.
-        entry.init(&mut index, &(raw[0].0));
-        entry.set_slot_count_enum_value(&mut index, OccupiedEnum::ZeroSlots);
-
-        // since the same key is already in use with a different value, it is a duplicate.
-        // But, it is a zero length entry. This is not supported at startup. Startup would have never generated a zero length occupied entry.
-        // So, it is ok for this to assert.
-        let mut duplicates = Vec::default();
-        Bucket::<u64>::batch_insert_non_duplicates_reusing_file(
-            &mut index,
-            &data_buckets,
-            &raw,
-            &mut hashed,
-            &mut duplicates,
-        );
-    }
+    use {super::*, tempfile::tempdir};
 
     #[test]
     fn test_index_entries() {
@@ -1284,278 +946,94 @@ mod tests {
 
     #[test]
     fn batch_insert_duplicates_internal_simple() {
-        for try_to_reuse_disk_data in [false, true] {
-            // add the same duplicate key several times.
-            // make sure the resulting index and returned `duplicates` is correct.
-            let random = 1;
-            let data_buckets = Vec::default();
-            let k = Pubkey::from([1u8; 32]);
-            for v in 10..12u64 {
-                for len in 1..4 {
-                    let raw = (0..len).map(|l| (k, v + (l as u64))).collect::<Vec<_>>();
-                    let mut hashed = Bucket::index_entries(&raw, random);
-                    let hashed_raw = hashed.clone();
+        // add the same duplicate key several times.
+        // make sure the resulting index and returned `duplicates` is correct.
+        let random = 1;
+        let data_buckets = Vec::default();
+        let k = Pubkey::from([1u8; 32]);
+        for v in 10..12u64 {
+            for len in 1..4 {
+                let raw = (0..len).map(|l| (k, v + (l as u64))).collect::<Vec<_>>();
+                let mut hashed = Bucket::index_entries(&raw, random);
+                let hashed_raw = hashed.clone();
 
-                    let mut index = create_test_index(None);
+                let mut index = create_test_index(None);
 
-                    let mut entries_created = 0;
-                    let mut duplicates = Vec::default();
-                    assert!(
-                        Bucket::<u64>::batch_insert_non_duplicates_internal(
-                            &mut index,
-                            &Vec::default(),
-                            &raw,
-                            &mut hashed,
-                            &mut entries_created,
-                            &mut duplicates,
-                            try_to_reuse_disk_data,
-                        )
-                        .is_ok()
-                    );
+                let mut entries_created = 0;
+                let mut duplicates = Vec::default();
+                assert!(
+                    Bucket::<u64>::batch_insert_non_duplicates_internal(
+                        &mut index,
+                        &Vec::default(),
+                        &raw,
+                        &mut hashed,
+                        &mut entries_created,
+                        &mut duplicates,
+                        random,
+                    )
+                    .is_ok()
+                );
 
-                    assert_eq!(duplicates.len(), len as usize - 1);
-                    assert_eq!(hashed.len(), 0);
-                    let single_hashed_raw_inserted = hashed_raw.last().unwrap();
-                    let elem = IndexEntryPlaceInBucket::new(
-                        single_hashed_raw_inserted.0 % index.capacity(),
-                    );
-                    let value = elem.read_value(&index, &data_buckets);
-                    assert_eq!(value, &[raw[single_hashed_raw_inserted.1].1]);
-                    let expected_duplicates = hashed_raw
-                        .iter()
-                        .rev()
-                        .skip(1)
-                        .map(|(_hash, i)| (*i, raw[single_hashed_raw_inserted.1].1))
-                        .collect::<Vec<_>>();
-                    assert_eq!(expected_duplicates, duplicates);
-                }
+                assert_eq!(duplicates.len(), len as usize - 1);
+                assert_eq!(hashed.len(), 0);
+                let single_hashed_raw_inserted = hashed_raw.last().unwrap();
+                let elem =
+                    IndexEntryPlaceInBucket::new(single_hashed_raw_inserted.0 % index.capacity());
+                let value = elem.read_value(&index, &data_buckets);
+                assert_eq!(value, &[raw[single_hashed_raw_inserted.1].1]);
+                let expected_duplicates = hashed_raw
+                    .iter()
+                    .rev()
+                    .skip(1)
+                    .map(|(_hash, i)| (*i, raw[single_hashed_raw_inserted.1].1))
+                    .collect::<Vec<_>>();
+                assert_eq!(expected_duplicates, duplicates);
             }
         }
     }
 
     #[test]
     fn batch_insert_non_duplicates_internal_simple() {
-        for try_to_reuse_disk_data in [false, true] {
-            // add 2 entries, make sure they are added in the buckets we expect
-            let random = 1;
-            let data_buckets = Vec::default();
-            for v in 10..12u64 {
-                for len in 1..3 {
-                    let raw = (0..len)
-                        .map(|l| {
-                            let k = Pubkey::from([l as u8; 32]);
-                            (k, v + (l as u64))
-                        })
-                        .collect::<Vec<_>>();
-                    let mut hashed = Bucket::index_entries(&raw, random);
-                    let hashed_raw = hashed.clone();
+        // add 2 entries, make sure they are added in the buckets we expect
+        let random = 1;
+        let data_buckets = Vec::default();
+        for v in 10..12u64 {
+            for len in 1..3 {
+                let raw = (0..len)
+                    .map(|l| {
+                        let k = Pubkey::from([l as u8; 32]);
+                        (k, v + (l as u64))
+                    })
+                    .collect::<Vec<_>>();
+                let mut hashed = Bucket::index_entries(&raw, random);
+                let hashed_raw = hashed.clone();
 
-                    let mut index = create_test_index(None);
+                let mut index = create_test_index(None);
 
-                    let mut duplicates = Vec::default();
-                    let mut entries_created = 0;
-                    assert!(
-                        Bucket::<u64>::batch_insert_non_duplicates_internal(
-                            &mut index,
-                            &Vec::default(),
-                            &raw,
-                            &mut hashed,
-                            &mut entries_created,
-                            &mut duplicates,
-                            try_to_reuse_disk_data,
-                        )
-                        .is_ok()
-                    );
+                let mut duplicates = Vec::default();
+                let mut entries_created = 0;
+                assert!(
+                    Bucket::<u64>::batch_insert_non_duplicates_internal(
+                        &mut index,
+                        &Vec::default(),
+                        &raw,
+                        &mut hashed,
+                        &mut entries_created,
+                        &mut duplicates,
+                        random,
+                    )
+                    .is_ok()
+                );
 
-                    assert_eq!(hashed.len(), 0);
-                    (0..len).for_each(|i| {
-                        let raw2 = hashed_raw[i];
-                        let elem = IndexEntryPlaceInBucket::new(raw2.0 % index.capacity());
-                        let value = elem.read_value(&index, &data_buckets);
-                        assert_eq!(value, &[raw[hashed_raw[i].1].1]);
-                    });
-                }
+                assert_eq!(hashed.len(), 0);
+                (0..len).for_each(|i| {
+                    let raw2 = hashed_raw[i];
+                    let elem = IndexEntryPlaceInBucket::new(raw2.0 % index.capacity());
+                    let value = elem.read_value(&index, &data_buckets);
+                    assert_eq!(value, &[raw[hashed_raw[i].1].1]);
+                });
             }
         }
-    }
-
-    #[test]
-    fn batch_insert_non_duplicates_internal_same_ix_exceeds_max_search() {
-        for try_to_reuse_disk_data in [false, true] {
-            // add `len` entries with the same ix, make sure they are added in subsequent buckets.
-            // adjust `max_search`. If we try to add an entry that causes us to exceed `max_search`, then assert that the adding fails with an error and
-            // the colliding item remains in `entries`
-            let random = 1;
-            let data_buckets = Vec::default();
-            for max_search in [2usize, 3] {
-                for v in 10..12u64 {
-                    for len in 1..(max_search + 1) {
-                        let raw = (0..len)
-                            .map(|l| {
-                                // +1 because pubkey[0,0,...] matches default contents of index file
-                                let k = Pubkey::from([(l + 1) as u8; 32]);
-                                (k, v + (l as u64))
-                            })
-                            .collect::<Vec<_>>();
-                        let mut hashed = Bucket::index_entries(&raw, random);
-                        let common_ix = 2; // both are put at same ix
-                        hashed.iter_mut().for_each(|v| {
-                            v.0 = common_ix;
-                        });
-                        let hashed_raw = hashed.clone();
-
-                        let mut index = create_test_index(Some(max_search as u8));
-
-                        let mut duplicates = Vec::default();
-                        let mut entries_created = 0;
-                        let result = Bucket::<u64>::batch_insert_non_duplicates_internal(
-                            &mut index,
-                            &Vec::default(),
-                            &raw,
-                            &mut hashed,
-                            &mut entries_created,
-                            &mut duplicates,
-                            try_to_reuse_disk_data,
-                        );
-
-                        assert_eq!(
-                            hashed.len(),
-                            if len > max_search { 1 } else { 0 },
-                            "len: {len}"
-                        );
-                        (0..len).for_each(|i| {
-                            assert!(if len > max_search {
-                                result.is_err()
-                            } else {
-                                result.is_ok()
-                            });
-                            let raw2 = hashed_raw[i];
-                            if i == 0 && len > max_search {
-                                // max search was exceeded and the first entry was unable to be inserted, so it remained in `hashed`
-                                assert_eq!(hashed[0], hashed_raw[0]);
-                            } else {
-                                // we insert in reverse order when ix values are equal, so we expect to find item[1] in item[1]'s expected ix and item[0] will be 1 search distance away from expected ix
-                                let search_required = (len - i - 1) as u64;
-                                let elem = IndexEntryPlaceInBucket::new(
-                                    (raw2.0 + search_required) % index.capacity(),
-                                );
-                                let value = elem.read_value(&index, &data_buckets);
-                                assert_eq!(value, &[raw[hashed_raw[i].1].1]);
-                            }
-                        });
-                    }
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn test_occupy_if_matches() {
-        let random = 1;
-        let k = Pubkey::from([1u8; 32]);
-        let k2 = Pubkey::from([2u8; 32]);
-        let v = 12u64;
-        let v2 = 13u64;
-        let raw = vec![(k, v)];
-        let hashed = Bucket::index_entries(&raw, random);
-        let hashed_raw = hashed.clone();
-
-        let mut index = create_test_index(None);
-
-        let single_hashed_raw_inserted = hashed_raw.last().unwrap();
-        let elem = IndexEntryPlaceInBucket::new(single_hashed_raw_inserted.0 % index.capacity());
-
-        assert_eq!(elem.get_slot_count_enum(&index), OccupiedEnum::Free);
-        elem.init(&mut index, &k);
-        elem.set_slot_count_enum_value(&mut index, OccupiedEnum::OneSlotInIndex(&v));
-        assert_eq!(
-            elem.get_slot_count_enum(&index),
-            OccupiedEnum::OneSlotInIndex(&v)
-        );
-        // clear it
-        elem.set_slot_count_enum_value(&mut index, OccupiedEnum::Free);
-        assert_eq!(elem.get_slot_count_enum(&index), OccupiedEnum::Free);
-
-        assert_eq!(
-            elem.occupy_if_matches(&mut index, &v, &k),
-            OccupyIfMatches::SuccessfulInit
-        );
-        assert_eq!(
-            elem.get_slot_count_enum(&index),
-            OccupiedEnum::OneSlotInIndex(&v)
-        );
-        // clear it
-        elem.set_slot_count_enum_value(&mut index, OccupiedEnum::Free);
-        assert_eq!(elem.get_slot_count_enum(&index), OccupiedEnum::Free);
-
-        // v2 but will still write it
-        assert_eq!(
-            elem.occupy_if_matches(&mut index, &v2, &k),
-            OccupyIfMatches::SuccessfulInit
-        );
-        assert_eq!(
-            elem.get_slot_count_enum(&index),
-            OccupiedEnum::OneSlotInIndex(&v2)
-        );
-
-        // already a different occupied value for this pubkey in the index, so found duplicate
-        assert_eq!(
-            elem.occupy_if_matches(&mut index, &v, &k),
-            OccupyIfMatches::FoundDuplicate
-        );
-        assert_eq!(
-            elem.get_slot_count_enum(&index),
-            OccupiedEnum::OneSlotInIndex(&v2)
-        );
-
-        // k2 is pubkey mismatch
-        assert_eq!(
-            elem.occupy_if_matches(&mut index, &v, &k2),
-            OccupyIfMatches::PubkeyMismatch
-        );
-
-        // clear it
-        elem.set_slot_count_enum_value(&mut index, OccupiedEnum::Free);
-        assert_eq!(elem.get_slot_count_enum(&index), OccupiedEnum::Free);
-
-        // k2 is pubkey mismatch
-        assert_eq!(
-            elem.occupy_if_matches(&mut index, &v, &k2),
-            OccupyIfMatches::PubkeyMismatch
-        );
-    }
-
-    #[test]
-    #[should_panic(expected = "index asked to insert the same data twice")]
-    fn test_occupy_if_matches_panic() {
-        let random = 1;
-        let k = Pubkey::from([1u8; 32]);
-        let v = 12u64;
-        let raw = vec![(k, v)];
-        let hashed = Bucket::index_entries(&raw, random);
-        let hashed_raw = hashed.clone();
-
-        let mut index = create_test_index(None);
-
-        let single_hashed_raw_inserted = hashed_raw.last().unwrap();
-        let elem = IndexEntryPlaceInBucket::new(single_hashed_raw_inserted.0 % index.capacity());
-
-        assert_eq!(elem.get_slot_count_enum(&index), OccupiedEnum::Free);
-        elem.init(&mut index, &k);
-        elem.set_slot_count_enum_value(&mut index, OccupiedEnum::OneSlotInIndex(&v));
-        assert_eq!(
-            elem.get_slot_count_enum(&index),
-            OccupiedEnum::OneSlotInIndex(&v)
-        );
-
-        assert_eq!(
-            elem.occupy_if_matches(&mut index, &v, &k),
-            OccupyIfMatches::SuccessfulInit
-        );
-        assert_eq!(
-            elem.get_slot_count_enum(&index),
-            OccupiedEnum::OneSlotInIndex(&v)
-        );
     }
 
     #[should_panic(expected = "batch insertion can only occur prior to any deletes")]
@@ -1598,5 +1076,94 @@ mod tests {
         let ix2 = Bucket::<()>::bucket_index_ix(&PUBKEY, RANDOM2);
         assert_eq!(ix2, Bucket::<()>::bucket_index_ix(&PUBKEY, RANDOM2));
         assert_ne!(ix2, ix1);
+    }
+
+    fn new_test_bucket(tmpdir: &tempfile::TempDir, max_search: MaxSearch) -> Bucket<u64> {
+        Bucket::new(
+            Arc::new(vec![tmpdir.path().to_path_buf()]),
+            max_search,
+            Arc::default(),
+            Arc::default(),
+            RestartableBucket::default(),
+        )
+    }
+
+    /// Asserts every occupied entry is within `max_search` of its home, and that each run of
+    /// occupied entries is in order of the entries' home slots
+    fn assert_robin_hood_order(bucket: &Bucket<u64>) {
+        let index = &bucket.index;
+        let capacity = index.capacity();
+        let distance = |ix: u64| {
+            let key = IndexEntryPlaceInBucket::<u64>::new(ix).key(index);
+            let home = Bucket::<u64>::home_ix(key, bucket.random, capacity);
+            Bucket::<u64>::distance_from_home(home, ix, capacity)
+        };
+        for ix in 0..capacity {
+            if index.is_free(ix) {
+                continue;
+            }
+            let distance_here = distance(ix);
+            assert!(distance_here < index.max_search(), "{ix}: {distance_here}");
+            if distance_here > 0 {
+                let prev = (ix + capacity - 1) % capacity;
+                assert!(!index.is_free(prev), "hole before {ix}");
+                assert!(distance(prev) + 1 >= distance_here, "{ix} is out of order");
+            }
+        }
+    }
+
+    #[test]
+    fn test_robin_hood_matches_hashmap() {
+        let tmpdir = tempdir().unwrap();
+        let mut bucket = new_test_bucket(&tmpdir, 8);
+        let mut expected = std::collections::HashMap::<Pubkey, Vec<u64>>::default();
+        let mut rng = rand::rng();
+        let keys: Vec<_> = (0..2000).map(|_| Pubkey::new_unique()).collect();
+        for round in 0..20_000u64 {
+            let key = keys[rng.random_range(0..keys.len())];
+            match rng.random_range(0..10) {
+                // delete
+                0..3 => {
+                    bucket.delete_key(&key);
+                    expected.remove(&key);
+                }
+                // insert or update, sometimes with a multi-slot value that lives in a data bucket
+                _ => {
+                    let len = if rng.random_range(0..4) == 0 { 3 } else { 1 };
+                    let value: Vec<_> = (0..len).map(|i| round * 10 + i).collect();
+                    bucket.insert(&key, &value);
+                    expected.insert(key, value);
+                }
+            }
+            if round % 1000 == 0 {
+                assert_robin_hood_order(&bucket);
+            }
+        }
+        assert_robin_hood_order(&bucket);
+        for key in &keys {
+            assert_eq!(
+                bucket.read_value(key),
+                expected.get(key).map(Vec::as_slice),
+                "{key}"
+            );
+        }
+        assert_eq!(
+            bucket.index.count.load(Ordering::Relaxed),
+            expected.len() as u64
+        );
+    }
+
+    #[test]
+    fn test_robin_hood_fill() {
+        let tmpdir = tempdir().unwrap();
+        let mut bucket = new_test_bucket(&tmpdir, 32);
+        let num_keys = 200_000;
+        for i in 0..num_keys {
+            bucket.insert(&Pubkey::new_unique(), &[i]);
+        }
+        assert_robin_hood_order(&bucket);
+        let fill = num_keys as f64 / bucket.index.capacity() as f64;
+        // linear probing within a 32 entry window grows at about half full
+        assert!(fill > 0.7, "fill: {fill}");
     }
 }
