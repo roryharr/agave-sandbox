@@ -237,12 +237,17 @@ impl<O: BucketOccupied> BucketStorage<O> {
         count: Arc<AtomicU64>,
     ) -> Option<Self> {
         let offset = Self::get_offset_to_first_data();
-        let num_elems = std::fs::metadata(&path)
-            .ok()
-            .map(|metadata| metadata.len().saturating_sub(offset) / elem_size)?;
+        let file_len = std::fs::metadata(&path).ok()?.len();
+        let num_elems = file_len.saturating_sub(offset) / elem_size;
         if num_elems == 0 {
             return None;
         }
+        // Every entry is rewritten at startup, so drop the old contents but keep the size (and so
+        // the capacity). The pages become holes that fault in as zeros instead of reads from disk.
+        let file = OpenOptions::new().write(true).open(&path).ok()?;
+        file.set_len(0).ok()?;
+        file.set_len(file_len).ok()?;
+        drop(file);
         let mmap = Self::map_open_file(&path, false, 0, &stats)?;
         Some(Self {
             path,
@@ -704,9 +709,8 @@ mod test {
             .unwrap();
             assert_eq!(storage.capacity(), expected_capacity);
             assert_eq!(len, storage.mmap.len());
-            (0..expected_capacity as usize).for_each(|i| {
-                assert_eq!(storage.mmap[i], (i % 256) as u8);
-            });
+            // the old contents are dropped
+            assert!(storage.mmap.iter().all(|byte| *byte == 0));
             (0..num_elems).for_each(|ix| {
                 // all should be marked as free
                 assert!(storage.is_free(ix));

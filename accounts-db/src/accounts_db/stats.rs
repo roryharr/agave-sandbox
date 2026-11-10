@@ -367,8 +367,6 @@ pub struct ShrinkStats {
     pub bytes_removed: AtomicU64,
     pub bytes_written: AtomicU64,
     pub skipped_shrink: AtomicU64,
-    pub index_scan_returned_none: AtomicU64,
-    pub index_scan_returned_some: AtomicU64,
     pub obsolete_accounts_filtered: AtomicU64,
     pub accounts_loaded: AtomicU64,
     pub initial_candidates_count: AtomicU64,
@@ -433,16 +431,6 @@ impl ShrinkStats {
                 (
                     "obsolete_accounts_filtered",
                     self.obsolete_accounts_filtered.swap(0, Ordering::Relaxed),
-                    i64
-                ),
-                (
-                    "index_scan_returned_none",
-                    self.index_scan_returned_none.swap(0, Ordering::Relaxed),
-                    i64
-                ),
-                (
-                    "index_scan_returned_some",
-                    self.index_scan_returned_some.swap(0, Ordering::Relaxed),
                     i64
                 ),
                 (
@@ -568,20 +556,6 @@ impl ShrinkAncientStats {
                 "num_slots_shrunk",
                 self.shrink_stats
                     .num_slots_shrunk
-                    .swap(0, Ordering::Relaxed),
-                i64
-            ),
-            (
-                "index_scan_returned_none",
-                self.shrink_stats
-                    .index_scan_returned_none
-                    .swap(0, Ordering::Relaxed),
-                i64
-            ),
-            (
-                "index_scan_returned_some",
-                self.shrink_stats
-                    .index_scan_returned_some
                     .swap(0, Ordering::Relaxed),
                 i64
             ),

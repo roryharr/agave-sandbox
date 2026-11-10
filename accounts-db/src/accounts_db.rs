@@ -770,9 +770,6 @@ pub struct AccountsDb {
     /// read storages with direct I/O when generating the index
     use_direct_io: bool,
 
-    /// index scan filtering for shrinking
-    scan_filter_for_shrinking: ScanFilter,
-
     /// this will live here until the feature for partitioned epoch rewards is activated.
     /// At that point, this and other code can be deleted.
     pub partitioned_epoch_rewards_config: PartitionedEpochRewardsConfig,
@@ -897,7 +894,6 @@ impl AccountsDb {
             write_cache_limit_bytes: accounts_db_config.write_cache_limit_bytes,
             partitioned_epoch_rewards_config: accounts_db_config.partitioned_epoch_rewards_config,
             verify_index: accounts_db_config.verify_index,
-            scan_filter_for_shrinking: accounts_db_config.scan_filter_for_shrinking,
             thread_pool_background,
             active_stats: ActiveStats::default(),
             storage: AccountStorage::default(),
@@ -1743,54 +1739,6 @@ impl AccountsDb {
         );
     }
 
-    /// verify via the accounts index that every account in `accounts` is alive in `slot_to_shrink`
-    fn verify_accounts_index_for_shrink(
-        &self,
-        accounts: &[AccountFromStorage],
-        stats: &ShrinkStats,
-        slot_to_shrink: Slot,
-    ) {
-        if self.accounts_index.is_disk_index_enabled()
-            && self.scan_filter_for_shrinking == ScanFilter::OnlyAbnormal
-        {
-            // OnlyAbnormal checks only in-mem entries; with no in-mem layer, it would read every
-            // account from disk just to check it
-            return;
-        }
-        let mut index_scan_returned_some_count = 0;
-        let mut index_scan_returned_none_count = 0;
-        self.accounts_index.scan(
-            accounts.iter().map(|account| account.pubkey()),
-            |_pubkey, slot_list| {
-                if let Some(slot_list) = slot_list {
-                    index_scan_returned_some_count += 1;
-                    let is_alive = slot_list.iter().any(|(slot, _acct_info)| {
-                        // if the accounts index contains an entry at this slot, then the append vec we're asking about contains this item and thus, it is alive at this slot
-                        *slot == slot_to_shrink
-                    });
-
-                    // All obsolete and tombstones have been filtered. Account MUST be alive in this slot
-                    assert!(is_alive);
-                } else {
-                    // getting None here means the account is 'normal' and was written to disk.
-                    index_scan_returned_none_count += 1;
-                }
-            },
-            self.scan_filter_for_shrinking,
-        );
-        // the scan must have called back once per account
-        assert_eq!(
-            index_scan_returned_some_count + index_scan_returned_none_count,
-            accounts.len() as u64
-        );
-        stats
-            .index_scan_returned_some
-            .fetch_add(index_scan_returned_some_count, Ordering::Relaxed);
-        stats
-            .index_scan_returned_none
-            .fetch_add(index_scan_returned_none_count, Ordering::Relaxed);
-    }
-
     /// get all accounts in all the storages passed in
     /// for duplicate pubkeys, the account with the highest write_value is returned
     pub fn get_unique_accounts_from_storage(
@@ -1904,8 +1852,6 @@ impl AccountsDb {
         stats
             .obsolete_accounts_filtered
             .fetch_add(num_obsolete_filtered as u64, Ordering::Relaxed);
-
-        self.verify_accounts_index_for_shrink(stored_accounts, stats, slot);
 
         index_read_elapsed.stop();
 
